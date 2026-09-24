@@ -16,6 +16,7 @@
 #include "bluetooth/ch582f_ajazz.h"   /* HC_CONN readout + fault injection */
 #include "watchdog.h"                 /* boot reset cause for HC_CONN */
 #include "indicators.h"               /* battery_is_absent for HC_CONN */
+#include "battery.h"                  /* VDD for HC_CONN */
 
 // Apply a 7-byte time payload to the RTC:
 //   [0]=year-2000 [1]=month [2]=day [3]=weekday [4]=hour [5]=min [6]=sec
@@ -355,7 +356,12 @@ enum {
      *   [.., .., HC_CONN, conn_state, target_slot, battery, module_flags]
      * module_flags bit0 = connected, bit1 = pairing, bit2 = usb mode.
      * Exists so host scripts (and the CH582F fault-injection tests) can
-     * assert link state without eyeballing the panel. */
+     * assert link state without eyeballing the panel.
+     * Then [7] boot RSTST, [8..11] RTC periods, and the battery (all u16 LE):
+     *   [12..13] VDD mV, filtered   [14..15] last raw AIN16 code
+     *   [16..17] VDD min mV         [18..19] VDD max mV (since boot)
+     *   [20] charger pins: bit0 = CHRG level, bit1 = STDBY level (both
+     *        active low)            [21] the module's lowest `5C` since boot */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -546,6 +552,17 @@ static void health_command(uint8_t *data, uint8_t length) {
                 uint16_t lp = (uint16_t)rtc_get_period();
                 data[8]  = (uint8_t)(sp & 0xFF); data[9]  = (uint8_t)(sp >> 8);
                 data[10] = (uint8_t)(lp & 0xFF); data[11] = (uint8_t)(lp >> 8);
+            }
+            {
+                uint16_t w[4] = {battery_vdd_mv(), battery_vdd_raw(),
+                                 battery_vdd_min_mv(), battery_vdd_max_mv()};
+                for (uint8_t i = 0; i < 4; i++) {
+                    data[12 + 2 * i] = (uint8_t)(w[i] & 0xFF);
+                    data[13 + 2 * i] = (uint8_t)(w[i] >> 8);
+                }
+                data[20] = (gpio_read_pin(CHARGE_CHRG_PIN)  ? 1 : 0) |
+                           (gpio_read_pin(CHARGE_STDBY_PIN) ? 2 : 0);
+                data[21] = ch582_battery_min();
             }
             break;
         case HC_RTC:

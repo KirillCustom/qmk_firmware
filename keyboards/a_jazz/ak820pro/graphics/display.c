@@ -15,6 +15,7 @@
 #include "kb_eeconfig.h"   /* persisted backlight level (phase 4) */
 #include "ak820pro.h"      /* LOOP_SITE profiler (LOOPGAP_INSTRUMENT) */
 #include "indicators.h"   /* charge_is_charging + battery_is_absent */
+#include "battery.h"      /* VDD for the debug page */
 /* Also included further down beside the connection-state code, which is where
  * it historically lived; #pragma once makes the duplicate free. Hoisted because
  * the Fn+D debug page sits above that point and reads the battery and TX
@@ -859,26 +860,29 @@ static void dbg_compose(void) {
     if (sent) { p = dbg_append(p, " "); p = dbg_u32(p, (to * 100u) / sent); dbg_append(p, "%"); }
     dbg_row(7, "BT T/O", v);   /* "352 49%" */
 
-    /* batt / min. The module is the only thing that can read the cell and we
-     * print its number verbatim -- almost certainly a voltage estimate, and
-     * lithium voltage is flat through the middle of the curve. A min still
-     * reading 100 after weeks of use is the cheapest evidence that the number
-     * tracks nothing. "-" means the module has not answered at all, which the
-     * level alone cannot show: it holds its last value forever. */
-    uint8_t batt = ch582_get_battery();
-    uint8_t bmin = ch582_battery_min();
-    /* Widest case is "battery" + "100% min 100" = 7 + 12 = 19 of 21 columns, so
-     * the label cannot collide with the value. The % goes on the live level
-     * only; once that names the unit, "min 100" is unambiguous and the second
-     * one would cost a column for nothing. */
-    /* "none" is the presence verdict, not a level: no pack fitted (indicators.c).
-     * It reads before the min, because when it fires the min is meaningless. */
+    /* The module's percent, then VDD from the SN32's own ADC (battery.c). The
+     * module's number held 100 through a full discharge (2026-09-24), which is
+     * what the "min" that used to sit here was built to catch; the min is
+     * still on HC_CONN. The voltage is the reading to trust. "-" means the
+     * module has not answered at all: it holds its last value forever. */
+    uint8_t  batt = ch582_get_battery();
+    uint16_t mv   = battery_vdd_mv();
+    /* Widest case is "Battery" + "100% 3.912V" = 7 + 11 = 18 of 21 columns. */
+    /* "none" is the presence verdict, not a level: no pack fitted (indicators.c). */
     if (battery_is_absent()) {
         dbg_row(8, "Battery", "none");
     } else {
         p = (batt <= 100) ? dbg_append(dbg_u32(v, batt), "%") : dbg_append(v, "--");
-        p = dbg_append(p, " min ");
-        if (bmin <= 100) dbg_u32(p, bmin); else dbg_append(p, "-");
+        if (mv) {
+            uint16_t frac = mv % 1000u;
+            p = dbg_append(p, " ");
+            p = dbg_u32(p, mv / 1000u);
+            p = dbg_append(p, ".");
+            if (frac < 100u) p = dbg_append(p, "0");
+            if (frac < 10u)  p = dbg_append(p, "0");
+            p = dbg_u32(p, frac);
+            dbg_append(p, "V");
+        }
         dbg_row(8, "Battery", v);
     }
 }

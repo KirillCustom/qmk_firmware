@@ -24,6 +24,7 @@
 #include "consumer_mod.h"
 #include "param_overlay.h"
 #include "indicators.h"
+#include "battery.h"
 
 void early_hardware_init_post(void) {
     // Configure SPI0 pins for the LCD panel. SEL0 is left UNMUXED: our bare-metal bus
@@ -62,6 +63,9 @@ void early_hardware_init_post(void) {
     // Set up GPIO pins for the charging status inputs
     gpio_set_pin_input_high(CHARGE_CHRG_PIN);   // input with pull-up
     gpio_set_pin_input_high(CHARGE_STDBY_PIN);  // input with pull-up
+
+    // VDD measurement: the SN32 ADC's internal reference against VDD.
+    battery_init();
 
     // Restore persisted config, then re-select the saved BT slot if the
     // slider booted in the BT position (dip_switch_init ran before EEPROM
@@ -565,6 +569,7 @@ void housekeeping_task_kb(void) {
 #endif
 
         LOOP_SITE(LOOP_SITE_LEDS,     update_leds());
+        LOOP_SITE(LOOP_SITE_BATT,     battery_task());        // one ~11 us VDD conversion
         LOOP_SITE(LOOP_SITE_PAIR,     bt_pair_hold_task());   // hold-to-pair fires under the finger, not on release
         LOOP_SITE(LOOP_SITE_PAIR,     dbg_hold_task());       // hold-Fn+D resets the health counters
         LOOP_SITE(LOOP_SITE_CONSUMER, modified_consumer_task());  // drop held mods once a knob spin stops
