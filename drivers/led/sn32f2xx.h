@@ -84,6 +84,11 @@ void sn32f2xx_set_color_all(uint8_t r, uint8_t g, uint8_t b);
  * current draw from it. Main-thread only, like sn32f2xx_set_color(). */
 uint32_t sn32f2xx_led_load(void);
 
+/* Scale every LED's output by scale/256 (255 = unscaled) below the rgb_matrix
+ * config: dim or darken the matrix without touching the user's brightness.
+ * Takes effect as the next frame renders. Main-thread only. */
+void sn32f2xx_set_power_scale(uint8_t scale);
+
 /* Turn every LED output off and leave it off. Call before stopping the row
  * ISR, or the mux freezes with one row/channel driving at full duty. */
 void sn32f2xx_blank(void);

@@ -864,10 +864,25 @@ void sn32f2xx_flush(void) {
     }
 }
 
+/* Board power scale, 255 = as requested. Applied here, below the rgb_matrix
+ * config, so a board can dim or darken the matrix to save power without
+ * touching the user's brightness (or its EEPROM copy). No divide: this runs
+ * for every channel of every LED on every frame, on a core without one. */
+static uint8_t power_scale = 255;
+
+void sn32f2xx_set_power_scale(uint8_t scale) {
+    power_scale = scale;
+}
+
 void sn32f2xx_set_color(int index, uint8_t r, uint8_t g, uint8_t b) {
     uint8_t color_r = r * SN32F2XX_LED_OUTPUT_LUMINOSITY_R;
     uint8_t color_g = g * SN32F2XX_LED_OUTPUT_LUMINOSITY_G;
     uint8_t color_b = b * SN32F2XX_LED_OUTPUT_LUMINOSITY_B;
+    if (power_scale != 255) {
+        color_r = (uint8_t)(((uint16_t)color_r * (power_scale + 1u)) >> 8);
+        color_g = (uint8_t)(((uint16_t)color_g * (power_scale + 1u)) >> 8);
+        color_b = (uint8_t)(((uint16_t)color_b * (power_scale + 1u)) >> 8);
+    }
 
 #ifdef UNDERGLOW_RBG
     bool flip_gb = false;

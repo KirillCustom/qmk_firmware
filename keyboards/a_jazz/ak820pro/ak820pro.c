@@ -25,6 +25,7 @@
 #include "param_overlay.h"
 #include "indicators.h"
 #include "battery.h"
+#include "power.h"
 
 void early_hardware_init_post(void) {
     // Configure SPI0 pins for the LCD panel. SEL0 is left UNMUXED: our bare-metal bus
@@ -570,6 +571,7 @@ void housekeeping_task_kb(void) {
 
         LOOP_SITE(LOOP_SITE_LEDS,     update_leds());
         LOOP_SITE(LOOP_SITE_BATT,     battery_task());        // one ~11 us VDD conversion
+        LOOP_SITE(LOOP_SITE_BATT,     power_task());          // idle ladder, battery only
         LOOP_SITE(LOOP_SITE_PAIR,     bt_pair_hold_task());   // hold-to-pair fires under the finger, not on release
         LOOP_SITE(LOOP_SITE_PAIR,     dbg_hold_task());       // hold-Fn+D resets the health counters
         LOOP_SITE(LOOP_SITE_CONSUMER, modified_consumer_task());  // drop held mods once a knob spin stops

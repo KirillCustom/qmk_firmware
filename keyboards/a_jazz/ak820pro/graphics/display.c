@@ -185,13 +185,19 @@ _Static_assert(sizeof(bkl_duty) == 24, "brightness UI documents 24 levels (0..23
 
 static volatile uint8_t bkl_level = DISPLAY_BRIGHTNESS_DEFAULT;
 static volatile uint8_t bkl_phase = 0;
+/* Power-save ceiling on the level (power.c), BKL_NO_CAP when off. A cap, not a
+ * setting: the user's level, and its EEPROM copy, stay where they were. */
+#define BKL_NO_CAP 0xFFu
+static volatile uint8_t bkl_cap = BKL_NO_CAP;
 
 /* ISR context, called from pwm_tick_cb() in ak820pro.c -- the CT16B3/GPTD4 20 kHz
  * tick, which ak820pro.c owns because the indicator LEDs share it. Full and zero
  * duty are handled without toggling so a static backlight is not switched
  * needlessly. */
 void display_backlight_tick(void) {
-    uint8_t duty = display_powered ? bkl_duty[bkl_level] : 0;
+    uint8_t level = bkl_level;
+    if (bkl_cap < level) level = bkl_cap;
+    uint8_t duty = display_powered ? bkl_duty[level] : 0;
 
     if (duty >= BKL_PWM_TICKS) {
         gpio_write_pin(PANEL_BKL, 1);
@@ -226,6 +232,10 @@ void display_set_brightness(uint8_t level) {
      * what persist. (The old "never persist" rule predated the
      * backing_store_pre_write_hook + coalesced-deferred-write machinery that
      * now makes a settled write safe -- phase 4.2.) */
+}
+
+void display_set_backlight_cap(uint8_t cap) {
+    bkl_cap = cap;
 }
 
 void display_brightness_up(void) {

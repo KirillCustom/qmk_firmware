@@ -30,6 +30,9 @@ void    display_backlight_tick(void);
 
 uint8_t display_get_brightness(void);
 void    display_set_brightness(uint8_t level);
+/* Power-save ceiling on the backlight level, 0xFF for none; 0 turns the
+ * backlight off. Does not change or persist the user's level. */
+void    display_set_backlight_cap(uint8_t cap);
 void    display_brightness_up(void);
 void    display_brightness_down(void);
 

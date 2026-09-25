@@ -36,6 +36,7 @@ SRC += consumer_mod.c # modified-consumer endpoint-ordering sequencer
 SRC += param_overlay.c # RGB hold-to-repeat + parameter readout overlay
 SRC += indicators.c  # Caps/WinLock/Charging PWM, 20 kHz tick, lock states
 SRC += battery.c     # VDD from the SN32 ADC (AIN16 against VDD)
+SRC += power.c       # idle ladder on battery: dim, lights off, screen off
 SRC += hid_protocol.c # raw-HID channels 0x10-0x13 + VIA/non-VIA dispatch
 VPATH += bluetooth
 VPATH += graphics
