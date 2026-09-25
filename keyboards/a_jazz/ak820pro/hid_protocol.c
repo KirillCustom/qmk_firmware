@@ -361,7 +361,9 @@ enum {
      *   [12..13] VDD mV, filtered   [14..15] last raw AIN16 code
      *   [16..17] VDD min mV         [18..19] VDD max mV (since boot)
      *   [20] charger pins: bit0 = CHRG level, bit1 = STDBY level (both
-     *        active low)            [21] the module's lowest `5C` since boot */
+     *        active low)            [21] the module's lowest `5C` since boot
+     *   [22] s since the module's last `5C` (255 = stale or never)
+     *   [23] battery_flags() (BATT_F_* in battery.c) */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -384,6 +386,15 @@ enum {
     HC_GET5        = 0x08, /* retained watchdog operation; watchdog_record.h */
     HC_GET6        = 0x09, /* crash-hunt vitals, protocol >= 7; health.h */
     HC_CONN        = 0x02,
+    /* Battery log (battery.c), once a minute, 12 h: [.., .., HC_BATTLOG,
+     * idx_lo, idx_hi] -> [.., .., HC_BATTLOG, count u16, idx u16, ms since
+     * the newest entry u32, two 8-byte entries from idx (0 = oldest)]. */
+    HC_BATTLOG     = 0x0A,
+    /* Low-battery thresholds, RAM only: [.., .., HC_BATTCFG, op, warn u16,
+     * cut u16] with op 0 = read, 1 = set (0 mV disables either) ->
+     * [.., .., HC_BATTCFG, op, warn u16, cut u16, lights_cut, warned,
+     * log period s u16]. */
+    HC_BATTCFG     = 0x0B,
     /* Clock-sync status (PLAN.md 3.7): [.., .., HC_RTC, page] ->
      *   [.., .., HC_RTC, page, block...]
      * page 1 = the 21-byte RTC_GET_TIME[11..31] tail at [4..24];
@@ -563,6 +574,21 @@ static void health_command(uint8_t *data, uint8_t length) {
                 data[20] = (gpio_read_pin(CHARGE_CHRG_PIN)  ? 1 : 0) |
                            (gpio_read_pin(CHARGE_STDBY_PIN) ? 2 : 0);
                 data[21] = ch582_battery_min();
+                uint32_t age = ch582_battery_age_ms();
+                data[22] = (age == UINT32_MAX || age / 1000u > 254u) ? 255u : (uint8_t)(age / 1000u);
+                data[23] = battery_flags();
+            }
+            break;
+        case HC_BATTLOG:
+            if (length >= 32) battery_log_read((uint16_t)(data[3] | (data[4] << 8)), &data[3]);
+            break;
+        case HC_BATTCFG:
+            if (length >= 32) {
+                uint8_t  op = data[3];
+                uint16_t w  = (uint16_t)(data[4] | (data[5] << 8));
+                uint16_t c  = (uint16_t)(data[6] | (data[7] << 8));
+                data[3] = op;
+                battery_cfg(op, w, c, &data[4]);
             }
             break;
         case HC_RTC:
