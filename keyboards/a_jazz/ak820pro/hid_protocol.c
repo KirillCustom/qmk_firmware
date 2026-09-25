@@ -363,7 +363,10 @@ enum {
      *   [20] charger pins: bit0 = CHRG level, bit1 = STDBY level (both
      *        active low)            [21] the module's lowest `5C` since boot
      *   [22] s since the module's last `5C` (255 = stale or never)
-     *   [23] battery_flags() (BATT_F_* in battery.c) */
+     *   [23] battery_flags() (BATT_F_* in battery.c)
+     *   [24..25] estimated level, 0.01 % (0xFFFF unknown)
+     *   [26..27] learned regulator output mV   [28..29] LED drive, per mille
+     *   [30] battery_state() */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -387,8 +390,10 @@ enum {
     HC_GET6        = 0x09, /* crash-hunt vitals, protocol >= 7; health.h */
     HC_CONN        = 0x02,
     /* Battery log (battery.c), once a minute, 12 h: [.., .., HC_BATTLOG,
-     * idx_lo, idx_hi] -> [.., .., HC_BATTLOG, count u16, idx u16, ms since
-     * the newest entry u32, two 8-byte entries from idx (0 = oldest)]. */
+     * idx_lo, idx_hi] -> [.., .., HC_BATTLOG, version (2), count u16, idx
+     * u16, ms since the newest entry u32, the 12-byte entry at idx (0 =
+     * oldest)]. Version 1 (b35d8672b3) had no version byte and two 8-byte
+     * entries. */
     HC_BATTLOG     = 0x0A,
     /* Low-battery thresholds, RAM only: [.., .., HC_BATTCFG, op, warn u16,
      * cut u16] with op 0 = read, 1 = set (0 mV disables either) ->
@@ -577,6 +582,12 @@ static void health_command(uint8_t *data, uint8_t length) {
                 uint32_t age = ch582_battery_age_ms();
                 data[22] = (age == UINT32_MAX || age / 1000u > 254u) ? 255u : (uint8_t)(age / 1000u);
                 data[23] = battery_flags();
+                uint16_t e[3] = {battery_soc_x100(), battery_clamp_mv(), battery_led_pm()};
+                for (uint8_t i = 0; i < 3; i++) {
+                    data[24 + 2 * i] = (uint8_t)(e[i] & 0xFF);
+                    data[25 + 2 * i] = (uint8_t)(e[i] >> 8);
+                }
+                data[30] = (uint8_t)battery_state();
             }
             break;
         case HC_BATTLOG:

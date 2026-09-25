@@ -1393,17 +1393,25 @@ static void draw_battery(bool force) {
     static uint16_t last_txt_x = PANEL_WIDTH;  /* where the percent text starts   */
     static uint16_t last_txt_w = 0;            /* ...and how wide it is            */
     static bool     last_absent = false;       /* no pack fitted: cross, no number */
-    static uint16_t last_tkey  = 0xFFFE;       /* what the text slot says, as a key */
+    static char     last_txt[8] = "\x01";      /* what the text slot says ("\x01": never drawn) */
 
-    /* The level and the voltage come from the SN32's own VDD (battery.c), not
-     * the CH582F's `5C`, which read 100 through a full discharge. On USB power
-     * VDD is USB-derived and says nothing about the pack, so the bar comes down
-     * and the slot says "USB". The level is a generic lithium curve applied to
-     * VDD -- provisional until task 8.1 measures the real relationship -- so
-     * the slot shows the voltage itself, not a percentage. */
-    uint8_t  batt   = battery_level_pct();     /* 0xFF: on USB power or no reading */
-    uint16_t cv     = battery_display_cv();    /* centivolts, hysteresis inside */
-    bool     on_usb = cv != 0 && !battery_on_battery();
+    /* The level is battery.c's estimate, not the CH582F's `5C`, which read 100
+     * through a full discharge: 100 when the charger terminates, a countdown
+     * from the LED load while the regulator hides the pack, then the voltage.
+     * When nothing is known yet (booted on USB, charger idle) the bar stays
+     * down and the slot says what is known instead. */
+    battery_state_t st   = battery_state();
+    uint8_t         batt = (st == BATTERY_STATE_FULL) ? 100u : battery_level_pct();   /* 0xFF unknown */
+    char            txt[8];
+    if (batt <= 100)                     snprintf(txt, sizeof(txt), (st == BATTERY_STATE_FULL) ? "Full" : "%u%%", batt);
+    else if (st == BATTERY_STATE_CHARGING) snprintf(txt, sizeof(txt), "Chrg");
+    else if (st == BATTERY_STATE_USB)      snprintf(txt, sizeof(txt), "USB");
+    else if (st == BATTERY_STATE_BATTERY) {
+        uint16_t cv = battery_display_cv();
+        snprintf(txt, sizeof(txt), "%u.%02uV", (unsigned)(cv / 100u), (unsigned)(cv % 100u));
+    } else {
+        txt[0] = '\0';
+    }
     bool    chrg   = charge_is_charging();
     /* Latches false-to-true at most once per boot (indicators.c), so this costs
      * one repaint, not a flicker. */
@@ -1418,17 +1426,17 @@ static void draw_battery(bool force) {
     // Charging state changes the bolt, so it has to retrigger a redraw as well
     // -- the level alone is not enough. Same for presence: it owns the same rect
     // as the bolt and suppresses the number.
-    uint16_t tkey = absent ? 0xFFFF : on_usb ? 1u : cv;   /* 0 = nothing to say yet */
-    if (!force && batt == last_batt && chrg == last_chrg && absent == last_absent &&
-        tkey == last_tkey) return;
+    if (absent) snprintf(txt, sizeof(txt), "No Batt");
+    bool same_txt = strcmp(txt, last_txt) == 0;
+    if (!force && batt == last_batt && chrg == last_chrg && absent == last_absent && same_txt) return;
     bool level_changed  = force || batt != last_batt;
     bool chrg_changed   = force || chrg != last_chrg;
     bool absent_changed = force || absent != last_absent;
-    bool text_changed   = force || tkey != last_tkey;
+    bool text_changed   = force || !same_txt;
     last_batt   = batt;
     last_chrg   = chrg;
     last_absent = absent;
-    last_tkey   = tkey;
+    memcpy(last_txt, txt, sizeof(last_txt));
 
     /* Repaint only what moved. This used to clear the whole 128x22 strip -- a
      * 5.6 KB DMA, ~7.6 ms with the main loop parked -- on every percent tick
@@ -1469,27 +1477,25 @@ static void draw_battery(bool force) {
         else if (chrg) draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
     }
 
-    if (batt > 100 || absent) {
-        /* No level to fill: on USB power (VDD is USB-derived, batt 0xFF), no
-         * reading yet, or no pack at all -- where drawing "0%" next to the
-         * cross would state a flat battery and a missing one in the same
-         * breath. The bar comes down; the slot carries a label, or nothing. */
-        if (last_fw) {
-            lcd_clear_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_W, BATT_IN_H);
-            last_fw = 0;
-        }
-        if (!text_changed) return;
-        if (absent) {
-            /* Name the condition rather than leaving the slot empty. The cross
-             * says something is wrong with the battery; the words say what, and
-             * "No Batt" at 10px/cell is 70px against the 78px between the cross
-             * and the bezel margin -- it fits with 7px to spare. */
-            draw_batt_slot("No Batt", &last_txt_x, &last_txt_w);
-        } else if (on_usb) {
-            draw_batt_slot("USB", &last_txt_x, &last_txt_w);
+    /* The text slot: the level, a state word, the voltage while the level is
+     * unknown on battery, or -- with no pack -- "No Batt", which at 10px/cell
+     * is 70px against the 78px between the cross and the bezel margin. */
+    if (text_changed) {
+        if (txt[0]) {
+            draw_batt_slot(txt, &last_txt_x, &last_txt_w);
         } else if (last_txt_w) {
             lcd_clear_rect(last_txt_x, STATUS_Y, last_txt_w, lcd_font_height(FONT_STATUS));
             last_txt_x = PANEL_WIDTH; last_txt_w = 0;
+        }
+    }
+
+    if (batt > 100 || absent) {
+        /* No level to fill: nothing known yet, or no pack at all -- where a
+         * "0%" bar next to the cross would state a flat battery and a missing
+         * one in the same breath. The bar comes down. */
+        if (last_fw) {
+            lcd_clear_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_W, BATT_IN_H);
+            last_fw = 0;
         }
         return;
     }
@@ -1510,12 +1516,6 @@ static void draw_battery(bool force) {
             lcd_fill_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_X0 + fw - 1, BATT_IN_Y1, col);
         }
         last_fw = fw;
-    }
-
-    if (text_changed) {
-        char bbuf[8];
-        snprintf(bbuf, sizeof(bbuf), "%u.%02uV", (unsigned)(cv / 100u), (unsigned)(cv % 100u));
-        draw_batt_slot(bbuf, &last_txt_x, &last_txt_w);
     }
 }
 

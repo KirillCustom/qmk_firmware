@@ -906,6 +906,14 @@ void sn32f2xx_set_color_all(uint8_t r, uint8_t g, uint8_t b) {
     }
 }
 
+uint32_t sn32f2xx_led_load(void) {
+    uint32_t sum = 0;
+    for (int i = 0; i < SN32F2XX_LED_COUNT; i++) {
+        sum += (uint32_t)led_state_buf[i].r + led_state_buf[i].g + led_state_buf[i].b;
+    }
+    return sum;
+}
+
 #if defined(SHARED_MATRIX)
 bool matrix_scan_custom(matrix_row_t current_matrix[]) {
     if (!matrix_scanned) return false; // Nothing to process until we have the matrix scanned

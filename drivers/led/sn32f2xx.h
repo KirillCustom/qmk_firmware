@@ -79,6 +79,11 @@ void sn32f2xx_flush(void);
 void sn32f2xx_set_color(int index, uint8_t r, uint8_t g, uint8_t b);
 void sn32f2xx_set_color_all(uint8_t r, uint8_t g, uint8_t b);
 
+/* Sum of every LED channel's requested PWM value, 0 .. LED_COUNT * 3 * 255.
+ * Proportional to the matrix's average drive, so a board can estimate its
+ * current draw from it. Main-thread only, like sn32f2xx_set_color(). */
+uint32_t sn32f2xx_led_load(void);
+
 /* Turn every LED output off and leave it off. Call before stopping the row
  * ISR, or the mux freezes with one row/channel driving at full duty. */
 void sn32f2xx_blank(void);
