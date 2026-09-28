@@ -54,6 +54,8 @@ uint8_t ch582_get_battery(void);
 uint8_t  ch582_battery_min(void);
 /* ms since the last 5C frame; UINT32_MAX if there has never been one. */
 uint32_t ch582_battery_age_ms(void);
+/* 5C frames received since boot, wrapping: a change is a new report. */
+uint16_t ch582_battery_reports(void);
 /* Host LED bitmap last reported by the module (USB LED bits; bit1 = caps). From 5A frames. */
 uint8_t ch582_get_host_leds(void);
 

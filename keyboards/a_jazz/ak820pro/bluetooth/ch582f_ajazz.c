@@ -206,7 +206,10 @@ static uint16_t         last_battery_poll = 0;
 /* Battery observability (debug page). battery_level alone cannot distinguish
  * "the module says 100%" from "the module has never answered", because the
  * 0xFF initial value is masked by the d <= 100 guard on the way in. */
-static uint16_t         battery_last_recv = 0;
+/* 32-bit: a 16-bit timestamp read through timer_elapsed() wraps every 65.5 s,
+ * so a module that had gone silent looked fresh again once a minute. */
+static uint32_t         battery_last_recv = 0;
+static uint16_t         battery_reports   = 0;   /* 5C frames received, wrapping */
 static bool             battery_seen      = false;
 static uint8_t          battery_min       = 100;
 
@@ -722,11 +725,18 @@ uint8_t ch582_battery_min(void) {
     return battery_seen ? battery_min : 0xFF;
 }
 
-/* Milliseconds since the last 5C frame, saturating at 0xFFFF. UINT32_MAX if the
- * module has never sent one -- the caller must not render that as an age. */
+/* Milliseconds since the last 5C frame. UINT32_MAX if the module has never sent
+ * one -- the caller must not render that as an age. */
 uint32_t ch582_battery_age_ms(void) {
     if (!battery_seen) return UINT32_MAX;
-    return timer_elapsed(battery_last_recv);
+    return timer_elapsed32(battery_last_recv);
+}
+
+/* Count of 5C frames received since boot, wrapping. A change means a NEW
+ * report, even when it repeats the last value -- which is what a filter needs:
+ * re-reading ch582_get_battery() only duplicates the one it already has. */
+uint16_t ch582_battery_reports(void) {
+    return battery_reports;
 }
 
 uint8_t ch582_get_host_leds(void) {
@@ -1054,7 +1064,8 @@ void ch582_task(void) {
                             * even while disconnected) -> do NOT touch connection state */
                     if (d <= 100) {
                         battery_level     = d;
-                        battery_last_recv = timer_read();
+                        battery_last_recv = timer_read32();
+                        battery_reports++;
                         battery_seen      = true;
                         /* Lowest ever seen, for the debug page. The module is the
                          * only thing that can read the cell, and we have no idea
