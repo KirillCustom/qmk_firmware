@@ -3,10 +3,13 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
-/* The idle ladder: on battery, step down through progressively lower power
+/* Power caps below the user's settings. The idle ladder (compiled in only with
+ * POWER_LADDER_ENABLE): on battery, step down through progressively lower power
  * states as the board sits unused, and restore everything on the next keypress
- * or knob turn. On USB power nothing changes. See power.c. */
+ * or knob turn. The lights cut: the low-battery protection's RGB-off, held
+ * here so it composes with the ladder. See power.c. */
 
 typedef enum {
     POWER_STAGE_ACTIVE = 0,
@@ -15,7 +18,11 @@ typedef enum {
     POWER_STAGE_SCREEN_OFF,   /* RGB dark, screen backlight off */
 } power_stage_t;
 
-/* 10 Hz housekeeping. */
+/* 10 Hz housekeeping. A no-op unless POWER_LADDER_ENABLE. */
 void power_task(void);
 
 power_stage_t power_stage(void);
+
+/* RGB off as a cap, whatever the ladder or the user's toggle says. */
+void power_set_lights_cut(bool cut);
+bool power_lights_cut(void);

@@ -238,6 +238,12 @@ void display_set_backlight_cap(uint8_t cap) {
     bkl_cap = cap;
 }
 
+uint8_t display_backlight_effective(void) {
+    uint8_t level = bkl_level;
+    if (bkl_cap < level) level = bkl_cap;
+    return display_powered ? level : 0;
+}
+
 void display_brightness_up(void) {
     if (bkl_level < BKL_MAX_LEVEL) display_set_brightness(bkl_level + 1);
     kb_eeconfig_set_lcd_brightness(bkl_level);
@@ -870,19 +876,32 @@ static void dbg_compose(void) {
     if (sent) { p = dbg_append(p, " "); p = dbg_u32(p, (to * 100u) / sent); dbg_append(p, "%"); }
     dbg_row(7, "BT T/O", v);   /* "352 49%" */
 
-    /* The module's percent, then VDD from the SN32's own ADC (battery.c). The
-     * module's number held 100 through a full discharge (2026-09-24), which is
-     * what the "min" that used to sit here was built to catch; the min is
-     * still on HC_CONN. The voltage is the reading to trust. "-" means the
-     * module has not answered at all: it holds its last value forever. */
+    /* Three readings, kept apart because they mean different things:
+     *   - the module's last `5C` ("--" once it is 20 s stale: the module holds
+     *     its last value forever);
+     *   - the PACK in mV, from battery.c's median of recent reports -- or the
+     *     clamp's bound, ">4036" at 100 and "<3161" at 0, never a number;
+     *   - VDD, the SN32's rail. On battery that is a buck-boost's output pinned
+     *     at ~3.90 V: it says which supply is on, not how full the pack is.
+     * "59 3677 3.901V". Widest: "Batt" + "100 >4036 4.790V" = 4 + 16 of 21. */
     uint8_t  batt = ch582_get_battery();
+    uint32_t age  = ch582_battery_age_ms();
+    uint8_t  med  = battery_5c_median();
+    uint16_t pk   = battery_pack_mv();
     uint16_t mv   = battery_vdd_mv();
-    /* Widest case is "Battery" + "100% 3.912V" = 7 + 11 = 18 of 21 columns. */
     /* "none" is the presence verdict, not a level: no pack fitted (indicators.c). */
     if (battery_is_absent()) {
-        dbg_row(8, "Battery", "none");
+        dbg_row(8, "Batt", "none");
     } else {
-        p = (batt <= 100) ? dbg_append(dbg_u32(v, batt), "%") : dbg_append(v, "--");
+        p = (batt <= 100 && age < 20000u) ? dbg_u32(v, batt) : dbg_append(v, "--");
+        p = dbg_append(p, " ");
+        if (!pk) {
+            p = dbg_append(p, "--");
+        } else {
+            if (med == 100u) p = dbg_append(p, ">");
+            if (med == 0u)   p = dbg_append(p, "<");
+            p = dbg_u32(p, pk);
+        }
         if (mv) {
             uint16_t frac = mv % 1000u;
             p = dbg_append(p, " ");
@@ -893,7 +912,7 @@ static void dbg_compose(void) {
             p = dbg_u32(p, frac);
             dbg_append(p, "V");
         }
-        dbg_row(8, "Battery", v);
+        dbg_row(8, "Batt", v);
     }
 }
 
@@ -1405,23 +1424,20 @@ static void draw_battery(bool force) {
     static bool     last_absent = false;       /* no pack fitted: cross, no number */
     static char     last_txt[8] = "\x01";      /* what the text slot says ("\x01": never drawn) */
 
-    /* The level is battery.c's estimate, not the CH582F's `5C`, which read 100
-     * through a full discharge: 100 when the charger terminates, a countdown
-     * from the LED load while the regulator hides the pack, then the voltage.
-     * When nothing is known yet (booted on USB, charger idle) the bar stays
-     * down and the slot says what is known instead. */
+    /* The level is battery.c's, from the CH582F's `5C` -- a voltmeter on the
+     * pack -- in 5% steps. Never VDD, which this row used to show: on battery
+     * it is a buck-boost's output, pinned at 3.90 V, as informative as the
+     * stock firmware's hardcoded 100. "Low" at the bottom rather than a "0%"
+     * that reads as dead while the board still runs. When nothing is known
+     * yet the bar stays down and the slot says what is known instead. */
     battery_state_t st   = battery_state();
-    uint8_t         batt = (st == BATTERY_STATE_FULL) ? 100u : battery_level_pct();   /* 0xFF unknown */
+    uint8_t         batt = battery_level_pct();   /* 0xFF unknown */
     char            txt[8];
-    if (batt <= 100)                     snprintf(txt, sizeof(txt), (st == BATTERY_STATE_FULL) ? "Full" : "%u%%", batt);
-    else if (st == BATTERY_STATE_CHARGING) snprintf(txt, sizeof(txt), "Chrg");
-    else if (st == BATTERY_STATE_USB)      snprintf(txt, sizeof(txt), "USB");
-    else if (st == BATTERY_STATE_BATTERY) {
-        uint16_t cv = battery_display_cv();
-        snprintf(txt, sizeof(txt), "%u.%02uV", (unsigned)(cv / 100u), (unsigned)(cv % 100u));
-    } else {
-        txt[0] = '\0';
-    }
+    if (batt == 0 && st == BATTERY_STATE_BATTERY) snprintf(txt, sizeof(txt), "Low");
+    else if (batt <= 100)                         snprintf(txt, sizeof(txt), "%u%%", batt);
+    else if (st == BATTERY_STATE_CHARGING)        snprintf(txt, sizeof(txt), "Chrg");
+    else if (st == BATTERY_STATE_USB || st == BATTERY_STATE_FULL) snprintf(txt, sizeof(txt), "USB");
+    else txt[0] = '\0';
     bool    chrg   = charge_is_charging();
     /* Latches false-to-true at most once per boot (indicators.c), so this costs
      * one repaint, not a flicker. */
@@ -1487,8 +1503,8 @@ static void draw_battery(bool force) {
         else if (chrg) draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
     }
 
-    /* The text slot: the level, a state word, the voltage while the level is
-     * unknown on battery, or -- with no pack -- "No Batt", which at 10px/cell
+    /* The text slot: the level, "Low", a state word while the level is
+     * unknown, or -- with no pack -- "No Batt", which at 10px/cell
      * is 70px against the 78px between the cross and the bezel margin. */
     if (text_changed) {
         if (txt[0]) {

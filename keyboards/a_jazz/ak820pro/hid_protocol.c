@@ -361,12 +361,16 @@ enum {
      *   [12..13] VDD mV, filtered   [14..15] last raw AIN16 code
      *   [16..17] VDD min mV         [18..19] VDD max mV (since boot)
      *   [20] charger pins: bit0 = CHRG level, bit1 = STDBY level (both
-     *        active low)            [21] the module's lowest `5C` since boot
+     *        active low)
+     *   [21] median of the recent fresh `5C` reports (0xFF none)
      *   [22] s since the module's last `5C` (255 = stale or never)
      *   [23] battery_flags() (BATT_F_* in battery.c)
-     *   [24..25] estimated level, 0.01 % (0xFFFF unknown)
-     *   [26..27] learned regulator output mV   [28..29] LED drive, per mille
-     *   [30] battery_state() */
+     *   [24..25] the level, per mille (0xFFFF unknown)
+     *   [26..27] pack mV from that median (0 none; at a median of 0 or 100,
+     *            the clamp's bound)      [28..29] LED drive, per mille
+     *   [30] battery_state()
+     *   [31] BATTERY_PROTO_VERSION: this layout is 3. Older firmware leaves
+     *        the host's own byte here (0). */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -578,16 +582,17 @@ static void health_command(uint8_t *data, uint8_t length) {
                 }
                 data[20] = (gpio_read_pin(CHARGE_CHRG_PIN)  ? 1 : 0) |
                            (gpio_read_pin(CHARGE_STDBY_PIN) ? 2 : 0);
-                data[21] = ch582_battery_min();
+                data[21] = battery_5c_median();
                 uint32_t age = ch582_battery_age_ms();
                 data[22] = (age == UINT32_MAX || age / 1000u > 254u) ? 255u : (uint8_t)(age / 1000u);
                 data[23] = battery_flags();
-                uint16_t e[3] = {battery_soc_x100(), battery_clamp_mv(), battery_led_pm()};
+                uint16_t e[3] = {battery_level_permille(), battery_pack_mv(), battery_led_pm()};
                 for (uint8_t i = 0; i < 3; i++) {
                     data[24 + 2 * i] = (uint8_t)(e[i] & 0xFF);
                     data[25 + 2 * i] = (uint8_t)(e[i] >> 8);
                 }
                 data[30] = (uint8_t)battery_state();
+                data[31] = BATTERY_PROTO_VERSION;
             }
             break;
         case HC_BATTLOG:

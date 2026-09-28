@@ -1,22 +1,28 @@
 // Copyright 2026 JD Lien
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* The idle ladder. See power.h.
+/* The power caps: the idle ladder, and the low-battery lights cut. See power.h.
  *
  * Why: nothing ever turned anything off. The RGB matrix and the LCD backlight
  * ran at the user's settings for as long as the board had power, touched or
- * not, and the MCU never sleeps (config.h, CORTEX_ENABLE_WFI_IDLE). The lights
- * are most of the draw, so they go first.
+ * not, and the MCU never sleeps (config.h, CORTEX_ENABLE_WFI_IDLE).
  *
  * Every stage is a CAP below the user's settings, never a change to them: the
  * RGB through the driver's power scale (sn32f2xx_set_power_scale), the screen
  * through a backlight ceiling (display_set_backlight_cap). So nothing reaches
  * the EEPROM, VIA's view of the lighting is unchanged, and the parameter
- * overlay -- which polls the rgb_matrix config -- does not fire.
+ * overlay -- which polls the rgb_matrix config -- does not fire. It is also why
+ * the low-battery cut lives here: as a cap, the user's own RGB toggle cannot
+ * turn the lights back on underneath it, which rgb_matrix_disable_noeeprom()
+ * allowed.
  *
- * Battery only, judged by VDD (battery_on_battery): with the cable in, the
- * board draws from USB and stays exactly as configured. The wake is the
- * keypress itself, which also types as normal; the lights follow within one
- * 10 Hz tick.
+ * ⚠️ The idle ladder is COMPILED OUT unless POWER_LADDER_ENABLE is defined.
+ * It changes the load as the board sits idle, which would corrupt the battery
+ * calibration run (plans/BATTERY-GAUGE-PLAN.md), and which of its stages pays
+ * for itself is unmeasured. The lights cut is always built.
+ *
+ * Ladder, when enabled: battery only (battery_on_battery), so with the cable in
+ * the board stays exactly as configured. The wake is the keypress itself, which
+ * also types as normal; the lights follow within one 10 Hz tick.
  *
  * Deep sleep -- stopping the row ISR and sleeping the MCU -- is the next stage
  * and not here yet: key scanning lives in that ISR, so it needs a wake path of
@@ -40,31 +46,43 @@
 #define SCREEN_DIM_LEVEL    4u   /* of the 0..23 backlight levels; a ceiling */
 #define BACKLIGHT_NO_CAP 0xFFu
 
-static power_stage_t stage = POWER_STAGE_ACTIVE;
+static power_stage_t stage      = POWER_STAGE_ACTIVE;
+static bool          lights_cut = false;
 
-static void apply(power_stage_t s) {
-    switch (s) {
+static void apply(void) {
+    uint8_t scale = 255, cap = BACKLIGHT_NO_CAP;
+    switch (stage) {
         case POWER_STAGE_ACTIVE:
-            sn32f2xx_set_power_scale(255);
-            display_set_backlight_cap(BACKLIGHT_NO_CAP);
             break;
         case POWER_STAGE_DIM:
-            sn32f2xx_set_power_scale(DIM_SCALE);
-            display_set_backlight_cap(BACKLIGHT_NO_CAP);
+            scale = DIM_SCALE;
             break;
         case POWER_STAGE_LIGHTS_OFF:
-            sn32f2xx_set_power_scale(0);
-            display_set_backlight_cap(SCREEN_DIM_LEVEL);
+            scale = 0;
+            cap   = SCREEN_DIM_LEVEL;
             break;
         case POWER_STAGE_SCREEN_OFF:
-            sn32f2xx_set_power_scale(0);
-            display_set_backlight_cap(0);
+            scale = 0;
+            cap   = 0;
             break;
     }
-    stage = s;
+    if (lights_cut) scale = 0;
+    sn32f2xx_set_power_scale(scale);
+    display_set_backlight_cap(cap);
+}
+
+void power_set_lights_cut(bool cut) {
+    if (cut == lights_cut) return;
+    lights_cut = cut;
+    apply();
+}
+
+bool power_lights_cut(void) {
+    return lights_cut;
 }
 
 void power_task(void) {
+#ifdef POWER_LADDER_ENABLE
     power_stage_t want = POWER_STAGE_ACTIVE;
     if (battery_on_battery()) {
         uint32_t idle = last_input_activity_elapsed();
@@ -76,7 +94,11 @@ void power_task(void) {
             want = POWER_STAGE_DIM;
         }
     }
-    if (want != stage) apply(want);
+    if (want != stage) {
+        stage = want;
+        apply();
+    }
+#endif
 }
 
 power_stage_t power_stage(void) {

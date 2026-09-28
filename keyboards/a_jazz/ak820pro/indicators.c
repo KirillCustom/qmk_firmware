@@ -5,7 +5,8 @@
 #include "indicators.h"
 #include "ak820pro.h"   /* the shared layer enum for FN_LAYER_MASK */
 #include "graphics/display.h"
-#include "bluetooth/ch582f_ajazz.h"   /* usb_mode + the module's battery level */
+#include "bluetooth/ch582f_ajazz.h"   /* the module's battery level */
+#include "battery.h"                  /* battery_ran_from_pack */
 #include <hal.h>
 
 /* --- Indicator LEDs -------------------------------------------------------
@@ -206,10 +207,11 @@ bool charge_is_charging(void) {
 bool battery_is_absent(void) {
     /* A pack we have already proved exists. */
     if (cell_seen) return false;
-    /* Not on USB power means the slider is in a wireless position, where the
-     * MCU runs FROM the pack (the slider is a power-source switch, see
-     * docs/hardware.md) -- so a running board proves the pack is there. */
-    if (!ch582_is_usb()) return false;
+    /* The board has run from the pack this boot, so there is one. This used to
+     * be "the slider is not in the cable position", but USB powers the board
+     * in the BT position too, so a pack-less board on USB in BT never said
+     * "No Batt" (codex review of the gauge plan, 2026-09-28). */
+    if (battery_ran_from_pack()) return false;
     /* The module still reports something above empty: not our case. 0xFF is
      * "has not answered yet", which is also not a verdict we can make. */
     if (ch582_get_battery() != 0) return false;

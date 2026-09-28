@@ -1,41 +1,37 @@
 // Copyright 2026 JD Lien
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Battery: VDD from the SN32's own ADC, a level estimate built on it, the
- * low-battery protection, and a once-a-minute log. See battery.h.
+/* Battery: what powers the board, the pack voltage from the CH582F's `5C`, the
+ * level on the panel, the low-battery protection, and a log. See battery.h,
+ * docs/battery.md, and plans/BATTERY-GAUGE-PLAN.md for the evidence and the
+ * review behind every number here.
  *
- * Why this exists: the CH582F's `5C` battery percentage held 100 through a
- * whole discharge at full RGB brightness, until the board browned out, and
- * still read 100 six minutes into recharging the flat pack (2026-09-24). It is
- * not a level. It is not nothing either -- a board with no pack fitted reads 0
- * (indicators.c) -- so the module does sense the pack, but its number
- * saturates across the range we have seen.
+ * Two signals, each used only for what it can say.
  *
- * The SN32 cannot see the pack through a pin. AIN0..AIN15 are P2.0..P2.15 and
- * every one is a matrix column, an RGB row or the Win Lock LED; the op-amp and
- * comparator inputs are RGB rows, the flash's WP, the encoder and the BOOT pin.
- * The stock firmware never touches the ADC, the comparator or the op-amps
- * either (no reference to their base addresses in v1.13 or v1.14, nor in seven
- * sibling SN32F290 boards): stock's battery gauge was the module's number.
- * What the SN32 can see is its own VDD, by converting the internal 2.0 V
- * reference (AIN16) against VDD as the reference high.
+ * VDD, from the SN32's own ADC. On battery it is a BUCK-BOOST's output, pinned
+ * at ~3.90 V while the pack falls 4.18 -> 3.30 V, so it says nothing about the
+ * pack (an earlier level estimator built on it, 36be68f16a, is gone for that
+ * reason). It does say which supply feeds the rail: ~3.90 V from the pack,
+ * never under 4.1 V from USB (4.12-4.30 V charging, 4.47 V in the BT position,
+ * 4.79 V in the cable position). With the charger's CHRG pin it answers "on
+ * battery?".
  *
- * And VDD is REGULATED on battery. Measured 2026-09-24/25 with a meter at the
- * pack connector: pack 4.18 V, VDD 3.90 V; then the pack fell to 4.13 V over
- * 50 minutes at full RGB while VDD did not move off 3.90. So VDD says nothing
- * while the pack is above the regulator's output plus its dropout, and follows
- * the pack below that. Hence the estimator below.
+ * `5C`, the module's battery percent, is a LINEAR VOLTMETER on the pack:
+ * 5C = 114.22 * V - 361.04, r2 0.99987 over five meter points 3.30-3.84 V
+ * (history/battery-2026-09-25/readings.csv). It clamps at 100 above ~4.036 V
+ * and at 0 below ~3.161 V, both extrapolated. It arrives every 5 s, in reply to
+ * the A6 53 poll. It answers "how full?".
  *
- * Accuracy: the 2.0 V reference is 1.96-2.04 V, so the absolute reading is
- * good to +-2% (about +-80 mV at 4 V). The error is a fixed gain per part.
- *
- * Cost: one conversion per 10 Hz tick, ~11 us with interrupts masked. The mask
- * is caution, not a known need: with the global channel enabled the datasheet
- * hands "the ADC shared pins" to the ADC, and those are the matrix and RGB
- * pins. It is almost certainly only the selected pin, and AIN16 has none, but
- * masking keeps the row ISR from ever sampling the matrix inside that window. */
+ * VDD measurement: the internal 2.0 V reference (AIN16) converted against VDD
+ * as the reference high, VDD = 2.0 V * 4096 / code. The reference is 1.96-2.04 V,
+ * so the absolute reading is good to +-2%, a fixed gain per part. One conversion
+ * per 10 Hz tick, ~11 us with interrupts masked. The mask is caution, not a
+ * known need: with the global channel enabled the datasheet hands "the ADC
+ * shared pins" to the ADC, and those are the matrix and RGB pins. It is almost
+ * certainly only the selected pin, and AIN16 has none, but masking keeps the
+ * row ISR from ever sampling the matrix inside that window. */
 #include "quantum.h"
 #include "battery.h"
-#include "indicators.h"
+#include "power.h"
 #include "bluetooth/ch582f_ajazz.h"
 #include "graphics/display.h"
 #include "drivers/led/sn32f2xx.h"
@@ -69,29 +65,25 @@
 #define VDD_MIN_MV 2000u
 #define VDD_MAX_MV 6000u
 
-/* EMA in mV * 64, alpha 1/16: a ~1.6 s time constant at 10 Hz, which smooths
- * the RGB field's load ripple without hiding a real sag. */
+/* EMA in mV * 64, alpha 1/16: a ~1.6 s time constant at 10 Hz. For display and
+ * HC_CONN only -- the supply decision uses raw samples with its own dwell. */
 #define EMA_SHIFT 4
 #define EMA_SCALE 64
-/* A USB <-> battery handover moves VDD by ~0.6 V at once, and sliding the EMA
- * across it walked the level bar through every value in between. Three
- * samples in a row this far from the filter reseed it instead. */
+/* A USB <-> battery handover moves VDD by ~0.6 V at once. Three samples in a
+ * row this far from the filter reseed it instead of sliding across. */
 #define SNAP_MV      300u
 #define SNAP_SAMPLES 3u
 
-/* Above this VDD the board is on USB power: 4.47 V in BT with the cable in,
- * 4.79 V in the cable position, while a lithium cell tops out at 4.2 V. */
-#define ON_USB_MIN_MV 4300u
-
-/* Status bits (HC_CONN byte 23 and each log entry). */
-#define BATT_F_ON_BATTERY 0x01u   /* VDD says the pack is powering the board */
-#define BATT_F_CHARGING   0x02u   /* charger CHRG pin active (low) */
-#define BATT_F_DONE       0x04u   /* charger STDBY/DONE pin active (low) */
+/* Status bits (HC_CONN byte 23 and each log entry). ON_BATTERY and EXTERNAL are
+ * the supply decision; neither set means UNKNOWN (boot, before the dwell). */
+#define BATT_F_ON_BATTERY 0x01u   /* supply: the pack powers the board */
+#define BATT_F_CHARGING   0x02u   /* charger CHRG pin low, raw */
+#define BATT_F_DONE       0x04u   /* charger STDBY/DONE pin low, raw (never seen) */
 #define BATT_F_RGB_ON     0x08u
-#define BATT_F_LIGHTS_CUT 0x10u   /* the low-battery protection turned RGB off */
+#define BATT_F_LIGHTS_CUT 0x10u   /* the low-battery protection's RGB cap is on */
 #define BATT_F_SLIDER_USB 0x20u   /* mode slider in the cable position */
 #define BATT_F_LINKED     0x40u   /* module reports a live connection */
-#define BATT_F_CLAMPED    0x80u   /* on battery with VDD at the regulator's output */
+#define BATT_F_EXTERNAL   0x80u   /* supply: USB powers the board */
 
 static bool     adc_ready  = false;
 static uint16_t last_raw   = 0;
@@ -99,7 +91,6 @@ static uint32_t ema_x64    = 0;      /* 0 = no sample yet */
 static uint8_t  snap_run   = 0;
 static uint16_t vdd_min    = 0;
 static uint16_t vdd_max    = 0;
-static uint16_t shown_cv   = 0;      /* battery_display_cv()'s held value */
 
 void battery_init(void) {
     sys1SelectADCPRE(ADC_PCLK_PRE_DIV4);
@@ -133,205 +124,437 @@ uint16_t battery_vdd_raw(void)    { return last_raw; }
 uint16_t battery_vdd_min_mv(void) { return vdd_min; }
 uint16_t battery_vdd_max_mv(void) { return vdd_max; }
 
-bool battery_on_battery(void) {
-    uint16_t mv = battery_vdd_mv();
-    return mv != 0 && mv < ON_USB_MIN_MV;
-}
-
-uint16_t battery_display_cv(void) {
-    uint16_t mv = battery_vdd_mv();
-    if (mv == 0) return 0;
-    /* Move the shown value only when the filtered reading is 8 mV past it: a
-     * glyph repaint per millivolt of ripple is LCD traffic for nothing. */
-    int32_t diff = (int32_t)mv - (int32_t)shown_cv * 10;
-    if (shown_cv == 0 || diff >= 8 || diff <= -8) shown_cv = (uint16_t)((mv + 5u) / 10u);
-    return shown_cv;
-}
-
-/* --- Pack voltage to level ------------------------------------------------------
- * A generic lithium-ion (LCO/NMC) rest-voltage curve, applied to the PACK
- * voltage (VDD + dropout below the clamp). CAL: replace with the measured
- * discharge once the 2026-09-25 run is in. */
-static const uint16_t curve_mv[]  = {3270, 3610, 3690, 3710, 3730, 3750, 3770, 3790, 3800, 3820,
-                                     3840, 3850, 3870, 3910, 3950, 3980, 4020, 4080, 4110, 4150, 4200};
-static const uint8_t  curve_pct[] = {   0,    5,   10,   15,   20,   25,   30,   35,   40,   45,
-                                       50,   55,   60,   65,   70,   75,   80,   85,   90,   95,  100};
-#define CURVE_N (sizeof(curve_mv) / sizeof(curve_mv[0]))
-
-/* Level in hundredths of a percent, 0..10000. */
-static uint16_t curve_x100(uint16_t pack_mv) {
-    if (pack_mv <= curve_mv[0]) return 0;
-    if (pack_mv >= curve_mv[CURVE_N - 1]) return 10000;
-    for (uint8_t i = 1; i < CURVE_N; i++) {
-        if (pack_mv < curve_mv[i]) {
-            uint32_t span = curve_mv[i] - curve_mv[i - 1];
-            uint32_t into = pack_mv - curve_mv[i - 1];
-            return (uint16_t)(curve_pct[i - 1] * 100u + (into * (curve_pct[i] - curve_pct[i - 1]) * 100u) / span);
-        }
-    }
-    return 10000;
-}
-
-/* --- Level estimator ------------------------------------------------------------
- * Three sources, each used only where it is true:
- *   - the charger stopping with USB in is a true 100%;
- *   - below the clamp, VDD + DROPOUT_MV on the curve above;
- *   - in the clamp, a countdown from the load: a base draw plus the LED drive
- *     (sn32f2xx_led_load(), the sum of every channel's PWM value), floored at
- *     the level where the clamp lets go, which the voltage then takes over.
- * On USB, VDD is USB-derived, so the level holds, creeps up while charging,
- * and jumps to 100 when the charger terminates.
+/* --- Supply: what powers the rail ---------------------------------------------
+ * A state machine, not a threshold. The old predicate (VDD < 4300 mV) flickered
+ * as VDD crept through 4300 in the charge taper, and called a pack charging
+ * hard at VDD 4193 mV "on battery" for four hours (2026-09-28).
  *
- * Every constant marked CAL is a placeholder until the 2026-09-25 discharge
- * (and a lights-off run) replace it. */
-#define SOC_UNKNOWN      0xFFFFu
-#define SOC_FULL         10000u
-#define SOC_CHARGE_CAP   9900u      /* charging never claims 100 before termination */
-#define CLAMP_MV_DEFAULT 3900u      /* measured on JD's unit; learned per unit below */
-#define CLAMP_MV_LO      3700u
-#define CLAMP_MV_HI      4050u
-#define CLAMP_MARGIN_MV  15u        /* this far under the clamp = tracking the pack */
-#define DROPOUT_MV       100u       /* CAL: pack minus VDD just below the clamp */
-/* The pack: "JKJ606090 4000mAh 3.7V 14.8Wh", NMC (Li/Ni/Co/Mn, graphite anode),
- * printed on the cell in JD's unit. Currents below are converted to level per
- * hour through it: 1 mA is 0.025 % per hour. */
-#define PACK_MAH         4000u
-#define DRAW_BASE_MA       45u      /* CAL: MCU + LCD backlight + radio, LEDs dark */
-#define DRAW_LED_FULL_MA  900u      /* CAL: extra at full LED drive (every channel 255) */
-#define CHARGE_MA         800u      /* CAL: average charge current into the pack */
-#define MA_TO_X100_PER_H(ma) ((uint32_t)(ma) * 10000u / PACK_MAH)
-#define DRAIN_BASE_X100_PER_H MA_TO_X100_PER_H(DRAW_BASE_MA)
-#define DRAIN_LED_X100_PER_H  MA_TO_X100_PER_H(DRAW_LED_FULL_MA)
-#define CHARGE_X100_PER_H     MA_TO_X100_PER_H(CHARGE_MA)
-#define CHARGE_CONFIRM_S 3u         /* charging this long, then stopped this long = full */
-#define LED_LOAD_MAX ((uint32_t)RGB_MATRIX_LED_COUNT * 3u * 255u)
+ *   CHRG low on 2 consecutive ticks   -> EXTERNAL evidence, held 1 s past the
+ *                                        last low (covers the charger's ~2 Hz
+ *                                        no-pack pulse). CHRG can only sink
+ *                                        with USB present: a direct observation.
+ *   raw VDD >= 4100 mV for 0.5 s      -> EXTERNAL
+ *   raw VDD <  4000 mV for 1 s,
+ *     with no EXTERNAL evidence       -> BATTERY
+ *   otherwise                         -> keep the previous state
+ *
+ * On battery VDD is ~3.90 V; on USB no raw sample went under 4119 mV across a
+ * 7.5 h charge into a dead pack. ⚠️ The ADC reference is +-2% per part:
+ * re-check both margins on another unit. */
+#define EXT_ENTER_MV       4100u
+#define BATT_ENTER_MV      4000u
+#define EXT_ENTER_TICKS    5u
+#define BATT_ENTER_TICKS   10u
+#define CHRG_QUALIFY_TICKS 2u
+#define CHRG_HOLD_TICKS    10u
+/* Unbroken charging this long is a real charging session: the level may rise,
+ * and a brief plug-in cannot bump it. */
+#define SESSION_TICKS      600u    /* 60 s */
+/* CHRG released this long, on USB, with `5C` at 100: the charger terminated. */
+#define FULL_SETTLE_TICKS  100u    /* 10 s */
 
-static uint16_t soc        = SOC_UNKNOWN;
-static uint16_t clamp_mv   = CLAMP_MV_DEFAULT;
-static uint32_t soc_acc    = 0;     /* sub-0.01 % remainder, in 0.01 %-per-hour-seconds */
-static uint16_t chg_on_s   = 0;     /* this USB session: seconds charging */
-static uint16_t chg_off_s  = 0;     /* ...and seconds since charging stopped */
-static bool     full       = false;
-static uint16_t batt_s     = 0;     /* seconds on battery since the last handover */
-static uint16_t led_pm     = 0;     /* LED drive, per mille of the maximum, last second */
+static battery_supply_t supply        = BATTERY_SUPPLY_UNKNOWN;
+static uint8_t          ext_run       = 0;   /* raw VDD >= EXT_ENTER_MV, ticks */
+static uint8_t          batt_run      = 0;   /* raw VDD <  BATT_ENTER_MV, ticks */
+static uint16_t         chrg_run      = 0;   /* CHRG low, consecutive ticks */
+static uint16_t         chrg_off_run  = 0;   /* CHRG high, consecutive ticks */
+static uint8_t          chrg_hold     = 0;   /* ticks of EXTERNAL evidence left */
+static uint16_t         ext_ticks     = 0;   /* ticks since supply became EXTERNAL */
+static bool             session       = false;
+static bool             ran_from_pack = false;
+/* Set when the board goes onto the pack after a real charging session: the
+ * level re-seats once, from the first post-unplug median (see level_report). */
+static bool             reseat        = false;
 
-static bool clamped(uint16_t mv) {
-    return mv + CLAMP_MARGIN_MV >= clamp_mv;
-}
+static void c5_forget(void);
 
-static uint16_t clamp_floor_x100(void) {
-    return curve_x100((uint16_t)(clamp_mv + DROPOUT_MV));
-}
-
-/* Apply `rate` (0.01 % per hour) for one second, in the direction given. */
-static void soc_step(uint32_t rate, bool up, uint16_t limit) {
-    soc_acc += rate;
-    uint16_t steps = (uint16_t)(soc_acc / 3600u);
-    soc_acc %= 3600u;
-    if (up) {
-        soc = (uint16_t)((soc + steps > limit) ? limit : soc + steps);
+static void supply_tick(uint16_t raw_mv) {
+    bool chrg_low = !gpio_read_pin(CHARGE_CHRG_PIN);
+    if (chrg_low) {
+        if (chrg_run < UINT16_MAX) chrg_run++;
+        chrg_off_run = 0;
     } else {
-        soc = (uint16_t)((soc < limit + steps) ? limit : soc - steps);
+        chrg_run = 0;
+        if (chrg_off_run < UINT16_MAX) chrg_off_run++;
     }
+    if (chrg_run >= CHRG_QUALIFY_TICKS) {
+        chrg_hold = CHRG_HOLD_TICKS;
+    } else if (chrg_hold) {
+        chrg_hold--;
+    }
+
+    /* A failed conversion is no information: the runs hold rather than reset. */
+    if (raw_mv) {
+        ext_run  = (raw_mv >= EXT_ENTER_MV)  ? (uint8_t)(ext_run  < UINT8_MAX ? ext_run  + 1u : ext_run)  : 0u;
+        batt_run = (raw_mv <  BATT_ENTER_MV) ? (uint8_t)(batt_run < UINT8_MAX ? batt_run + 1u : batt_run) : 0u;
+    }
+
+    battery_supply_t was = supply;
+    if (chrg_hold || ext_run >= EXT_ENTER_TICKS) {
+        supply = BATTERY_SUPPLY_EXTERNAL;
+    } else if (batt_run >= BATT_ENTER_TICKS) {
+        supply = BATTERY_SUPPLY_BATTERY;
+    }
+
+    if (supply != was) {
+        ext_ticks = 0;
+        /* Every report in the median was taken on the other supply -- under
+         * charge current, or without it -- so none describes this one. */
+        c5_forget();
+        if (was == BATTERY_SUPPLY_EXTERNAL && supply == BATTERY_SUPPLY_BATTERY && session) reseat = true;
+        if (supply == BATTERY_SUPPLY_EXTERNAL) reseat = false;
+    }
+    if (supply == BATTERY_SUPPLY_BATTERY) {
+        ran_from_pack = true;
+        session       = false;
+    }
+    if (supply == BATTERY_SUPPLY_EXTERNAL && ext_ticks < UINT16_MAX) ext_ticks++;
+    if (chrg_run >= SESSION_TICKS) session = true;
 }
 
-static void estimator_tick(void) {   /* 1 Hz */
-    uint16_t mv = battery_vdd_mv();
-    if (mv == 0) return;
-    led_pm = (uint16_t)((sn32f2xx_led_load() * 1000u) / LED_LOAD_MAX);
+battery_supply_t battery_supply(void) { return supply; }
+bool battery_on_battery(void)         { return supply == BATTERY_SUPPLY_BATTERY; }
+bool battery_ran_from_pack(void)      { return ran_from_pack; }
 
-    if (!battery_on_battery()) {
-        batt_s = 0;
-        if (charge_is_charging()) {
-            if (chg_on_s < 60000u) chg_on_s++;
-            chg_off_s = 0;
-            full      = false;
-            if (soc != SOC_UNKNOWN && soc < SOC_CHARGE_CAP) soc_step(CHARGE_X100_PER_H, true, SOC_CHARGE_CAP);
-        } else {
-            if (chg_off_s < 60000u) chg_off_s++;
-            if (chg_on_s >= CHARGE_CONFIRM_S && chg_off_s >= CHARGE_CONFIRM_S && !full) {
-                full = true;
-                soc  = SOC_FULL;
-            }
+static bool charging_now(void) {
+    return supply == BATTERY_SUPPLY_EXTERNAL && chrg_hold != 0;
+}
+
+/* --- `5C`: intake, freshness, median --------------------------------------------
+ * Fed only when a NEW report arrives (ch582_battery_reports() moved), never by
+ * re-reading the cached value: that would only duplicate the one report it
+ * holds. Median of the last 7, ~35 s at one report per 5 s. Emptied when the
+ * reports go stale, so a module that falls silent and returns is not judged on
+ * minutes-old values. */
+#define C5_RING       7u
+#define C5_MIN_MEDIAN 3u
+#define C5_STALE_MS   20000u    /* four missed polls */
+#define C5_NONE       0xFFu
+
+static uint8_t  c5_ring[C5_RING];
+static uint8_t  c5_count   = 0;
+static uint8_t  c5_pos     = 0;
+static uint16_t c5_seen    = 0;       /* ch582_battery_reports() last consumed */
+static uint8_t  c5_med     = C5_NONE;
+static uint8_t  c5_zero_run = 0;      /* consecutive reports of 0 */
+
+/* The log's view of every report in the period (see log_task). */
+static uint16_t lg_c5_sum = 0;
+static uint8_t  lg_c5_n = 0, lg_c5_min = C5_NONE, lg_c5_max = 0;
+
+/* The median reads c5_ring[0 .. c5_count-1], so writing must restart at 0 too:
+ * resuming at the old c5_pos would sort new reports among forgotten ones. */
+static void c5_forget(void) {
+    c5_count    = 0;
+    c5_pos      = 0;
+    c5_med      = C5_NONE;
+    c5_zero_run = 0;
+}
+
+static bool c5_fresh(void) {
+    uint32_t age = ch582_battery_age_ms();
+    return age != UINT32_MAX && age < C5_STALE_MS;
+}
+
+static uint8_t c5_median_of_ring(void) {
+    uint8_t s[C5_RING];
+    for (uint8_t i = 0; i < c5_count; i++) {
+        uint8_t v = c5_ring[i], j = i;
+        while (j > 0 && s[j - 1] > v) {
+            s[j] = s[j - 1];
+            j--;
         }
+        s[j] = v;
+    }
+    return s[c5_count / 2u];
+}
+
+/* True when a new report was taken this tick. */
+static bool c5_intake(void) {
+    if (!c5_fresh()) c5_forget();
+    uint16_t r = ch582_battery_reports();
+    if (r == c5_seen) return false;
+    c5_seen   = r;
+    uint8_t v = ch582_get_battery();
+    if (v > 100u) return false;
+
+    c5_ring[c5_pos] = v;
+    c5_pos          = (uint8_t)((c5_pos + 1u) % C5_RING);
+    if (c5_count < C5_RING) c5_count++;
+    c5_med      = (c5_count >= C5_MIN_MEDIAN) ? c5_median_of_ring() : C5_NONE;
+    c5_zero_run = (v == 0u) ? (uint8_t)(c5_zero_run < UINT8_MAX ? c5_zero_run + 1u : c5_zero_run) : 0u;
+
+    if (lg_c5_n < UINT8_MAX) {
+        lg_c5_sum += v;
+        lg_c5_n++;
+        if (v < lg_c5_min) lg_c5_min = v;
+        if (v > lg_c5_max) lg_c5_max = v;
+    }
+    return true;
+}
+
+uint8_t battery_5c_median(void) {
+    return c5_fresh() ? c5_med : C5_NONE;
+}
+
+/* --- `5C` -> pack millivolts ---------------------------------------------------
+ * mV = (5C + 361.04) / 114.22 * 1000, integer. ⚠️ Valid for 1..99. At 0 and
+ * 100 this returns the clamp's BOUND (3161, 4036): "at most" and "at least",
+ * which the callers treat as such -- never as a reading, never on the curve. */
+#define FIT_SLOPE_X100  11422u      /* 114.22 counts per volt */
+#define FIT_OFFSET_X100 36104u      /* 361.04 counts */
+
+static uint16_t c5_to_mv(uint8_t c) {
+    return (uint16_t)(((uint32_t)c * 100000u + (uint32_t)FIT_OFFSET_X100 * 1000u + FIT_SLOPE_X100 / 2u) /
+                      FIT_SLOPE_X100);
+}
+
+uint16_t battery_pack_mv(void) {
+    uint8_t m = battery_5c_median();
+    return (m == C5_NONE) ? 0u : c5_to_mv(m);
+}
+
+/* --- The level ------------------------------------------------------------------
+ * What the number means: the fraction of RUNTIME left at the kind of load the
+ * curve was measured at. Behind a buck-boost the board draws constant power, so
+ * that -- not charge -- is what a timed run calibrates, and it is what a user
+ * wants to know.
+ *
+ * ⚠️ PROVISIONAL CURVE. The generic Li-ion rest-voltage table this file used
+ * before (0% at 3.27 V ... 80% at 4.02 V), scaled by 90/81.3 so the top clamp
+ * (4036 mV) reads 90%: on 2026-09-25 `5C` left 100 about 5.3 h into a ~52-63 h
+ * run, so the clamp is the top ~8-10% of runtime. The textbook NMC table was
+ * the other candidate, and that run rejects it (47% at 3.74 V, where at most
+ * ~25% of the runtime was left). Replace from the calibration run
+ * (plans/BATTERY-GAUGE-PLAN.md); only these two arrays change. */
+static const uint16_t curve_mv[] = {3270, 3610, 3690, 3710, 3730, 3750, 3770, 3790, 3800,
+                                    3820, 3840, 3850, 3870, 3910, 3950, 3980, 4020, 4036};
+static const uint16_t curve_pm[] = {   0,   55,  111,  166,  221,  277,  332,  387,  443,
+                                     498,  553,  609,  664,  719,  775,  830,  885,  900};
+#define CURVE_N (sizeof(curve_mv) / sizeof(curve_mv[0]))
+_Static_assert(sizeof(curve_pm) == sizeof(curve_mv), "curve tables must pair");
+
+/* Level in per mille, 0..900, for a pack voltage below the top clamp. */
+static uint16_t curve(uint16_t mv) {
+    if (mv <= curve_mv[0]) return 0;
+    if (mv >= curve_mv[CURVE_N - 1]) return curve_pm[CURVE_N - 1];
+    for (uint8_t i = 1; i < CURVE_N; i++) {
+        if (mv < curve_mv[i]) {
+            uint32_t span = curve_mv[i] - curve_mv[i - 1];
+            uint32_t into = mv - curve_mv[i - 1];
+            return (uint16_t)(curve_pm[i - 1] + (into * (uint32_t)(curve_pm[i] - curve_pm[i - 1])) / span);
+        }
+    }
+    return curve_pm[CURVE_N - 1];
+}
+
+/* The level for a median `5C` below the top clamp; 0 at the bottom clamp. */
+static uint16_t c5_level(uint8_t m) {
+    return (m == 0u) ? 0u : curve(c5_to_mv(m));
+}
+
+/* ⚠️ PROVISIONAL. While charging, `5C` reads the terminal voltage, which the
+ * charge current lifts by I*R above the pack's own. Uncorrected, the discharge
+ * curve read 5C 90 two hours into the 09-28 charge as ~77%, where the charge
+ * time says ~40%, and unplugging there would drop the level by ~35 points.
+ * ~0.8-0.9 A (4 h of constant current from flat) through ~180 mOhm (a
+ * comparable 606090 pack's cell + protection board) is ~150 mV. Measure it as
+ * the step in 5C at the moment of unplugging mid-charge; the re-seat at unplug
+ * (level_report) bounds what a wrong value costs to one correction. */
+#define CHARGE_IR_MV 150u
+
+static uint16_t c5_level_charging(uint8_t m) {
+    if (m == 0u) return 0u;
+    uint16_t mv = c5_to_mv(m);
+    return curve(mv > CHARGE_IR_MV ? (uint16_t)(mv - CHARGE_IR_MV) : 0u);
+}
+
+#define LEVEL_UNKNOWN      0xFFFFu
+#define LEVEL_FULL         1000u
+/* Charging never claims 100: it creeps to 97.0%, which shows as 95, and only
+ * the charger's own termination (FULL) says 100. Everything >= 97.5% therefore
+ * comes from a full charge, so the panel's rounding needs no special case. */
+#define LEVEL_CHARGE_CAP   970u
+/* The countdown in the top clamp never goes below this: the clamp's exit is
+ * 90%, and it is the voltage's job to say when the pack has got there. */
+#define LEVEL_CLAMP_FLOOR  910u
+/* Booted at the top clamp with no history: somewhere in 90..100. */
+#define LEVEL_CLAMP_GUESS  950u
+/* 10 points over the 09-25 clamp span (5.3 h) at full white. It matters little:
+ * the clamp is only ~10 points wide, and the voltage takes over at its exit. */
+#define COUNTDOWN_S_PER_PM 190u
+/* Charging at the clamp (the CV phase, 5.5 h on 09-28): creep toward the cap.
+ * Faster below the clamp floor, at about a 1 A charge's real rate (0.4 %/min):
+ * plugged in near full, `5C` jumps straight to 100 on the charge current's
+ * I*R, and the curve never gets the chance to raise the level. */
+#define CV_CREEP_S_PER_PM  180u
+#define CV_CATCHUP_S_PER_PM 15u
+/* On battery the level moves down only after the curve has sat below it for
+ * this many fresh medians (~30 s), then to the HIGHEST of them, and by at most
+ * 1% -- so one low outlier cannot drag it down for good, and a correction
+ * (unplugged mid-charge, a countdown that ran slow) eases instead of jumping. */
+#define STEP_DOWN_MEDIANS  6u
+#define STEP_DOWN_MAX_PM   10u
+
+static uint16_t level      = LEVEL_UNKNOWN;
+static uint8_t  below_run  = 0;
+static uint16_t below_best = 0;
+static uint16_t clamp_s    = 0;
+static bool     full       = false;
+
+static void full_tick(void) {
+    full = supply == BATTERY_SUPPLY_EXTERNAL && chrg_off_run >= FULL_SETTLE_TICKS &&
+           battery_5c_median() == 100u;
+}
+
+/* One new fresh median. */
+static void level_report(uint8_t m) {
+    if (supply == BATTERY_SUPPLY_BATTERY) {
+        if (m == 100u) {
+            /* The top clamp: the countdown (level_tick_1hz) owns it, from
+             * wherever charging left the level. */
+            if (level == LEVEL_UNKNOWN) level = LEVEL_CLAMP_GUESS;
+            below_run = 0;
+            reseat    = false;
+            return;
+        }
+        uint16_t target = c5_level(m);
+        if (level == LEVEL_UNKNOWN || reseat) {
+            /* First reading, or the first after a real charge: the charging
+             * level carried a guessed I*R, and this median is post-unplug
+             * reports only (c5_forget at the supply change). */
+            level  = target;
+            reseat = false;
+            return;
+        }
+        if (target >= level) {     /* the ratchet: never rises on battery */
+            below_run = 0;
+            return;
+        }
+        if (below_run == 0 || target > below_best) below_best = target;
+        if (++below_run < STEP_DOWN_MEDIANS) return;
+        below_run = 0;
+        level     = (level - below_best > STEP_DOWN_MAX_PM) ? (uint16_t)(level - STEP_DOWN_MAX_PM) : below_best;
         return;
     }
+    below_run = 0;
+    if (supply != BATTERY_SUPPLY_EXTERNAL) return;   /* UNKNOWN: touch nothing */
 
-    /* On battery. */
-    chg_on_s = chg_off_s = 0;
-    full     = false;
-    if (batt_s < 60000u) batt_s++;
-
-    /* Learn this unit's clamp: the highest settled VDD on battery. */
-    if (batt_s >= 30u && mv > clamp_mv && mv <= CLAMP_MV_HI) clamp_mv = mv;
-
-    if (!clamped(mv)) {
-        soc     = curve_x100((uint16_t)(mv + DROPOUT_MV));
-        soc_acc = 0;
+    if (full) {
+        level = LEVEL_FULL;
         return;
     }
-    uint16_t floor = clamp_floor_x100();
-    if (soc == SOC_UNKNOWN || soc < floor) {
-        /* Nothing known about the top of the charge: claim only what the
-         * clamp proves. The countdown then starts from there. */
-        soc = floor;
+    if (m == 100u) {
+        /* Charging in the CV phase, or idle on USB with a nearly full pack:
+         * level_tick_1hz creeps it. */
+        if (level == LEVEL_UNKNOWN) level = LEVEL_CLAMP_GUESS;
+        return;
     }
-    uint32_t rate = DRAIN_BASE_X100_PER_H + (DRAIN_LED_X100_PER_H * led_pm) / 1000u;
-    soc_step(rate, false, floor);
+    uint16_t target = charging_now() ? c5_level_charging(m) : c5_level(m);
+    if (target > LEVEL_CHARGE_CAP) target = LEVEL_CHARGE_CAP;
+    if (level == LEVEL_UNKNOWN) {
+        level = target;
+        return;
+    }
+    if (charging_now()) {
+        /* Only rising, and only in a real charging session: `5C` reads the
+         * terminal voltage, which charge current lifts, so a brief plug-in
+         * would bump the level and then hand it back. */
+        if (session && target > level && level < LEVEL_CHARGE_CAP) level = target;
+        return;
+    }
+    /* On USB, charger idle or faulted, below the clamp: follow the median. */
+    level = target;
+}
+
+static void level_tick_1hz(void) {
+    uint8_t m = battery_5c_median();
+    if (m == 100u && level != LEVEL_UNKNOWN) {
+        if (supply == BATTERY_SUPPLY_BATTERY) {
+            if (level > LEVEL_CLAMP_FLOOR && ++clamp_s >= COUNTDOWN_S_PER_PM) {
+                clamp_s = 0;
+                level--;
+            }
+            return;
+        }
+        if (charging_now() && session && !full) {
+            uint16_t per = (level < LEVEL_CLAMP_FLOOR) ? CV_CATCHUP_S_PER_PM : CV_CREEP_S_PER_PM;
+            if (level < LEVEL_CHARGE_CAP && ++clamp_s >= per) {
+                clamp_s = 0;
+                level++;
+            }
+            return;
+        }
+    }
+    clamp_s = 0;
+}
+
+uint16_t battery_level_permille(void) { return level; }
+
+uint8_t battery_level_pct(void) {
+    if (level == LEVEL_UNKNOWN) return 0xFF;
+    /* 5% steps: the granularity says "estimate"; 1% is a claim we cannot back. */
+    uint16_t p = (uint16_t)(((level + 25u) / 50u) * 5u);
+    return (uint8_t)(p > 100u ? 100u : p);
 }
 
 battery_state_t battery_state(void) {
-    if (battery_vdd_mv() == 0) return BATTERY_STATE_NONE;
-    if (battery_on_battery())   return BATTERY_STATE_BATTERY;
-    if (charge_is_charging())   return BATTERY_STATE_CHARGING;
-    if (full)                   return BATTERY_STATE_FULL;
-    return BATTERY_STATE_USB;
-}
-
-uint8_t battery_level_pct(void) {
-    static uint8_t shown = 0xFF;
-    if (soc == SOC_UNKNOWN) {
-        shown = 0xFF;
-        return shown;
+    switch (supply) {
+        case BATTERY_SUPPLY_BATTERY:
+            return BATTERY_STATE_BATTERY;
+        case BATTERY_SUPPLY_EXTERNAL:
+            if (full) return BATTERY_STATE_FULL;
+            if (charging_now()) return BATTERY_STATE_CHARGING;
+            return BATTERY_STATE_USB;
+        default:
+            return BATTERY_STATE_NONE;
     }
-    uint8_t now = (uint8_t)((soc + 50u) / 100u);
-    /* Hysteresis: move on a 2-point change, or to the ends of the scale. */
-    if (shown == 0xFF || now == 0 || now == 100 || now + 2u <= shown || now >= shown + 2u) shown = now;
-    return shown;
 }
 
 /* --- Low-battery protection ---------------------------------------------------
- * On battery with the filtered VDD under `warn_mv` for WARN_HOLD_TICKS, say so
- * once. Under `cut_mv` for the same time, turn the RGB matrix off (noeeprom:
- * the saved setting is untouched) so the board keeps running on a fraction of
- * the current instead of browning out mid-typing. The lights come back when
- * USB power returns. Thresholds are RAM-only and settable over HC_BATTCFG;
- * 0 disables either. */
+ * On the PACK voltage from `5C`. It used to compare VDD, which the buck-boost
+ * pins at ~3.90 V, so it never fired: the 09-25 run went to the pack's own
+ * protection trip with VDD still at ~3.87 V.
+ *
+ * Warn once after WARN_HOLD_TICKS under `warn_mv`; cut the RGB after the same
+ * under `cut_mv`. A fresh 0 is "critically low", not "unknown": three in a row
+ * cut at once. The cut is a power CAP (power_set_lights_cut), so the user's own
+ * RGB toggle cannot undo it -- rgb_matrix_disable_noeeprom() could -- and it
+ * lifts only after EXT_RESTORE_TICKS of external power. A stale reading holds
+ * every timer and never clears the cut. This sheds load; it does not
+ * disconnect the cell -- the pack's protector does that.
+ *
+ * Thresholds are RAM-only and settable over HC_BATTCFG (pack mV); 0 disables
+ * either. Both defaults sit inside the fitted range (3.30-3.84 V). */
 #define WARN_HOLD_TICKS    300u    /* 30 s at 10 Hz */
-#define RESTORE_HOLD_TICKS 50u     /* 5 s of USB power */
-#define WARN_REARM_MV      100u    /* hysteresis before a second warning */
+#define EXT_RESTORE_TICKS  50u     /* 5 s of external power */
+#define WARN_REARM_MV      100u
+#define CRITICAL_ZEROES    3u
 
 static uint16_t warn_mv    = 3550;
 static uint16_t cut_mv     = 3400;
-static uint16_t warn_ticks = 0, cut_ticks = 0, usb_ticks = 0;
+static uint16_t warn_ticks = 0, cut_ticks = 0;
 static bool     warned     = false;
-static bool     lights_cut = false;
-static bool     cut_was_on = false;
 
-static void protection_task(void) {
-    uint16_t mv = battery_vdd_mv();
-    if (mv == 0) return;
+static void cut_lights(void) {
+    if (power_lights_cut()) return;
+    power_set_lights_cut(true);
+    display_set_alert("Low: RGB off");
+}
 
-    if (!battery_on_battery()) {
+static void protection_tick(void) {
+    if (supply == BATTERY_SUPPLY_EXTERNAL) {
         warn_ticks = cut_ticks = 0;
         warned     = false;
-        if (lights_cut && ++usb_ticks >= RESTORE_HOLD_TICKS) {
-            if (cut_was_on) rgb_matrix_enable_noeeprom();
-            lights_cut = false;
-        }
+        if (power_lights_cut() && ext_ticks >= EXT_RESTORE_TICKS) power_set_lights_cut(false);
         return;
     }
-    usb_ticks = 0;
+    if (supply != BATTERY_SUPPLY_BATTERY) return;
+
+    uint8_t m = battery_5c_median();
+    if (m == C5_NONE) return;
+    if (c5_zero_run >= CRITICAL_ZEROES) cut_lights();
+    uint16_t mv = c5_to_mv(m);   /* at the clamps, the bound -- which compares correctly */
 
     if (warn_mv && mv < warn_mv) {
         if (warn_ticks < WARN_HOLD_TICKS) warn_ticks++;
@@ -346,64 +569,67 @@ static void protection_task(void) {
 
     if (cut_mv && mv < cut_mv) {
         if (cut_ticks < WARN_HOLD_TICKS) cut_ticks++;
-        if (cut_ticks >= WARN_HOLD_TICKS && !lights_cut) {
-            lights_cut = true;
-            cut_was_on = rgb_matrix_is_enabled();
-            rgb_matrix_disable_noeeprom();
-            display_set_alert("Low: RGB off");
-        }
+        if (cut_ticks >= WARN_HOLD_TICKS) cut_lights();
     } else {
         cut_ticks = 0;
     }
 }
 
 uint8_t battery_flags(void) {
-    uint16_t mv = battery_vdd_mv();
-    uint8_t  f  = 0;
-    if (battery_on_battery()) {
-        f |= BATT_F_ON_BATTERY;
-        if (clamped(mv)) f |= BATT_F_CLAMPED;
-    }
-    if (!gpio_read_pin(CHARGE_CHRG_PIN))  f |= BATT_F_CHARGING;
-    if (!gpio_read_pin(CHARGE_STDBY_PIN)) f |= BATT_F_DONE;
-    if (rgb_matrix_is_enabled())          f |= BATT_F_RGB_ON;
-    if (lights_cut)                       f |= BATT_F_LIGHTS_CUT;
-    if (ch582_is_usb())                   f |= BATT_F_SLIDER_USB;
-    if (ch582_is_connected())             f |= BATT_F_LINKED;
+    uint8_t f = 0;
+    if (supply == BATTERY_SUPPLY_BATTERY)  f |= BATT_F_ON_BATTERY;
+    if (supply == BATTERY_SUPPLY_EXTERNAL) f |= BATT_F_EXTERNAL;
+    if (!gpio_read_pin(CHARGE_CHRG_PIN))   f |= BATT_F_CHARGING;
+    if (!gpio_read_pin(CHARGE_STDBY_PIN))  f |= BATT_F_DONE;
+    if (rgb_matrix_is_enabled())           f |= BATT_F_RGB_ON;
+    if (power_lights_cut())                f |= BATT_F_LIGHTS_CUT;
+    if (ch582_is_usb())                    f |= BATT_F_SLIDER_USB;
+    if (ch582_is_connected())              f |= BATT_F_LINKED;
     return f;
 }
 
-uint16_t battery_soc_x100(void) { return soc; }
-uint16_t battery_clamp_mv(void) { return clamp_mv; }
-uint16_t battery_led_pm(void)   { return led_pm; }
+/* LED drive, per mille of the maximum, over the last second. sn32f2xx_led_load()
+ * sums the driver's buffer, which is after the power cap: the real drive. */
+#define LED_LOAD_MAX ((uint32_t)RGB_MATRIX_LED_COUNT * 3u * 255u)
+static uint16_t led_pm = 0;
+uint16_t battery_led_pm(void) { return led_pm; }
 
-/* --- Once-a-minute log --------------------------------------------------------
- * 12 hours in RAM, oldest overwritten. It exists to record discharges -- VDD
- * against time and load, beside the estimate and the module's number -- so the
- * CAL constants above can be measured rather than guessed. RAM, not flash, so
- * it survives anything but a reset; the protection above keeps a drained board
- * running rather than browning out. Read with HC_BATTLOG. */
+/* --- The log ---------------------------------------------------------------------
+ * 720 ten-minute entries: 120 hours in RAM, oldest overwritten. Long enough for
+ * a whole discharge at full white (~52-63 h) with room to spare. It records
+ * what a curve fit and a load comparison need: every `5C` report in the period
+ * (sum, count, min, max -- not the last value, which threw away 119 of 120),
+ * flags at the end AND over the period, so a transition cannot fall between
+ * samples, and the effective LED drive and backlight, which see the caps.
+ * ⚠️ RAM, so it dies with the board: dump before the pack runs out, and plug in
+ * with the slider on BT -- a BT -> cable flip resets the board. HC_BATTLOG. */
 #define LOG_LEN       720u
-#define LOG_PERIOD_MS 60000u
+#define LOG_PERIOD_MS 600000u
 
 typedef struct __attribute__((packed)) {
-    uint16_t vdd_avg;      /* mean of the raw samples over the minute, mV */
-    uint16_t vdd_min;      /* lowest raw sample over the minute, mV */
-    uint16_t soc;          /* estimate at the end of the minute, 0.01 %, 0xFFFF unknown */
-    uint16_t led_pm;       /* mean LED drive over the minute, per mille of the maximum */
-    uint8_t  module_pct;   /* the CH582F's `5C` value */
-    uint8_t  flags;        /* BATT_F_* */
-    uint8_t  rgb_val;      /* RGB brightness 0-255 */
-    uint8_t  module_age_s; /* seconds since the module's last `5C`, 255 = stale/never */
+    uint16_t vdd_avg;      /* mean raw VDD over the period, mV */
+    uint16_t vdd_min;      /* lowest raw VDD, mV */
+    uint16_t c5_sum;       /* sum of every fresh `5C` report in the period */
+    uint8_t  c5_n;         /* how many (0: none arrived) */
+    uint8_t  c5_min;       /* 0xFF when none */
+    uint8_t  c5_max;
+    uint8_t  flags;        /* BATT_F_* at the end of the period */
+    uint8_t  flags_any;    /* BATT_F_* OR-ed over every tick of the period */
+    uint8_t  level;        /* the level at the end, whole %, 0xFF unknown */
+    uint16_t led_pm;       /* mean LED drive, per mille of the maximum */
+    uint8_t  bkl;          /* effective LCD backlight level at the end */
+    uint8_t  reserved;
 } log_entry_t;
 _Static_assert(sizeof(log_entry_t) == BATTERY_LOG_ENTRY_SIZE, "HC_BATTLOG entry size");
 
 static log_entry_t log_buf[LOG_LEN];
 static uint16_t    log_head    = 0;   /* next slot to write */
 static uint16_t    log_count   = 0;
+static uint32_t    log_written = 0;   /* entries ever written */
 static uint32_t    log_last_at = 0;   /* when the newest entry was written */
 static uint32_t    acc_sum = 0, acc_start = 0, acc_led = 0;
 static uint16_t    acc_n = 0, acc_min = 0, acc_led_n = 0;
+static uint8_t     acc_flags = 0;
 
 static void log_task(uint16_t sample_mv) {
     if (sample_mv) {
@@ -411,34 +637,43 @@ static void log_task(uint16_t sample_mv) {
         acc_n++;
         if (acc_min == 0 || sample_mv < acc_min) acc_min = sample_mv;
     }
+    acc_flags |= battery_flags();
     if (acc_start == 0) acc_start = timer_read32() | 1u;
     if (timer_elapsed32(acc_start) < LOG_PERIOD_MS || acc_n == 0) return;
 
-    uint32_t     age = ch582_battery_age_ms();
-    log_entry_t *e   = &log_buf[log_head];
-    e->vdd_avg      = (uint16_t)(acc_sum / acc_n);
-    e->vdd_min      = acc_min;
-    e->soc          = soc;
-    e->led_pm       = acc_led_n ? (uint16_t)(acc_led / acc_led_n) : led_pm;
-    e->module_pct   = ch582_get_battery();
-    e->flags        = battery_flags();
-    e->rgb_val      = rgb_matrix_get_val();
-    e->module_age_s = (age == UINT32_MAX || age / 1000u > 254u) ? 255u : (uint8_t)(age / 1000u);
+    log_entry_t *e = &log_buf[log_head];
+    e->vdd_avg   = (uint16_t)(acc_sum / acc_n);
+    e->vdd_min   = acc_min;
+    e->c5_sum    = lg_c5_sum;
+    e->c5_n      = lg_c5_n;
+    e->c5_min    = lg_c5_min;
+    e->c5_max    = lg_c5_max;
+    e->flags     = battery_flags();
+    e->flags_any = acc_flags;
+    e->level     = (level == LEVEL_UNKNOWN) ? 0xFFu : (uint8_t)((level + 5u) / 10u);
+    e->led_pm    = acc_led_n ? (uint16_t)(acc_led / acc_led_n) : led_pm;
+    e->bkl       = display_backlight_effective();
+    e->reserved  = 0;
 
     log_head = (uint16_t)((log_head + 1u) % LOG_LEN);
     if (log_count < LOG_LEN) log_count++;
+    log_written++;
     log_last_at = timer_read32();
-    acc_sum = 0; acc_n = 0; acc_min = 0; acc_led = 0; acc_led_n = 0;
+    acc_sum = 0; acc_n = 0; acc_min = 0; acc_led = 0; acc_led_n = 0; acc_flags = 0;
+    lg_c5_sum = 0; lg_c5_n = 0; lg_c5_min = C5_NONE; lg_c5_max = 0;
     acc_start = log_last_at | 1u;
 }
 
 void battery_log_read(uint16_t idx, uint8_t *out) {
-    uint32_t since = log_count ? timer_elapsed32(log_last_at) : 0;
+    uint32_t since  = log_count ? timer_elapsed32(log_last_at) : 0;
+    uint16_t period = (uint16_t)(LOG_PERIOD_MS / 1000u);
     out[0] = BATTERY_LOG_VERSION;
     out[1] = (uint8_t)(log_count & 0xFF); out[2] = (uint8_t)(log_count >> 8);
     out[3] = (uint8_t)(idx & 0xFF);       out[4] = (uint8_t)(idx >> 8);
     for (uint8_t i = 0; i < 4; i++) out[5 + i] = (uint8_t)(since >> (8 * i));
-    uint8_t *dst = &out[9];
+    out[9]  = (uint8_t)(period & 0xFF);      out[10] = (uint8_t)(period >> 8);
+    out[11] = (uint8_t)(log_written & 0xFF); out[12] = (uint8_t)((log_written >> 8) & 0xFF);
+    uint8_t *dst = &out[13];
     if (idx >= log_count) {
         memset(dst, 0, BATTERY_LOG_ENTRY_SIZE);
         return;
@@ -456,12 +691,13 @@ void battery_cfg(uint8_t op, uint16_t new_warn, uint16_t new_cut, uint8_t *out) 
     }
     out[0] = (uint8_t)(warn_mv & 0xFF); out[1] = (uint8_t)(warn_mv >> 8);
     out[2] = (uint8_t)(cut_mv & 0xFF);  out[3] = (uint8_t)(cut_mv >> 8);
-    out[4] = lights_cut ? 1 : 0;
+    out[4] = power_lights_cut() ? 1 : 0;
     out[5] = warned ? 1 : 0;
     out[6] = (uint8_t)((LOG_PERIOD_MS / 1000u) & 0xFF);
     out[7] = (uint8_t)((LOG_PERIOD_MS / 1000u) >> 8);
 }
 
+/* --- 10 Hz --------------------------------------------------------------------- */
 void battery_task(void) {
     static uint8_t tick = 0;
     if (!adc_ready) return;
@@ -492,12 +728,21 @@ void battery_task(void) {
         if (f > vdd_max) vdd_max = f;
     }
 
-    protection_task();
+    supply_tick(mv);
+    bool fresh_report = c5_intake();
+    full_tick();
+    if (fresh_report) {
+        uint8_t m = battery_5c_median();
+        if (m != C5_NONE) level_report(m);
+    }
+    protection_tick();
+
     if (++tick >= 10u) {
-        tick = 0;
-        estimator_tick();
+        tick   = 0;
+        led_pm = (uint16_t)((sn32f2xx_led_load() * 1000u) / LED_LOAD_MAX);
         acc_led += led_pm;
         acc_led_n++;
+        level_tick_1hz();
     }
     log_task(mv);
 }
