@@ -1437,7 +1437,10 @@ static void draw_battery(bool force) {
     char            txt[8];
     if (batt == 0 && st == BATTERY_STATE_BATTERY) snprintf(txt, sizeof(txt), "Low");
     else if (batt <= 100)                         snprintf(txt, sizeof(txt), "%u%%", batt);
-    else if (st == BATTERY_STATE_CHARGING)        snprintf(txt, sizeof(txt), "Chrg");
+    /* "Charge", not "Charging": at 10 px a cell that is 80 px against the 78
+     * between the icon slot and the bezel margin, and it would start inside
+     * the slot that a bolt toggle clears. */
+    else if (st == BATTERY_STATE_CHARGING)        snprintf(txt, sizeof(txt), "Charge");
     else if (st == BATTERY_STATE_USB || st == BATTERY_STATE_FULL) snprintf(txt, sizeof(txt), "USB");
     else txt[0] = '\0';
     bool    chrg   = charge_is_charging();
