@@ -32,6 +32,7 @@
 #include "quantum.h"
 #include "battery.h"
 #include "power.h"
+#include "kb_eeconfig.h"
 #include "bluetooth/ch582f_ajazz.h"
 #include "graphics/display.h"
 #include "drivers/led/sn32f2xx.h"
@@ -398,8 +399,12 @@ static uint16_t c5_level_charging(uint8_t m) {
  * the lowest level the panel still rounds to 95, so the clamp reads 100 then
  * 95 -- never the exit's 90 before the voltage says so. */
 #define LEVEL_CLAMP_FLOOR  925u
-/* Booted at the top clamp with no history: somewhere in 90..100. */
+/* Booted at the top clamp: the voltage says only "90..100", so take the level
+ * saved before the reboot (every cable <-> BT slider flip is one) if it is in
+ * that band. With nothing saved -- only after a flash erased it -- guess the
+ * middle. Below the clamp the voltage is the authority and nothing is restored. */
 #define LEVEL_CLAMP_GUESS  950u
+#define LEVEL_CLAMP_EXIT   900u
 /* 10 points over the 09-25 clamp span (5.3 h) at full white. It matters little:
  * the clamp is only ~10 points wide, and the voltage takes over at its exit. */
 #define COUNTDOWN_S_PER_PM 190u
@@ -422,6 +427,12 @@ static uint16_t below_best = 0;
 static uint16_t clamp_s    = 0;
 static bool     full       = false;
 
+static uint16_t level_at_clamp_boot(void) {
+    uint16_t saved;
+    if (kb_eeconfig_get_batt_level(&saved) && saved >= LEVEL_CLAMP_EXIT) return saved;
+    return LEVEL_CLAMP_GUESS;
+}
+
 static void level_toward(uint16_t target) {
     if (target > level) {
         level = (target - level > STEP_MAX_PM) ? (uint16_t)(level + STEP_MAX_PM) : target;
@@ -441,7 +452,7 @@ static void level_report(uint8_t m) {
         if (m == 100u) {
             /* The top clamp: the countdown (level_tick_1hz) owns it, from
              * wherever charging left the level. */
-            if (level == LEVEL_UNKNOWN) level = LEVEL_CLAMP_GUESS;
+            if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
             below_run = 0;
             reseat    = false;
             return;
@@ -475,7 +486,7 @@ static void level_report(uint8_t m) {
     if (m == 100u) {
         /* Charging in the CV phase, or idle on USB with a nearly full pack:
          * level_tick_1hz creeps it. */
-        if (level == LEVEL_UNKNOWN) level = LEVEL_CLAMP_GUESS;
+        if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
         return;
     }
     uint16_t target = charging_now() ? c5_level_charging(m) : c5_level(m);
@@ -795,6 +806,9 @@ void battery_task(void) {
         acc_led += led_pm;
         acc_led_n++;
         level_tick_1hz();
+        /* Coalesced and settled by kb_eeconfig: it writes only when the whole
+         * percent has changed and then held for 5 s. */
+        if (level != LEVEL_UNKNOWN) kb_eeconfig_set_batt_level(level);
     }
     log_task(mv);
 }

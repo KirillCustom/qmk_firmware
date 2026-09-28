@@ -43,6 +43,13 @@ void kb_eeconfig_set_lcd_brightness(uint8_t level);
 bool kb_eeconfig_get_clock_mode(uint8_t *mode);
 void kb_eeconfig_set_clock_mode(uint8_t mode);
 
+/* The battery level (battery.c), in per mille, kept to whole percent. It
+ * exists for one case: a reboot at the top clamp, where `5C` reads 100 and the
+ * voltage cannot say how far into the clamp the pack is -- and every cable <->
+ * BT slider flip is a reboot. Returns false when unset. */
+bool kb_eeconfig_get_batt_level(uint16_t *permille);
+void kb_eeconfig_set_batt_level(uint16_t permille);
+
 #ifdef WDT_TEST_HOOKS
 /* Force a real, immediate flash program (for the reset-during-write test). */
 void kb_eeconfig_test_write(void);

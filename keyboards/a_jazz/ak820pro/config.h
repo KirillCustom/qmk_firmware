@@ -258,11 +258,12 @@
 // Persist a small keyboard-specific config block in EEPROM. On SN32F290 QMK's
 // default "vendor" EEPROM driver is wear-leveling backed by MCU internal flash.
 // Layout is owned by kb_eeconfig.c (BT slot, RTC period, LCD brightness,
-// clock format). Bump EECONFIG_KB_DATA_VERSION if the layout changes -- QMK
-// validates the block by version, not size, and a mismatch zero-fills it once
-// at the next boot (a flash erases the whole emulated EEPROM anyway).
-#define EECONFIG_KB_DATA_SIZE    5
-#define EECONFIG_KB_DATA_VERSION 2
+// clock format, battery level). Bump EECONFIG_KB_DATA_VERSION if the layout
+// changes -- QMK validates the block by version, not size, and a mismatch
+// zero-fills it once at the next boot (a flash erases the whole emulated
+// EEPROM anyway).
+#define EECONFIG_KB_DATA_SIZE    6
+#define EECONFIG_KB_DATA_VERSION 3
 
 // Debounce eeconfig flushes from RGB adjustment. Without this QMK writes MCU
 // flash on every single step (~8/s while a key is held), which is both needless
