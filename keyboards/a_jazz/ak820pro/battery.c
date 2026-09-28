@@ -152,6 +152,8 @@ uint16_t battery_vdd_max_mv(void) { return vdd_max; }
 #define SESSION_TICKS      600u    /* 60 s */
 /* CHRG released this long, on USB, with `5C` at 100: the charger terminated. */
 #define FULL_SETTLE_TICKS  100u    /* 10 s */
+/* A second of failed conversions and what VDD last said has expired. */
+#define ADC_STALE_TICKS    10u
 
 static battery_supply_t supply        = BATTERY_SUPPLY_UNKNOWN;
 static uint8_t          ext_run       = 0;   /* raw VDD >= EXT_ENTER_MV, ticks */
@@ -159,14 +161,25 @@ static uint8_t          batt_run      = 0;   /* raw VDD <  BATT_ENTER_MV, ticks 
 static uint16_t         chrg_run      = 0;   /* CHRG low, consecutive ticks */
 static uint16_t         chrg_off_run  = 0;   /* CHRG high, consecutive ticks */
 static uint8_t          chrg_hold     = 0;   /* ticks of EXTERNAL evidence left */
-static uint16_t         ext_ticks     = 0;   /* ticks since supply became EXTERNAL */
+static uint8_t          adc_fail_run  = 0;   /* consecutive failed conversions */
+/* Consecutive ticks with FRESH positive evidence of USB -- CHRG, or VDD read
+ * this second. Not "supply is EXTERNAL": that is remembered, and a remembered
+ * state must never be what lifts the low-battery cut (codex, 2026-09-28). */
+static uint16_t         ext_evidence_ticks = 0;
+static bool             chg_was       = false;   /* charging_now() last tick */
 static bool             session       = false;
 static bool             ran_from_pack = false;
 /* Set when the board goes onto the pack after a real charging session: the
- * level re-seats once, from the first post-unplug median (see level_report). */
+ * level re-seats once, from the first post-unplug median (see level_report).
+ * Owed until consumed: a brief replug before the median exists must not cancel
+ * it, or the discharge keeps the charging estimate and its guessed I*R. */
 static bool             reseat        = false;
 
 static void c5_forget(void);
+
+static bool charging_now(void) {
+    return supply == BATTERY_SUPPLY_EXTERNAL && chrg_hold != 0;
+}
 
 static void supply_tick(uint16_t raw_mv) {
     bool chrg_low = !gpio_read_pin(CHARGE_CHRG_PIN);
@@ -183,32 +196,45 @@ static void supply_tick(uint16_t raw_mv) {
         chrg_hold--;
     }
 
-    /* A failed conversion is no information: the runs hold rather than reset. */
+    /* A failed conversion is no information: the runs hold rather than reset.
+     * A second of them and the runs expire -- the supply then holds (only CHRG
+     * can still move it), but nothing counts as fresh proof of USB. */
     if (raw_mv) {
+        adc_fail_run = 0;
         ext_run  = (raw_mv >= EXT_ENTER_MV)  ? (uint8_t)(ext_run  < UINT8_MAX ? ext_run  + 1u : ext_run)  : 0u;
         batt_run = (raw_mv <  BATT_ENTER_MV) ? (uint8_t)(batt_run < UINT8_MAX ? batt_run + 1u : batt_run) : 0u;
+    } else if (adc_fail_run < UINT8_MAX && ++adc_fail_run >= ADC_STALE_TICKS) {
+        ext_run = batt_run = 0;
     }
 
+    bool ext_evidence  = chrg_hold || ext_run >= EXT_ENTER_TICKS;
+    ext_evidence_ticks = ext_evidence ? (uint16_t)(ext_evidence_ticks < UINT16_MAX ? ext_evidence_ticks + 1u : ext_evidence_ticks) : 0u;
+
     battery_supply_t was = supply;
-    if (chrg_hold || ext_run >= EXT_ENTER_TICKS) {
+    if (ext_evidence) {
         supply = BATTERY_SUPPLY_EXTERNAL;
     } else if (batt_run >= BATT_ENTER_TICKS) {
         supply = BATTERY_SUPPLY_BATTERY;
     }
 
     if (supply != was) {
-        ext_ticks = 0;
         /* Every report in the median was taken on the other supply -- under
          * charge current, or without it -- so none describes this one. */
         c5_forget();
         if (was == BATTERY_SUPPLY_EXTERNAL && supply == BATTERY_SUPPLY_BATTERY && session) reseat = true;
-        if (supply == BATTERY_SUPPLY_EXTERNAL) reseat = false;
+    }
+    /* The charger starting or stopping moves the terminal voltage by I*R as
+     * surely as a supply change does: a charger fault mid-charge must not be
+     * judged FULL on reports taken while it was still charging. */
+    bool chg = charging_now();
+    if (chg != chg_was) {
+        c5_forget();
+        chg_was = chg;
     }
     if (supply == BATTERY_SUPPLY_BATTERY) {
         ran_from_pack = true;
         session       = false;
     }
-    if (supply == BATTERY_SUPPLY_EXTERNAL && ext_ticks < UINT16_MAX) ext_ticks++;
     if (chrg_run >= SESSION_TICKS) session = true;
 }
 
@@ -216,16 +242,14 @@ battery_supply_t battery_supply(void) { return supply; }
 bool battery_on_battery(void)         { return supply == BATTERY_SUPPLY_BATTERY; }
 bool battery_ran_from_pack(void)      { return ran_from_pack; }
 
-static bool charging_now(void) {
-    return supply == BATTERY_SUPPLY_EXTERNAL && chrg_hold != 0;
-}
-
 /* --- `5C`: intake, freshness, median --------------------------------------------
- * Fed only when a NEW report arrives (ch582_battery_reports() moved), never by
- * re-reading the cached value: that would only duplicate the one report it
- * holds. Median of the last 7, ~35 s at one report per 5 s. Emptied when the
- * reports go stale, so a module that falls silent and returns is not judged on
- * minutes-old values. */
+ * The CH582F driver hands over every report as it is parsed
+ * (battery_5c_report), so two that land between ticks are both counted -- in
+ * the median, the critical-zero run, and the log. Never re-read the cached
+ * value instead: that only duplicates the one report it holds. Median of the
+ * last 7, ~35 s at one report per 5 s. Emptied when the reports go stale, so a
+ * module that falls silent and returns is not judged on minutes-old values,
+ * and at every supply or charger change. */
 #define C5_RING       7u
 #define C5_MIN_MEDIAN 3u
 #define C5_STALE_MS   20000u    /* four missed polls */
@@ -234,7 +258,7 @@ static bool charging_now(void) {
 static uint8_t  c5_ring[C5_RING];
 static uint8_t  c5_count   = 0;
 static uint8_t  c5_pos     = 0;
-static uint16_t c5_seen    = 0;       /* ch582_battery_reports() last consumed */
+static bool     c5_new     = false;   /* a report arrived since the last tick */
 static uint8_t  c5_med     = C5_NONE;
 static uint8_t  c5_zero_run = 0;      /* consecutive reports of 0 */
 
@@ -269,15 +293,10 @@ static uint8_t c5_median_of_ring(void) {
     return s[c5_count / 2u];
 }
 
-/* True when a new report was taken this tick. */
-static bool c5_intake(void) {
-    if (!c5_fresh()) c5_forget();
-    uint16_t r = ch582_battery_reports();
-    if (r == c5_seen) return false;
-    c5_seen   = r;
-    uint8_t v = ch582_get_battery();
-    if (v > 100u) return false;
-
+/* Called by the CH582F driver for every `5C` frame it parses (main loop). */
+void battery_5c_report(uint8_t v) {
+    if (v > 100u) return;
+    c5_new          = true;
     c5_ring[c5_pos] = v;
     c5_pos          = (uint8_t)((c5_pos + 1u) % C5_RING);
     if (c5_count < C5_RING) c5_count++;
@@ -290,7 +309,6 @@ static bool c5_intake(void) {
         if (v < lg_c5_min) lg_c5_min = v;
         if (v > lg_c5_max) lg_c5_max = v;
     }
-    return true;
 }
 
 uint8_t battery_5c_median(void) {
@@ -376,8 +394,10 @@ static uint16_t c5_level_charging(uint8_t m) {
  * comes from a full charge, so the panel's rounding needs no special case. */
 #define LEVEL_CHARGE_CAP   970u
 /* The countdown in the top clamp never goes below this: the clamp's exit is
- * 90%, and it is the voltage's job to say when the pack has got there. */
-#define LEVEL_CLAMP_FLOOR  910u
+ * 90%, and it is the voltage's job to say when the pack has got there. 925 is
+ * the lowest level the panel still rounds to 95, so the clamp reads 100 then
+ * 95 -- never the exit's 90 before the voltage says so. */
+#define LEVEL_CLAMP_FLOOR  925u
 /* Booted at the top clamp with no history: somewhere in 90..100. */
 #define LEVEL_CLAMP_GUESS  950u
 /* 10 points over the 09-25 clamp span (5.3 h) at full white. It matters little:
@@ -390,17 +410,25 @@ static uint16_t c5_level_charging(uint8_t m) {
 #define CV_CREEP_S_PER_PM  180u
 #define CV_CATCHUP_S_PER_PM 15u
 /* On battery the level moves down only after the curve has sat below it for
- * this many fresh medians (~30 s), then to the HIGHEST of them, and by at most
- * 1% -- so one low outlier cannot drag it down for good, and a correction
- * (unplugged mid-charge, a countdown that ran slow) eases instead of jumping. */
+ * this many fresh medians (~30 s), then to the HIGHEST of them. Every move
+ * outside the deliberate re-seat is at most 1%, so a correction (a countdown
+ * that ran slow, a charge rising fast) eases instead of jumping. */
 #define STEP_DOWN_MEDIANS  6u
-#define STEP_DOWN_MAX_PM   10u
+#define STEP_MAX_PM        10u
 
 static uint16_t level      = LEVEL_UNKNOWN;
 static uint8_t  below_run  = 0;
 static uint16_t below_best = 0;
 static uint16_t clamp_s    = 0;
 static bool     full       = false;
+
+static void level_toward(uint16_t target) {
+    if (target > level) {
+        level = (target - level > STEP_MAX_PM) ? (uint16_t)(level + STEP_MAX_PM) : target;
+    } else if (target < level) {
+        level = (level - target > STEP_MAX_PM) ? (uint16_t)(level - STEP_MAX_PM) : target;
+    }
+}
 
 static void full_tick(void) {
     full = supply == BATTERY_SUPPLY_EXTERNAL && chrg_off_run >= FULL_SETTLE_TICKS &&
@@ -434,7 +462,7 @@ static void level_report(uint8_t m) {
         if (below_run == 0 || target > below_best) below_best = target;
         if (++below_run < STEP_DOWN_MEDIANS) return;
         below_run = 0;
-        level     = (level - below_best > STEP_DOWN_MAX_PM) ? (uint16_t)(level - STEP_DOWN_MAX_PM) : below_best;
+        level_toward(below_best);
         return;
     }
     below_run = 0;
@@ -459,12 +487,17 @@ static void level_report(uint8_t m) {
     if (charging_now()) {
         /* Only rising, and only in a real charging session: `5C` reads the
          * terminal voltage, which charge current lifts, so a brief plug-in
-         * would bump the level and then hand it back. */
-        if (session && target > level && level < LEVEL_CHARGE_CAP) level = target;
+         * would bump the level and then hand it back.
+         * ⚠️ A level already above the cap is NOT pulled down to it: that
+         * only happens within ~80 min of a FULL (the countdown from 1000 takes
+         * that long to pass 975), so replugging a pack that was just full
+         * keeps showing 100 through the charger's top-up -- which is true.
+         * Dropping it to 95 for the top-up would read as a glitch. */
+        if (session && target > level && level < LEVEL_CHARGE_CAP) level_toward(target);
         return;
     }
     /* On USB, charger idle or faulted, below the clamp: follow the median. */
-    level = target;
+    level_toward(target);
 }
 
 static void level_tick_1hz(void) {
@@ -546,17 +579,26 @@ static void protection_tick(void) {
     if (supply == BATTERY_SUPPLY_EXTERNAL) {
         warn_ticks = cut_ticks = 0;
         warned     = false;
-        if (power_lights_cut() && ext_ticks >= EXT_RESTORE_TICKS) power_set_lights_cut(false);
+        if (power_lights_cut() && ext_evidence_ticks >= EXT_RESTORE_TICKS) power_set_lights_cut(false);
         return;
     }
     if (supply != BATTERY_SUPPLY_BATTERY) return;
 
     uint8_t m = battery_5c_median();
     if (m == C5_NONE) return;
-    if (c5_zero_run >= CRITICAL_ZEROES) cut_lights();
-    uint16_t mv = c5_to_mv(m);   /* at the clamps, the bound -- which compares correctly */
+    if (c5_zero_run >= CRITICAL_ZEROES) {
+        cut_lights();
+        /* At or under 3.161 V: the panel says "Low" now, not after the
+         * ratchet's 1%-per-30-s walk down from wherever the level was. */
+        level = 0;
+    }
+    /* At the top clamp the pack is only known to be >= 4036 mV, which is not
+     * "under" any threshold -- even one set above 4036. At the bottom clamp
+     * the bound (<= 3161) IS under any threshold above it. */
+    bool     top = (m == 100u);
+    uint16_t mv  = c5_to_mv(m);
 
-    if (warn_mv && mv < warn_mv) {
+    if (warn_mv && !top && mv < warn_mv) {
         if (warn_ticks < WARN_HOLD_TICKS) warn_ticks++;
         if (warn_ticks >= WARN_HOLD_TICKS && !warned) {
             warned = true;
@@ -567,7 +609,7 @@ static void protection_tick(void) {
         if (warned && (!warn_mv || mv > warn_mv + WARN_REARM_MV)) warned = false;
     }
 
-    if (cut_mv && mv < cut_mv) {
+    if (cut_mv && !top && mv < cut_mv) {
         if (cut_ticks < WARN_HOLD_TICKS) cut_ticks++;
         if (cut_ticks >= WARN_HOLD_TICKS) cut_lights();
     } else {
@@ -626,7 +668,8 @@ static log_entry_t log_buf[LOG_LEN];
 static uint16_t    log_head    = 0;   /* next slot to write */
 static uint16_t    log_count   = 0;
 static uint32_t    log_written = 0;   /* entries ever written */
-static uint32_t    log_last_at = 0;   /* when the newest entry was written */
+static uint32_t    log_last_at = 0;   /* the newest entry's period end */
+static bool        log_started = false;
 static uint32_t    acc_sum = 0, acc_start = 0, acc_led = 0;
 static uint16_t    acc_n = 0, acc_min = 0, acc_led_n = 0;
 static uint8_t     acc_flags = 0;
@@ -638,11 +681,18 @@ static void log_task(uint16_t sample_mv) {
         if (acc_min == 0 || sample_mv < acc_min) acc_min = sample_mv;
     }
     acc_flags |= battery_flags();
-    if (acc_start == 0) acc_start = timer_read32() | 1u;
-    if (timer_elapsed32(acc_start) < LOG_PERIOD_MS || acc_n == 0) return;
+    if (!log_started) {
+        acc_start   = timer_read32();
+        log_started = true;
+        return;
+    }
+    /* Every period closes on schedule, sample or not: the host dates entry n
+     * as newest - (count-1-n) * period, so a period that stretched to cover an
+     * ADC outage would misdate everything before it. */
+    if (timer_elapsed32(acc_start) < LOG_PERIOD_MS) return;
 
     log_entry_t *e = &log_buf[log_head];
-    e->vdd_avg   = (uint16_t)(acc_sum / acc_n);
+    e->vdd_avg   = acc_n ? (uint16_t)(acc_sum / acc_n) : 0u;   /* 0: no conversion in the period */
     e->vdd_min   = acc_min;
     e->c5_sum    = lg_c5_sum;
     e->c5_n      = lg_c5_n;
@@ -658,10 +708,10 @@ static void log_task(uint16_t sample_mv) {
     log_head = (uint16_t)((log_head + 1u) % LOG_LEN);
     if (log_count < LOG_LEN) log_count++;
     log_written++;
-    log_last_at = timer_read32();
+    acc_start  += LOG_PERIOD_MS;   /* a fixed cadence: no drift from loop jitter */
+    log_last_at = acc_start;
     acc_sum = 0; acc_n = 0; acc_min = 0; acc_led = 0; acc_led_n = 0; acc_flags = 0;
     lg_c5_sum = 0; lg_c5_n = 0; lg_c5_min = C5_NONE; lg_c5_max = 0;
-    acc_start = log_last_at | 1u;
 }
 
 void battery_log_read(uint16_t idx, uint8_t *out) {
@@ -729,7 +779,9 @@ void battery_task(void) {
     }
 
     supply_tick(mv);
-    bool fresh_report = c5_intake();
+    if (!c5_fresh()) c5_forget();
+    bool fresh_report = c5_new;
+    c5_new            = false;
     full_tick();
     if (fresh_report) {
         uint8_t m = battery_5c_median();

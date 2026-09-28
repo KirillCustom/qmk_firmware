@@ -63,6 +63,8 @@ uint8_t  battery_level_pct(void);
 /* The same level in per mille, 0xFFFF unknown. */
 uint16_t battery_level_permille(void);
 
+/* Every `5C` frame the CH582F driver parses, as it parses it. */
+void     battery_5c_report(uint8_t pct);
 /* The median of the recent fresh `5C` reports, 0xFF when there is none. */
 uint8_t  battery_5c_median(void);
 /* That median as pack mV; 0 when there is none. ⚠️ At a median of 0 or 100

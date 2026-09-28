@@ -1,5 +1,6 @@
 #include "watchdog_record.h"
 #include "ch582f_ajazz.h"
+#include "battery.h"   /* battery_5c_report */
 #include "bluetooth.h"
 #include "quantum.h"
 #include "hal.h"
@@ -1066,6 +1067,7 @@ void ch582_task(void) {
                         battery_level     = d;
                         battery_last_recv = timer_read32();
                         battery_reports++;
+                        battery_5c_report(d);   /* every report, not the last of a burst */
                         battery_seen      = true;
                         /* Lowest ever seen, for the debug page. The module is the
                          * only thing that can read the cell, and we have no idea

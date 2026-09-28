@@ -883,7 +883,9 @@ static void dbg_compose(void) {
      *     clamp's bound, ">4036" at 100 and "<3161" at 0, never a number;
      *   - VDD, the SN32's rail. On battery that is a buck-boost's output pinned
      *     at ~3.90 V: it says which supply is on, not how full the pack is.
-     * "59 3677 3.901V". Widest: "Batt" + "100 >4036 4.790V" = 4 + 16 of 21. */
+     * As "5C@age pack vdd", all mV: "59@4 3677 3901" is 5C 59 reported 4 s
+     * ago, pack 3677 mV, VDD 3901 mV. Widest: "Batt" + "100@19 >4036 4790"
+     * = 4 + 17 of 21. */
     uint8_t  batt = ch582_get_battery();
     uint32_t age  = ch582_battery_age_ms();
     uint8_t  med  = battery_5c_median();
@@ -893,7 +895,13 @@ static void dbg_compose(void) {
     if (battery_is_absent()) {
         dbg_row(8, "Batt", "none");
     } else {
-        p = (batt <= 100 && age < 20000u) ? dbg_u32(v, batt) : dbg_append(v, "--");
+        if (batt <= 100 && age < 20000u) {
+            p = dbg_u32(v, batt);
+            p = dbg_append(p, "@");
+            p = dbg_u32(p, age / 1000u);
+        } else {
+            p = dbg_append(v, "--");
+        }
         p = dbg_append(p, " ");
         if (!pk) {
             p = dbg_append(p, "--");
@@ -903,14 +911,8 @@ static void dbg_compose(void) {
             p = dbg_u32(p, pk);
         }
         if (mv) {
-            uint16_t frac = mv % 1000u;
             p = dbg_append(p, " ");
-            p = dbg_u32(p, mv / 1000u);
-            p = dbg_append(p, ".");
-            if (frac < 100u) p = dbg_append(p, "0");
-            if (frac < 10u)  p = dbg_append(p, "0");
-            p = dbg_u32(p, frac);
-            dbg_append(p, "V");
+            dbg_u32(p, mv);
         }
         dbg_row(8, "Batt", v);
     }
@@ -1455,7 +1457,9 @@ static void draw_battery(bool force) {
     if (absent) snprintf(txt, sizeof(txt), "No Batt");
     bool same_txt = strcmp(txt, last_txt) == 0;
     if (!force && batt == last_batt && chrg == last_chrg && absent == last_absent && same_txt) return;
-    bool level_changed  = force || batt != last_batt;
+    /* Presence coming back must repaint the bar the absent branch cleared,
+     * even when the level itself did not move. */
+    bool level_changed  = force || batt != last_batt || absent != last_absent;
     bool chrg_changed   = force || chrg != last_chrg;
     bool absent_changed = force || absent != last_absent;
     bool text_changed   = force || !same_txt;
@@ -1531,6 +1535,9 @@ static void draw_battery(bool force) {
         // column -- an empty-looking icon at 3% would read as "dead".
         uint16_t fw = (uint16_t)(((uint32_t)batt * BATT_IN_W + 99u) / 100u);
         if (fw > BATT_IN_W) fw = BATT_IN_W;
+        /* "Low" keeps a red sliver: the text glyphs cannot be recoloured, and
+         * an empty white outline beside it would not read as a warning. */
+        if (fw == 0 && batt == 0 && st == BATTERY_STATE_BATTERY) fw = 2;
         /* A drop vacates columns on the right; a rise, or a colour change at
          * the 20/50 thresholds, is covered by repainting the whole bar. */
         if (fw < last_fw)

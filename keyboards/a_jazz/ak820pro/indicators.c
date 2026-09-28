@@ -212,9 +212,11 @@ bool battery_is_absent(void) {
      * in the BT position too, so a pack-less board on USB in BT never said
      * "No Batt" (codex review of the gauge plan, 2026-09-28). */
     if (battery_ran_from_pack()) return false;
-    /* The module still reports something above empty: not our case. 0xFF is
-     * "has not answered yet", which is also not a verdict we can make. */
-    if (ch582_get_battery() != 0) return false;
+    /* The module's recent reports are not all empty: not our case. The fresh
+     * median (battery.c), not the last raw value, so one stray 0 from a pack
+     * that is there cannot call it missing; no median yet (0xFF) is also no
+     * verdict. */
+    if (battery_5c_median() != 0) return false;
     /* Boot: give the charger time to assert before calling it missing. */
     return timer_read32() >= CELL_GRACE_MS;
 }
