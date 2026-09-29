@@ -69,7 +69,7 @@ RGB_MATRIX_CUSTOM_KB = yes
 #
 # asym_eager_defer_pk was tried and REVERTED. Eager reports the first closure
 # immediately, so on a worn switch an isolated noise closure becomes a phantom
-# tap or a false hold -- a worse failure than a drop on a board whose owner has
+# tap or a false hold -- a worse failure than a drop on a board where JD has
 # replaced corroded switches before. It also delays release ~5-10 ms, which can
 # flip tap-hold decisions near TAPPING_TERM.
 #

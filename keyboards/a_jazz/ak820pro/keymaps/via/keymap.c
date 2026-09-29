@@ -12,7 +12,7 @@
 #define KC_MCTL KC_MISSION_CONTROL  // Mission Control
 #define KC_LPAD KC_LAUNCHPAD        // Launchpad
 
-/* THE OWNER'S LAYOUT IS THE DEFAULT. Generated 2026-09-03 from the board's VIA
+/* JD'S LAYOUT IS THE DEFAULT. Generated 2026-09-03 from the board's VIA
  * keymap (ak820keymap.py dump -> scripts/keymap_to_c.py --write), so a flash
  * with no keymap restore still comes up as the board is actually used. VIA's
  * stored keymap overrides this array, which is why it is regenerated from the

@@ -706,7 +706,7 @@ static uint16_t dbg_dirty = 0;
  * refresh. That call is SYNCHRONOUS and issues one LCD operation per glyph -- a
  * window command, a flash read and a DMA arm per 6x14 cell, almost all
  * overhead. Nine rows of 21 columns is ~189 of them: measured blit_gap_max_ms
- * 304 and seven unexplained >=25 ms main-loop stalls, and the owner's typing
+ * 304 and seven unexplained >=25 ms main-loop stalls, and JD's typing
  * visibly collapsed the moment the page appeared. A page built to prove
  * keystrokes were not being lost was losing them.
  *

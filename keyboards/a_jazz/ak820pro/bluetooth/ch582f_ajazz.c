@@ -891,7 +891,7 @@ void ch582_task(void) {
      * last_battery_poll starts at 0 and timer_elapsed() is measured from boot,
      * so the old form waited out the whole 5 s interval before asking even
      * once -- which is exactly the "battery appears a few seconds late on every
-     * boot" the owner noticed. Asking earlier than module_alive is pointless:
+     * boot" JD noticed. Asking earlier than module_alive is pointless:
      * at cold boot the module's UART is not up yet and the frame is dropped
      * (the same reason the connect select needs its own cold-boot retry). */
     if (module_alive && !battery_seen) {
