@@ -43,7 +43,7 @@ void kb_eeconfig_set_lcd_brightness(uint8_t level);
 bool kb_eeconfig_get_clock_mode(uint8_t *mode);
 void kb_eeconfig_set_clock_mode(uint8_t mode);
 
-/* The battery level (battery.c), in per mille, kept to whole percent. It
+/* The battery level (battery.c), in per mille, kept to 0.5 %. It
  * exists for one case: a reboot at the top clamp, where `5C` reads 100 and the
  * voltage cannot say how far into the clamp the pack is -- and every cable <->
  * BT slider flip is a reboot. Returns false when unset. */

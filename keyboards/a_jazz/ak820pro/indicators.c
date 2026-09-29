@@ -216,7 +216,7 @@ bool battery_is_absent(void) {
      * median (battery.c), not the last raw value, so one stray 0 from a pack
      * that is there cannot call it missing; no median yet (0xFF) is also no
      * verdict. */
-    if (battery_5c_median() != 0) return false;
+    if (battery_5c_rounded() != 0) return false;
     /* Boot: give the charger time to assert before calling it missing. */
     return timer_read32() >= CELL_GRACE_MS;
 }

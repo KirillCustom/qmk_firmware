@@ -243,36 +243,50 @@ battery_supply_t battery_supply(void) { return supply; }
 bool battery_on_battery(void)         { return supply == BATTERY_SUPPLY_BATTERY; }
 bool battery_ran_from_pack(void)      { return ran_from_pack; }
 
-/* --- `5C`: intake, freshness, median --------------------------------------------
+/* --- `5C`: intake, freshness, the estimate -------------------------------------
  * The CH582F driver hands over every report as it is parsed
  * (battery_5c_report), so two that land between ticks are both counted -- in
- * the median, the critical-zero run, and the log. Never re-read the cached
- * value instead: that only duplicates the one report it holds. Median of the
- * last 7, ~35 s at one report per 5 s. Emptied when the reports go stale, so a
- * module that falls silent and returns is not judged on minutes-old values,
- * and at every supply or charger change. */
-#define C5_RING       7u
-#define C5_MIN_MEDIAN 3u
-#define C5_STALE_MS   20000u    /* four missed polls */
-#define C5_NONE       0xFFu
+ * the estimate, the critical-zero run, and the log. Never re-read the cached
+ * value instead: that only duplicates the one report it holds.
+ *
+ * The estimate is a TRIMMED MEAN of the last 64 reports, in hundredths of a
+ * count, dropping the highest and lowest eighth: ~2.7 min at the measured one
+ * report per ~2.6 s (the module streams them as well as answering the A6 53
+ * poll). Not a median: a median of whole counts is a whole count, and one count
+ * is ~9 mV -- 1.2% of level at 4.0 V, up to ~5% near 3.8 V -- so the level moved
+ * in lumps and then sat still for an hour. `5C` dithers between neighbouring
+ * counts (the drain log's means read like 96.62), so a mean resolves about a
+ * tenth of a count; the trim keeps the median's indifference to a stray report.
+ *
+ * Emptied when the reports go stale, so a module that falls silent and returns
+ * is not judged on minutes-old values, and at every supply or charger change. */
+#define C5_RING        64u
+#define C5_MIN_EST     5u
+#define C5_STALE_MS    20000u    /* ~8 missed reports */
+#define C5_NONE        0xFFu
+#define C5_EST_NONE    0xFFFFu
+/* The clamps, as the median saw them: most reports at 100 (>= 4036 mV, the
+ * voltage says only "at least"), or most at 0 (<= 3161 mV). */
+#define C5_TOP_X100    9950u
+#define C5_BOTTOM_X100 50u
 
 static uint8_t  c5_ring[C5_RING];
-static uint8_t  c5_count   = 0;
-static uint8_t  c5_pos     = 0;
-static bool     c5_new     = false;   /* a report arrived since the last tick */
-static uint8_t  c5_med     = C5_NONE;
-static uint8_t  c5_zero_run = 0;      /* consecutive reports of 0 */
+static uint8_t  c5_count    = 0;
+static uint8_t  c5_pos      = 0;
+static bool     c5_new      = false;         /* a report arrived since the last tick */
+static uint16_t c5_est      = C5_EST_NONE;   /* hundredths of a count */
+static uint8_t  c5_zero_run = 0;             /* consecutive reports of 0 */
 
 /* The log's view of every report in the period (see log_task). */
-static uint16_t lg_c5_sum = 0;
-static uint8_t  lg_c5_n = 0, lg_c5_min = C5_NONE, lg_c5_max = 0;
+static uint16_t lg_c5_sum = 0, lg_c5_n = 0;
+static uint8_t  lg_c5_min = C5_NONE, lg_c5_max = 0;
 
-/* The median reads c5_ring[0 .. c5_count-1], so writing must restart at 0 too:
+/* The estimate reads c5_ring[0 .. c5_count-1], so writing must restart at 0 too:
  * resuming at the old c5_pos would sort new reports among forgotten ones. */
 static void c5_forget(void) {
     c5_count    = 0;
     c5_pos      = 0;
-    c5_med      = C5_NONE;
+    c5_est      = C5_EST_NONE;
     c5_zero_run = 0;
 }
 
@@ -281,7 +295,11 @@ static bool c5_fresh(void) {
     return age != UINT32_MAX && age < C5_STALE_MS;
 }
 
-static uint8_t c5_median_of_ring(void) {
+static bool c5_top(uint16_t e)    { return e != C5_EST_NONE && e >= C5_TOP_X100; }
+static bool c5_bottom(uint16_t e) { return e < C5_BOTTOM_X100; }
+
+/* ~1000 compares for a full ring, at one report per ~2.6 s. */
+static uint16_t c5_trimmed_mean_x100(void) {
     uint8_t s[C5_RING];
     for (uint8_t i = 0; i < c5_count; i++) {
         uint8_t v = c5_ring[i], j = i;
@@ -291,7 +309,11 @@ static uint8_t c5_median_of_ring(void) {
         }
         s[j] = v;
     }
-    return s[c5_count / 2u];
+    uint8_t  trim = (uint8_t)(c5_count / 8u);
+    uint8_t  n    = (uint8_t)(c5_count - 2u * trim);
+    uint16_t sum  = 0;
+    for (uint8_t i = trim; i < c5_count - trim; i++) sum += s[i];
+    return (uint16_t)(((uint32_t)sum * 100u + n / 2u) / n);
 }
 
 /* Called by the CH582F driver for every `5C` frame it parses (main loop). */
@@ -301,10 +323,10 @@ void battery_5c_report(uint8_t v) {
     c5_ring[c5_pos] = v;
     c5_pos          = (uint8_t)((c5_pos + 1u) % C5_RING);
     if (c5_count < C5_RING) c5_count++;
-    c5_med      = (c5_count >= C5_MIN_MEDIAN) ? c5_median_of_ring() : C5_NONE;
+    c5_est      = (c5_count >= C5_MIN_EST) ? c5_trimmed_mean_x100() : C5_EST_NONE;
     c5_zero_run = (v == 0u) ? (uint8_t)(c5_zero_run < UINT8_MAX ? c5_zero_run + 1u : c5_zero_run) : 0u;
 
-    if (lg_c5_n < UINT8_MAX) {
+    if (lg_c5_n < UINT16_MAX && lg_c5_sum <= (uint16_t)(UINT16_MAX - v)) {
         lg_c5_sum += v;
         lg_c5_n++;
         if (v < lg_c5_min) lg_c5_min = v;
@@ -312,25 +334,30 @@ void battery_5c_report(uint8_t v) {
     }
 }
 
-uint8_t battery_5c_median(void) {
-    return c5_fresh() ? c5_med : C5_NONE;
+uint16_t battery_5c_x100(void) {
+    return c5_fresh() ? c5_est : C5_EST_NONE;
+}
+
+uint8_t battery_5c_rounded(void) {
+    uint16_t e = battery_5c_x100();
+    return (e == C5_EST_NONE) ? C5_NONE : (uint8_t)((e + 50u) / 100u);
 }
 
 /* --- `5C` -> pack millivolts ---------------------------------------------------
- * mV = (5C + 361.04) / 114.22 * 1000, integer. ⚠️ Valid for 1..99. At 0 and
- * 100 this returns the clamp's BOUND (3161, 4036): "at most" and "at least",
- * which the callers treat as such -- never as a reading, never on the curve. */
+ * mV = (5C + 361.04) / 114.22 * 1000, integer, from the estimate in hundredths.
+ * ⚠️ Valid below the clamps. At them it returns roughly the clamp's BOUND
+ * (3161, 4036): "at most" and "at least", which the callers treat as such --
+ * never as a reading, never on the curve. */
 #define FIT_SLOPE_X100  11422u      /* 114.22 counts per volt */
 #define FIT_OFFSET_X100 36104u      /* 361.04 counts */
 
-static uint16_t c5_to_mv(uint8_t c) {
-    return (uint16_t)(((uint32_t)c * 100000u + (uint32_t)FIT_OFFSET_X100 * 1000u + FIT_SLOPE_X100 / 2u) /
-                      FIT_SLOPE_X100);
+static uint16_t c5_to_mv(uint16_t x100) {
+    return (uint16_t)((((uint32_t)x100 + FIT_OFFSET_X100) * 1000u + FIT_SLOPE_X100 / 2u) / FIT_SLOPE_X100);
 }
 
 uint16_t battery_pack_mv(void) {
-    uint8_t m = battery_5c_median();
-    return (m == C5_NONE) ? 0u : c5_to_mv(m);
+    uint16_t e = battery_5c_x100();
+    return (e == C5_EST_NONE) ? 0u : c5_to_mv(e);
 }
 
 /* --- The level ------------------------------------------------------------------
@@ -367,9 +394,9 @@ static uint16_t curve(uint16_t mv) {
     return curve_pm[CURVE_N - 1];
 }
 
-/* The level for a median `5C` below the top clamp; 0 at the bottom clamp. */
-static uint16_t c5_level(uint8_t m) {
-    return (m == 0u) ? 0u : curve(c5_to_mv(m));
+/* The level for a `5C` estimate below the top clamp; 0 at the bottom clamp. */
+static uint16_t c5_level(uint16_t e) {
+    return c5_bottom(e) ? 0u : curve(c5_to_mv(e));
 }
 
 /* ⚠️ PROVISIONAL. While charging, `5C` reads the terminal voltage, which the
@@ -382,9 +409,9 @@ static uint16_t c5_level(uint8_t m) {
  * (level_report) bounds what a wrong value costs to one correction. */
 #define CHARGE_IR_MV 150u
 
-static uint16_t c5_level_charging(uint8_t m) {
-    if (m == 0u) return 0u;
-    uint16_t mv = c5_to_mv(m);
+static uint16_t c5_level_charging(uint16_t e) {
+    if (c5_bottom(e)) return 0u;
+    uint16_t mv = c5_to_mv(e);
     return curve(mv > CHARGE_IR_MV ? (uint16_t)(mv - CHARGE_IR_MV) : 0u);
 }
 
@@ -395,10 +422,11 @@ static uint16_t c5_level_charging(uint8_t m) {
  * comes from a full charge, so the panel's rounding needs no special case. */
 #define LEVEL_CHARGE_CAP   970u
 /* The countdown in the top clamp never goes below this: the clamp's exit is
- * 90%, and it is the voltage's job to say when the pack has got there. 925 is
- * the lowest level the panel still rounds to 95, so the clamp reads 100 then
- * 95 -- never the exit's 90 before the voltage says so. */
-#define LEVEL_CLAMP_FLOOR  925u
+ * 90%, and it is the voltage's job to say when the pack has got there. Just
+ * above the exit, so with a whole-percent (or tenths) panel the countdown runs
+ * into the voltage's 90 without a step. (It was 925 while the panel showed 5%
+ * steps, the lowest level that still rounded to 95.) */
+#define LEVEL_CLAMP_FLOOR  905u
 /* Booted at the top clamp: the voltage says only "90..100", so take the level
  * saved before the reboot (every cable <-> BT slider flip is one) if it is in
  * that band. With nothing saved -- only after a flash erased it -- guess the
@@ -427,6 +455,28 @@ static uint16_t below_best = 0;
 static uint16_t clamp_s    = 0;
 static bool     full       = false;
 
+/* What is saved, and when. ⚠️ Every internal-flash write blanks the whole LED
+ * matrix for a few ms -- interrupts are masked for the program, the vector
+ * table and the row ISR live in flash, and the M0 has no VTOR to move them (JD
+ * sees the blink; 2026-09-29). Saving every whole-percent change was ~100
+ * writes a discharge. The restore only uses a value in the clamp's 90..100
+ * band, so save only there, in 2.5% steps, rounded DOWN so a restore never
+ * overstates: FULL (on USB), then 97.5, 95, 92.5, 90 on battery, and one marker
+ * below the band so a stale 9x is not restored after a pack swap. Six writes a
+ * charge cycle; nothing while charging. */
+#define LEVEL_SAVE_BELOW_BAND 890u
+
+static uint16_t level_save_point(void) {
+    if (level >= LEVEL_FULL) return LEVEL_FULL;
+    if (level >= LEVEL_CLAMP_EXIT) return (uint16_t)((level / 25u) * 25u);
+    return LEVEL_SAVE_BELOW_BAND;
+}
+
+static void level_save_tick(void) {   /* 1 Hz */
+    if (level == LEVEL_UNKNOWN) return;
+    if (full || supply == BATTERY_SUPPLY_BATTERY) kb_eeconfig_set_batt_level(level_save_point());
+}
+
 static uint16_t level_at_clamp_boot(void) {
     uint16_t saved;
     if (kb_eeconfig_get_batt_level(&saved) && saved >= LEVEL_CLAMP_EXIT) return saved;
@@ -443,13 +493,13 @@ static void level_toward(uint16_t target) {
 
 static void full_tick(void) {
     full = supply == BATTERY_SUPPLY_EXTERNAL && chrg_off_run >= FULL_SETTLE_TICKS &&
-           battery_5c_median() == 100u;
+           c5_top(battery_5c_x100());
 }
 
-/* One new fresh median. */
-static void level_report(uint8_t m) {
+/* One new fresh estimate, in hundredths of a count. */
+static void level_report(uint16_t m) {
     if (supply == BATTERY_SUPPLY_BATTERY) {
-        if (m == 100u) {
+        if (c5_top(m)) {
             /* The top clamp: the countdown (level_tick_1hz) owns it, from
              * wherever charging left the level. */
             if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
@@ -483,7 +533,7 @@ static void level_report(uint8_t m) {
         level = LEVEL_FULL;
         return;
     }
-    if (m == 100u) {
+    if (c5_top(m)) {
         /* Charging in the CV phase, or idle on USB with a nearly full pack:
          * level_tick_1hz creeps it. */
         if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
@@ -512,8 +562,8 @@ static void level_report(uint8_t m) {
 }
 
 static void level_tick_1hz(void) {
-    uint8_t m = battery_5c_median();
-    if (m == 100u && level != LEVEL_UNKNOWN) {
+    uint16_t m = battery_5c_x100();
+    if (c5_top(m) && level != LEVEL_UNKNOWN) {
         if (supply == BATTERY_SUPPLY_BATTERY) {
             if (level > LEVEL_CLAMP_FLOOR && ++clamp_s >= COUNTDOWN_S_PER_PM) {
                 clamp_s = 0;
@@ -537,8 +587,9 @@ uint16_t battery_level_permille(void) { return level; }
 
 uint8_t battery_level_pct(void) {
     if (level == LEVEL_UNKNOWN) return 0xFF;
-    /* 5% steps: the granularity says "estimate"; 1% is a claim we cannot back. */
-    uint16_t p = (uint16_t)(((level + 25u) / 50u) * 5u);
+    /* Whole percent. It was 5% steps, which JD found hid how fast the level was
+     * falling -- the thing worth watching. (Tenths: BATTERY_SHOW_TENTHS.) */
+    uint16_t p = (uint16_t)((level + 5u) / 10u);
     return (uint8_t)(p > 100u ? 100u : p);
 }
 
@@ -595,8 +646,8 @@ static void protection_tick(void) {
     }
     if (supply != BATTERY_SUPPLY_BATTERY) return;
 
-    uint8_t m = battery_5c_median();
-    if (m == C5_NONE) return;
+    uint16_t m = battery_5c_x100();
+    if (m == C5_EST_NONE) return;
     if (c5_zero_run >= CRITICAL_ZEROES) {
         cut_lights();
         /* At or under 3.161 V: the panel says "Low" now, not after the
@@ -606,7 +657,7 @@ static void protection_tick(void) {
     /* At the top clamp the pack is only known to be >= 4036 mV, which is not
      * "under" any threshold -- even one set above 4036. At the bottom clamp
      * the bound (<= 3161) IS under any threshold above it. */
-    bool     top = (m == 100u);
+    bool     top = c5_top(m);
     uint16_t mv  = c5_to_mv(m);
 
     if (warn_mv && !top && mv < warn_mv) {
@@ -663,15 +714,16 @@ typedef struct __attribute__((packed)) {
     uint16_t vdd_avg;      /* mean raw VDD over the period, mV */
     uint16_t vdd_min;      /* lowest raw VDD, mV */
     uint16_t c5_sum;       /* sum of every fresh `5C` report in the period */
-    uint8_t  c5_n;         /* how many (0: none arrived) */
+    uint8_t  c5_n_lo;      /* how many, low byte (0: none arrived) */
     uint8_t  c5_min;       /* 0xFF when none */
     uint8_t  c5_max;
     uint8_t  flags;        /* BATT_F_* at the end of the period */
     uint8_t  flags_any;    /* BATT_F_* OR-ed over every tick of the period */
-    uint8_t  level;        /* the level at the end, whole %, 0xFF unknown */
+    uint8_t  level;        /* the level at the end, in 0.5 % (0..200), 0xFF unknown */
     uint16_t led_pm;       /* mean LED drive, per mille of the maximum */
     uint8_t  bkl;          /* effective LCD backlight level at the end */
-    uint8_t  reserved;
+    uint8_t  c5_n_hi;      /* how many, high byte: ~230 a period at one per ~2.6 s,
+                            * which a byte (v3) nearly overflowed */
 } log_entry_t;
 _Static_assert(sizeof(log_entry_t) == BATTERY_LOG_ENTRY_SIZE, "HC_BATTLOG entry size");
 
@@ -706,15 +758,15 @@ static void log_task(uint16_t sample_mv) {
     e->vdd_avg   = acc_n ? (uint16_t)(acc_sum / acc_n) : 0u;   /* 0: no conversion in the period */
     e->vdd_min   = acc_min;
     e->c5_sum    = lg_c5_sum;
-    e->c5_n      = lg_c5_n;
+    e->c5_n_lo   = (uint8_t)(lg_c5_n & 0xFFu);
+    e->c5_n_hi   = (uint8_t)(lg_c5_n >> 8);
     e->c5_min    = lg_c5_min;
     e->c5_max    = lg_c5_max;
     e->flags     = battery_flags();
     e->flags_any = acc_flags;
-    e->level     = (level == LEVEL_UNKNOWN) ? 0xFFu : (uint8_t)((level + 5u) / 10u);
+    e->level     = (level == LEVEL_UNKNOWN) ? 0xFFu : (uint8_t)(level / 5u);
     e->led_pm    = acc_led_n ? (uint16_t)(acc_led / acc_led_n) : led_pm;
     e->bkl       = display_backlight_effective();
-    e->reserved  = 0;
 
     log_head = (uint16_t)((log_head + 1u) % LOG_LEN);
     if (log_count < LOG_LEN) log_count++;
@@ -795,8 +847,8 @@ void battery_task(void) {
     c5_new            = false;
     full_tick();
     if (fresh_report) {
-        uint8_t m = battery_5c_median();
-        if (m != C5_NONE) level_report(m);
+        uint16_t m = battery_5c_x100();
+        if (m != C5_EST_NONE) level_report(m);
     }
     protection_tick();
 
@@ -806,9 +858,7 @@ void battery_task(void) {
         acc_led += led_pm;
         acc_led_n++;
         level_tick_1hz();
-        /* Coalesced and settled by kb_eeconfig: it writes only when the whole
-         * percent has changed and then held for 5 s. */
-        if (level != LEVEL_UNKNOWN) kb_eeconfig_set_batt_level(level);
+        level_save_tick();
     }
     log_task(mv);
 }

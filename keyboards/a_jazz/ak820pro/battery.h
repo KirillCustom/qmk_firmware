@@ -29,9 +29,9 @@ typedef enum {
 } battery_state_t;
 
 /* HC_BATTLOG reply format, and HC_CONN byte 31 (the battery fields' layout). */
-#define BATTERY_LOG_VERSION    3
+#define BATTERY_LOG_VERSION    4
 #define BATTERY_LOG_ENTRY_SIZE 16
-#define BATTERY_PROTO_VERSION  3
+#define BATTERY_PROTO_VERSION  4
 
 /* Enable the ADC. Call once from post-init. Blocks ~100 us (ADC warm-up). */
 void battery_init(void);
@@ -57,18 +57,22 @@ bool             battery_ran_from_pack(void);
 
 battery_state_t battery_state(void);
 
-/* The level on the panel: 0-100 in 5% steps, or 0xFF when nothing is known
- * yet. 100 only after a full charge. */
+/* The level on the panel: 0-100 in whole percent, or 0xFF when nothing is
+ * known yet. 100 only after a full charge. */
 uint8_t  battery_level_pct(void);
 /* The same level in per mille, 0xFFFF unknown. */
 uint16_t battery_level_permille(void);
 
 /* Every `5C` frame the CH582F driver parses, as it parses it. */
 void     battery_5c_report(uint8_t pct);
-/* The median of the recent fresh `5C` reports, 0xFF when there is none. */
-uint8_t  battery_5c_median(void);
-/* That median as pack mV; 0 when there is none. ⚠️ At a median of 0 or 100
- * this is the clamp's BOUND (3161 = "at most", 4036 = "at least"). */
+/* The estimate from the recent fresh `5C` reports (a trimmed mean), in
+ * hundredths of a count; 0xFFFF when there is none. */
+uint16_t battery_5c_x100(void);
+/* The same, rounded to a whole count; 0xFF when there is none. 100 and 0 are
+ * the clamps. */
+uint8_t  battery_5c_rounded(void);
+/* That estimate as pack mV; 0 when there is none. ⚠️ At the clamps this is
+ * roughly the clamp's BOUND (3161 = "at most", 4036 = "at least"). */
 uint16_t battery_pack_mv(void);
 
 /* LED drive over the last second, per mille of the maximum (after the power cap). */

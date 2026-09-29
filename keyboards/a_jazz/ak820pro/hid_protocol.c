@@ -362,15 +362,15 @@ enum {
      *   [16..17] VDD min mV         [18..19] VDD max mV (since boot)
      *   [20] charger pins: bit0 = CHRG level, bit1 = STDBY level (both
      *        active low)
-     *   [21] median of the recent fresh `5C` reports (0xFF none)
+     *   [21] the `5C` estimate rounded to a count (0xFF none)
      *   [22] s since the module's last `5C` (255 = stale or never)
      *   [23] battery_flags() (BATT_F_* in battery.c)
      *   [24..25] the level, per mille (0xFFFF unknown)
      *   [26..27] pack mV from that median (0 none; at a median of 0 or 100,
      *            the clamp's bound)      [28..29] LED drive, per mille
      *   [30] battery_state()
-     *   [31] BATTERY_PROTO_VERSION: this layout is 3. Older firmware leaves
-     *        the host's own byte here (0). */
+     *   [31] BATTERY_PROTO_VERSION: 3 or 4 (4: log v4). Older firmware
+     *        leaves the host's own byte here (0). */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -582,7 +582,7 @@ static void health_command(uint8_t *data, uint8_t length) {
                 }
                 data[20] = (gpio_read_pin(CHARGE_CHRG_PIN)  ? 1 : 0) |
                            (gpio_read_pin(CHARGE_STDBY_PIN) ? 2 : 0);
-                data[21] = battery_5c_median();
+                data[21] = battery_5c_rounded();
                 uint32_t age = ch582_battery_age_ms();
                 data[22] = (age == UINT32_MAX || age / 1000u > 254u) ? 255u : (uint8_t)(age / 1000u);
                 data[23] = battery_flags();

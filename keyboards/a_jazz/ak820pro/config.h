@@ -263,6 +263,9 @@
 // zero-fills it once at the next boot (a flash erases the whole emulated
 // EEPROM anyway).
 #define EECONFIG_KB_DATA_SIZE    6
+// The battery row in tenths of a percent ("85.9%") while the level curve is
+// being fitted. Remove for whole percent once it is.
+#define BATTERY_SHOW_TENTHS
 #define EECONFIG_KB_DATA_VERSION 3
 
 // Debounce eeconfig flushes from RGB adjustment. Without this QMK writes MCU

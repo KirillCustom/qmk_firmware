@@ -888,7 +888,7 @@ static void dbg_compose(void) {
      * = 4 + 17 of 21. */
     uint8_t  batt = ch582_get_battery();
     uint32_t age  = ch582_battery_age_ms();
-    uint8_t  med  = battery_5c_median();
+    uint8_t  med  = battery_5c_rounded();
     uint16_t pk   = battery_pack_mv();
     uint16_t mv   = battery_vdd_mv();
     /* "none" is the presence verdict, not a level: no pack fitted (indicators.c). */
@@ -1427,7 +1427,7 @@ static void draw_battery(bool force) {
     static char     last_txt[8] = "\x01";      /* what the text slot says ("\x01": never drawn) */
 
     /* The level is battery.c's, from the CH582F's `5C` -- a voltmeter on the
-     * pack -- in 5% steps. Never VDD, which this row used to show: on battery
+     * pack -- in whole percent (tenths with BATTERY_SHOW_TENTHS). Never VDD, which this row used to show: on battery
      * it is a buck-boost's output, pinned at 3.90 V, as informative as the
      * stock firmware's hardcoded 100. "Low" at the bottom rather than a "0%"
      * that reads as dead while the board still runs. When nothing is known
@@ -1435,7 +1435,15 @@ static void draw_battery(bool force) {
     battery_state_t st   = battery_state();
     uint8_t         batt = battery_level_pct();   /* 0xFF unknown */
     char            txt[8];
+#ifdef BATTERY_SHOW_TENTHS
+    uint16_t        pm   = battery_level_permille();
+#endif
     if (batt == 0 && st == BATTERY_STATE_BATTERY) snprintf(txt, sizeof(txt), "Low");
+#ifdef BATTERY_SHOW_TENTHS
+    /* Calibration view: "85.9%". 100% stays whole. 6 glyphs at most is 60 px
+     * of the slot's 78, and a redraw is one text blit per 0.1% change. */
+    else if (batt <= 100 && pm < 1000u)           snprintf(txt, sizeof(txt), "%u.%u%%", pm / 10u, pm % 10u);
+#endif
     else if (batt <= 100)                         snprintf(txt, sizeof(txt), "%u%%", batt);
     /* "Charge", not "Charging": at 10 px a cell that is 80 px against the 78
      * between the icon slot and the bezel margin, and it would start inside
