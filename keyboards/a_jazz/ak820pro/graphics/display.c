@@ -879,7 +879,7 @@ static void dbg_compose(void) {
     /* Three readings, kept apart because they mean different things:
      *   - the module's last `5C` ("--" once it is 20 s stale: the module holds
      *     its last value forever);
-     *   - the PACK in mV, from battery.c's median of recent reports -- or the
+     *   - the PACK in mV, from battery.c's trimmed mean of the last 64 reports -- or the
      *     clamp's bound, ">4036" at 100 and "<3161" at 0, never a number;
      *   - VDD, the SN32's rail. On battery that is a buck-boost's output pinned
      *     at ~3.90 V: it says which supply is on, not how full the pack is.

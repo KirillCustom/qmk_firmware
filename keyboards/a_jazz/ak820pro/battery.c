@@ -18,8 +18,8 @@
  * `5C`, the module's battery percent, is a LINEAR VOLTMETER on the pack:
  * 5C = 114.22 * V - 361.04, r2 0.99987 over five meter points 3.30-3.84 V
  * (history/battery-2026-09-25/readings.csv). It clamps at 100 above ~4.036 V
- * and at 0 below ~3.161 V, both extrapolated. It arrives every 5 s, in reply to
- * the A6 53 poll. It answers "how full?".
+ * and at 0 below ~3.161 V, both extrapolated. It arrives 2-3 times per 5 s A6 53
+ * poll cycle, bunched (see the intake below). It answers "how full?".
  *
  * VDD measurement: the internal 2.0 V reference (AIN16) converted against VDD
  * as the reference high, VDD = 2.0 V * 4096 / code. The reference is 1.96-2.04 V,
@@ -79,7 +79,8 @@
  * the supply decision; neither set means UNKNOWN (boot, before the dwell). */
 #define BATT_F_ON_BATTERY 0x01u   /* supply: the pack powers the board */
 #define BATT_F_CHARGING   0x02u   /* charger CHRG pin low, raw */
-#define BATT_F_DONE       0x04u   /* charger STDBY/DONE pin low, raw (never seen) */
+#define BATT_F_DONE       0x04u   /* charger STDBY/DONE pin low, raw: never seen low
+                                   * on USB, and ALWAYS low on battery -- meaningless */
 #define BATT_F_RGB_ON     0x08u
 #define BATT_F_LIGHTS_CUT 0x10u   /* the low-battery protection's RGB cap is on */
 #define BATT_F_SLIDER_USB 0x20u   /* mode slider in the cable position */
@@ -171,8 +172,8 @@ static bool             chg_was       = false;   /* charging_now() last tick */
 static bool             session       = false;
 static bool             ran_from_pack = false;
 /* Set when the board goes onto the pack after a real charging session: the
- * level re-seats once, from the first post-unplug median (see level_report).
- * Owed until consumed: a brief replug before the median exists must not cancel
+ * level re-seats once, from the first post-unplug estimate (see level_report).
+ * Owed until consumed: a brief replug before the estimate exists must not cancel
  * it, or the discharge keeps the charging estimate and its guessed I*R. */
 static bool             reseat        = false;
 
@@ -219,7 +220,7 @@ static void supply_tick(uint16_t raw_mv) {
     }
 
     if (supply != was) {
-        /* Every report in the median was taken on the other supply -- under
+        /* Every report in the estimate was taken on the other supply -- under
          * charge current, or without it -- so none describes this one. */
         c5_forget();
         if (was == BATTERY_SUPPLY_EXTERNAL && supply == BATTERY_SUPPLY_BATTERY && session) reseat = true;
@@ -250,9 +251,11 @@ bool battery_ran_from_pack(void)      { return ran_from_pack; }
  * value instead: that only duplicates the one report it holds.
  *
  * The estimate is a TRIMMED MEAN of the last 64 reports, in hundredths of a
- * count, dropping the highest and lowest eighth: ~2.7 min at the measured one
- * report per ~2.6 s (the module streams them as well as answering the A6 53
- * poll). Not a median: a median of whole counts is a whole count, and one count
+ * count, dropping the highest and lowest eighth: ~2-2.5 min at the 262-334
+ * reports per 10 min the v4 log counts. They come 2-3 per 5 s A6 53 poll cycle,
+ * bunched (the debug page's age resets every ~5 s), so 64 reports may be only
+ * ~25 independent readings; how the module produces them is unconfirmed
+ * (docs/battery.md). Not a median: a median of whole counts is a whole count, and one count
  * is ~9 mV -- 1.2% of level at 4.0 V, up to ~5% near 3.8 V -- so the level moved
  * in lumps and then sat still for an hour. `5C` dithers between neighbouring
  * counts (the drain log's means read like 96.62), so a mean resolves about a
@@ -265,7 +268,7 @@ bool battery_ran_from_pack(void)      { return ran_from_pack; }
 #define C5_STALE_MS    20000u    /* ~8 missed reports */
 #define C5_NONE        0xFFu
 #define C5_EST_NONE    0xFFFFu
-/* The clamps, as the median saw them: most reports at 100 (>= 4036 mV, the
+/* The clamps, as the estimate sees them: most reports at 100 (>= 4036 mV, the
  * voltage says only "at least"), or most at 0 (<= 3161 mV). */
 #define C5_TOP_X100    9950u
 #define C5_BOTTOM_X100 50u
@@ -298,7 +301,7 @@ static bool c5_fresh(void) {
 static bool c5_top(uint16_t e)    { return e != C5_EST_NONE && e >= C5_TOP_X100; }
 static bool c5_bottom(uint16_t e) { return e < C5_BOTTOM_X100; }
 
-/* ~1000 compares for a full ring, at one report per ~2.6 s. */
+/* ~1000 compares for a full ring, at one report per ~2 s. */
 static uint16_t c5_trimmed_mean_x100(void) {
     uint8_t s[C5_RING];
     for (uint8_t i = 0; i < c5_count; i++) {
@@ -443,7 +446,8 @@ static uint16_t c5_level_charging(uint16_t e) {
 #define CV_CREEP_S_PER_PM  180u
 #define CV_CATCHUP_S_PER_PM 15u
 /* On battery the level moves down only after the curve has sat below it for
- * this many fresh medians (~30 s), then to the HIGHEST of them. Every move
+ * this many fresh estimates in a row (~15 s: the 09-29 post-flash walk stepped
+ * 1% about every 15 s), then to the HIGHEST of them. Every move
  * outside the deliberate re-seat is at most 1%, so a correction (a countdown
  * that ran slow, a charge rising fast) eases instead of jumping. */
 #define STEP_DOWN_MEDIANS  6u
@@ -510,7 +514,7 @@ static void level_report(uint16_t m) {
         uint16_t target = c5_level(m);
         if (level == LEVEL_UNKNOWN || reseat) {
             /* First reading, or the first after a real charge: the charging
-             * level carried a guessed I*R, and this median is post-unplug
+             * level carried a guessed I*R, and this estimate is post-unplug
              * reports only (c5_forget at the supply change). */
             level  = target;
             reseat = false;
@@ -557,7 +561,7 @@ static void level_report(uint16_t m) {
         if (session && target > level && level < LEVEL_CHARGE_CAP) level_toward(target);
         return;
     }
-    /* On USB, charger idle or faulted, below the clamp: follow the median. */
+    /* On USB, charger idle or faulted, below the clamp: follow the estimate. */
     level_toward(target);
 }
 
@@ -651,7 +655,7 @@ static void protection_tick(void) {
     if (c5_zero_run >= CRITICAL_ZEROES) {
         cut_lights();
         /* At or under 3.161 V: the panel says "Low" now, not after the
-         * ratchet's 1%-per-30-s walk down from wherever the level was. */
+         * ratchet's 1%-per-~15-s walk down from wherever the level was. */
         level = 0;
     }
     /* At the top clamp the pack is only known to be >= 4036 mV, which is not
@@ -722,8 +726,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  level;        /* the level at the end, in 0.5 % (0..200), 0xFF unknown */
     uint16_t led_pm;       /* mean LED drive, per mille of the maximum */
     uint8_t  bkl;          /* effective LCD backlight level at the end */
-    uint8_t  c5_n_hi;      /* how many, high byte: ~230 a period at one per ~2.6 s,
-                            * which a byte (v3) nearly overflowed */
+    uint8_t  c5_n_hi;      /* how many, high byte: 224-334 a period measured, which
+                            * a byte (v3) nearly overflowed */
 } log_entry_t;
 _Static_assert(sizeof(log_entry_t) == BATTERY_LOG_ENTRY_SIZE, "HC_BATTLOG entry size");
 

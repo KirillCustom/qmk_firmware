@@ -81,7 +81,7 @@ uint16_t battery_led_pm(void);
 /* Status bits for HC_CONN and the log: see BATT_F_* in battery.c. */
 uint8_t battery_flags(void);
 
-/* Raw-HID readouts. battery_log_read fills `out` (29 bytes): version u8 (3),
+/* Raw-HID readouts. battery_log_read fills `out` (29 bytes): version u8 (BATTERY_LOG_VERSION),
  * stored count u16, the requested index u16, ms since the newest entry u32, the
  * log period in s u16, entries ever written (low 16 bits) u16, then the 16-byte
  * entry at `idx` (0 = oldest). battery_cfg applies op 1 (set warn/cut in PACK

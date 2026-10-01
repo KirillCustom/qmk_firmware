@@ -31,9 +31,10 @@
 #    define CH582_CONNECT_RETRY_MS 500
 #endif
 
-/* How often to poll the module for battery level. The module is silent in steady
- * state; the stock firmware periodically sends `A6 53` and the module answers with
- * a `5C <pct>` frame. (The LCD clock is NOT on this wire: the set-time utility
+/* How often to poll the module for battery level. The stock firmware periodically
+ * sends `A6 53` and the module answers with `5C <pct>` frames -- 2-3 per 5 s poll
+ * cycle, bunched, by the battery log's counts; whether those are all replies, or
+ * replies plus an unprompted stream, is unconfirmed (docs/battery.md). (The LCD clock is NOT on this wire: the set-time utility
  * talks to the MCU directly, so time never crosses the CH582 serial link.) */
 /* Retry cadence for the FIRST reading only, until the module has answered once.
  * Short because a boot with no battery shown is the visible symptom, and each
@@ -850,9 +851,9 @@ void ch582_task(void) {
             break;
     }
 
-    /* Periodically poll the module for battery level. The module only emits 5C
-     * battery frames in response to an A6 53 request (the stock firmware polls the
-     * same way). Poll regardless of connection mode: the gauge is valid in BT,
+    /* Periodically poll the module for battery level, as the stock firmware does.
+     * Whether the module would keep sending 5C without the poll is untested, so
+     * the poll stays. Poll regardless of connection mode: the gauge is valid in BT,
      * 2.4G and USB-charging states, and A6 53 is a status query that doesn't touch
      * the link. */
     /* Report TX health alongside the battery poll (every 5 s), and only when
@@ -1061,8 +1062,9 @@ void ch582_task(void) {
                             break;
                     }
                     break;
-                case 0x5C: /* battery percent; PERIODIC and link-independent (streams
-                            * even while disconnected) -> do NOT touch connection state */
+                case 0x5C: /* battery: a linear voltmeter on the pack (battery.c), 2-3
+                            * a poll cycle in any link state -> do NOT touch
+                            * connection state */
                     if (d <= 100) {
                         battery_level     = d;
                         battery_last_recv = timer_read32();

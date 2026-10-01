@@ -366,7 +366,7 @@ enum {
      *   [22] s since the module's last `5C` (255 = stale or never)
      *   [23] battery_flags() (BATT_F_* in battery.c)
      *   [24..25] the level, per mille (0xFFFF unknown)
-     *   [26..27] pack mV from that median (0 none; at a median of 0 or 100,
+     *   [26..27] pack mV from that estimate (0 none; at an estimate of 0 or 100,
      *            the clamp's bound)      [28..29] LED drive, per mille
      *   [30] battery_state()
      *   [31] BATTERY_PROTO_VERSION: 3 or 4 (4: log v4). Older firmware
