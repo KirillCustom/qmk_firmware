@@ -369,17 +369,21 @@ uint16_t battery_pack_mv(void) {
  * that -- not charge -- is what a timed run calibrates, and it is what a user
  * wants to know.
  *
- * ⚠️ PROVISIONAL CURVE. The generic Li-ion rest-voltage table this file used
- * before (0% at 3.27 V ... 80% at 4.02 V), scaled by 90/81.3 so the top clamp
- * (4036 mV) reads 90%: on 2026-09-25 `5C` left 100 about 5.3 h into a ~52-63 h
- * run, so the clamp is the top ~8-10% of runtime. The textbook NMC table was
- * the other candidate, and that run rejects it (47% at 3.74 V, where at most
- * ~25% of the runtime was left). Replace from the calibration run
- * (plans/BATTERY-GAUGE-PLAN.md); only these two arrays change. */
-static const uint16_t curve_mv[] = {3270, 3610, 3690, 3710, 3730, 3750, 3770, 3790, 3800,
-                                    3820, 3840, 3850, 3870, 3910, 3950, 3980, 4020, 4036};
-static const uint16_t curve_pm[] = {   0,   55,  111,  166,  221,  277,  332,  387,  443,
-                                     498,  553,  609,  664,  719,  775,  830,  885,  900};
+ * FITTED from JD's unit, the 2026-09-28 drain test at full white
+ * (scripts/battery_fit.py, history/battery-2026-09-28-drain/): 0% is the RGB
+ * cut at 3400 mV (JD, 2026-10-01), reached 51.6 equivalent full-white hours
+ * after FULL; knots at even steps of level. The clamp's exit came out at 89.6%,
+ * so the top knot keeps LEVEL_CLAMP_EXIT's 90%. One run, one unit: validate on
+ * a run it was not fitted to. ⚠️ The 4.00-4.02 V plateau holds ~20% of the
+ * runtime in ~20 mV, so a few mV there (lighter load, less sag) is ~10%. It
+ * replaced a generic Li-ion table scaled to 90% at the clamp, which read 44% at
+ * 3.80 V where this run had ~23% left. */
+static const uint16_t curve_mv[] = {3400, 3460, 3491, 3523, 3537, 3566, 3596, 3640, 3676,
+                                    3721, 3747, 3783, 3813, 3832, 3846, 3855, 3867, 3894,
+                                    3943, 3982, 3999, 4006, 4008, 4011, 4017, 4036};
+static const uint16_t curve_pm[] = {   0,   10,   20,   30,   40,   50,   60,   80,  100,
+                                     125,  150,  200,  250,  300,  350,  400,  450,  500,
+                                     550,  600,  650,  700,  750,  800,  850,  900};
 #define CURVE_N (sizeof(curve_mv) / sizeof(curve_mv[0]))
 _Static_assert(sizeof(curve_pm) == sizeof(curve_mv), "curve tables must pair");
 
