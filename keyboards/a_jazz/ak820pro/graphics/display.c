@@ -110,6 +110,7 @@ static bool display_paused  = false;   // true while the flash-animation player 
 static bool debug_active    = false;   // true while the Fn+D debug page owns the panel
 static uint8_t debug_exit_step  = 0;   // >0 while the dashboard is being restored
 static uint8_t debug_clear_band = 0;   // >0 while the entry clear is banding down the panel
+static bool    debug_big        = false; // the second Fn+D tap: the camera page (big digits)
 static bool    locks_stage_first = true; // restore: the next lock-band pass forgets the (cleared) band
 static bool splash_cleared = false;
 static bool mac_mode = false;
@@ -345,6 +346,7 @@ static bool draw_locks_staged(bool first);   // Fn+D restore: one lock-band comp
 static void draw_text_slot(bool force);
 static void draw_debug_page(void);   // Fn+D full-panel diagnostics
 static bool debug_pump_glyph(void);  // one changed debug cell, non-blocking
+static bool cam_pump_segment(void);  // one changed camera-page segment, non-blocking
 static bool debug_restore_step(void); // one stage of the post-debug dashboard repaint
 static void draw_conn_row(void);      // three-transport strip, top row
 
@@ -755,6 +757,7 @@ static bool debug_pump_glyph(void) {
         if (++debug_clear_band > DBG_CLEAR_BANDS) debug_clear_band = 0;
         return true;
     }
+    if (debug_big && cam_pump_segment()) return true;
     if (!dbg_dirty) return false;
     for (uint8_t r = 0; r < DBG_ROWS; r++) {
         if (!(dbg_dirty & (1u << r))) continue;
@@ -768,6 +771,130 @@ static bool debug_pump_glyph(void) {
             return true;
         }
         dbg_dirty &= (uint16_t)~(1u << r);   /* row fully painted */
+    }
+    return false;
+}
+
+/* --- Fn+D's camera page ----------------------------------------------------------
+ * The pack and the level in digits a camera can read across a room. The debug
+ * page's 6x14 text is ~3 px tall on the security camera JD films battery runs
+ * with (2026-10-02), and the moment worth filming -- the board dying on the
+ * lights-off reserve -- is the one no RAM log survives. The second tap of Fn+D;
+ * a third returns to the dashboard. It shares the debug page's machinery: the
+ * banded clear on entry, the staged restore on exit, and row 8, the small Batt
+ * row, for anyone close enough to read it.
+ *
+ * SEVEN-SEGMENT DIGITS DRAWN AS RECTANGLES, because no font asset is big enough:
+ * the largest, the clock's, is cropped to 15x22 and holds only 0-9 and ':'.
+ * lcd_fill_rect() is a CPU push at wire speed -- a 6x18 segment is ~0.1 ms --
+ * and cam_pump_segment() paints ONE changed segment per main-loop pass, so no
+ * pass comes near the 10 ms leading indicator (the debug page's history above
+ * is why that matters).
+ *
+ *   line 1  the pack in volts, "3.712"; "----" with no estimate, " HI " at the
+ *           top clamp (>= 4036 mV) and " LO " at the bottom (<= 3161 mV) --
+ *           bounds, never numbers, as on the Batt row
+ *   line 2  the level in percent, right-aligned under it; "---" unknown */
+#define CAM_DIG_W   26
+#define CAM_DIG_H   48
+#define CAM_SEG_T   6
+#define CAM_Y1      4
+#define CAM_Y2      (CAM_Y1 + CAM_DIG_H + 10)
+#define CAM_DIGITS  7                     /* 4 for the volts, 3 for the percent */
+#define CAM_SEG_DP  7                     /* bit 7 of digit 0: the decimal point */
+#define COL_CAM_BG  0x0000                /* the banded clear leaves black */
+_Static_assert(CAM_Y2 + CAM_DIG_H <= (DBG_ROWS - 1) * DBG_ROW_H, "camera digits must clear the Batt row");
+/* Line 1: 1 + 26, a 10 px gap holding the point, then 26 + 6 + 26 + 6 + 26 = 126.
+ * Line 2 sits under line 1's last three digits. */
+static const uint8_t cam_x[CAM_DIGITS] = {1, 37, 69, 101, 37, 69, 101};
+_Static_assert(101 + CAM_DIG_W <= PANEL_WIDTH, "camera digits must fit the panel");
+
+static uint8_t cam_want[CAM_DIGITS];   /* segments wanted: bit 0..6 = a..g */
+static uint8_t cam_shown[CAM_DIGITS];  /* segments on the panel */
+
+/* a = top, b = upper right, c = lower right, d = bottom, e = lower left,
+ * f = upper left, g = middle. */
+static uint8_t cam_glyph(char ch) {
+    switch (ch) {
+        case '0': return 0x3F;
+        case '1': return 0x06;
+        case '2': return 0x5B;
+        case '3': return 0x4F;
+        case '4': return 0x66;
+        case '5': return 0x6D;
+        case '6': return 0x7D;
+        case '7': return 0x07;
+        case '8': return 0x7F;
+        case '9': return 0x6F;
+        case '-': return 0x40;
+        case 'H': return 0x76;
+        case 'I': return 0x30;   /* e+f, the LEFT pair, so "HI" cannot read as "H1" */
+        case 'L': return 0x38;
+        case 'O': return 0x3F;
+        default:  return 0x00;
+    }
+}
+
+/* The rect of segment s of digit d, inclusive. Corners stay empty: the classic
+ * look, and every segment a separate rect. */
+static void cam_seg_rect(uint8_t d, uint8_t s, uint16_t r[4]) {
+    const uint16_t x = cam_x[d], y = (d < 4) ? CAM_Y1 : CAM_Y2;
+    const uint16_t W = CAM_DIG_W, H = CAM_DIG_H, T = CAM_SEG_T, M = CAM_DIG_H / 2;
+    uint16_t x0, y0, x1, y1;
+    switch (s) {
+        case 0:  x0 = x + T;     x1 = x + W - T - 1; y0 = y;             y1 = y + T - 1;         break;
+        case 1:  x0 = x + W - T; x1 = x + W - 1;     y0 = y + T;         y1 = y + M - 1;         break;
+        case 2:  x0 = x + W - T; x1 = x + W - 1;     y0 = y + M;         y1 = y + H - T - 1;     break;
+        case 3:  x0 = x + T;     x1 = x + W - T - 1; y0 = y + H - T;     y1 = y + H - 1;         break;
+        case 4:  x0 = x;         x1 = x + T - 1;     y0 = y + M;         y1 = y + H - T - 1;     break;
+        case 5:  x0 = x;         x1 = x + T - 1;     y0 = y + T;         y1 = y + M - 1;         break;
+        case 6:  x0 = x + T;     x1 = x + W - T - 1; y0 = y + M - T / 2; y1 = y + M + T / 2 - 1; break;
+        default: x0 = x + W + 2; x1 = x + W + 1 + T; y0 = y + H - T;     y1 = y + H - 1;         break;
+    }
+    r[0] = x0; r[1] = y0; r[2] = x1; r[3] = y1;
+}
+
+/* COMPOSE ONLY -- no LCD I/O. Once a second, from dbg_compose(). */
+static void cam_compose(void) {
+    char t[CAM_DIGITS];
+    bool dot = false;
+    uint8_t  med = battery_5c_rounded();
+    uint16_t pk  = battery_pack_mv();
+    if (battery_is_absent() || !pk) memcpy(t, "----", 4);
+    else if (med == 100u)           memcpy(t, " HI ", 4);
+    else if (med == 0u)             memcpy(t, " LO ", 4);
+    else {
+        t[0] = (char)('0' + (pk / 1000u) % 10u);
+        t[1] = (char)('0' + (pk / 100u) % 10u);
+        t[2] = (char)('0' + (pk / 10u) % 10u);
+        t[3] = (char)('0' + pk % 10u);
+        dot  = true;
+    }
+    uint8_t lv = battery_level_pct();   /* 0xFF unknown */
+    if (lv > 100u) {
+        memcpy(&t[4], "---", 3);
+    } else {
+        t[4] = (lv >= 100u) ? '1' : ' ';
+        t[5] = (lv >= 10u) ? (char)('0' + (lv / 10u) % 10u) : ' ';
+        t[6] = (char)('0' + lv % 10u);
+    }
+    for (uint8_t i = 0; i < CAM_DIGITS; i++) cam_want[i] = cam_glyph(t[i]);
+    if (dot) cam_want[0] |= (uint8_t)(1u << CAM_SEG_DP);
+}
+
+/* One changed segment per call: lit to white, or put out to the background.
+ * Returns true if it painted. Called from debug_pump_glyph() with the bus idle. */
+static bool cam_pump_segment(void) {
+    for (uint8_t d = 0; d < CAM_DIGITS; d++) {
+        uint8_t diff = cam_want[d] ^ cam_shown[d];
+        if (!diff) continue;
+        uint8_t s = 0;
+        while (!(diff & (1u << s))) s++;
+        uint16_t r[4];
+        cam_seg_rect(d, s, r);
+        lcd_fill_rect(r[0], r[1], r[2], r[3], ((cam_want[d] >> s) & 1u) ? COL_FG : COL_CAM_BG);
+        cam_shown[d] ^= (uint8_t)(1u << s);
+        return true;
     }
     return false;
 }
@@ -916,6 +1043,12 @@ static void dbg_compose(void) {
         }
         dbg_row(8, "Batt", v);
     }
+
+    /* The camera page keeps only the Batt row, under its digits. */
+    if (debug_big) {
+        for (uint8_t r = 0; r < DBG_ROWS - 1; r++) dbg_row(r, "", "");
+        cam_compose();
+    }
 }
 
 bool display_debug_active(void) {
@@ -926,6 +1059,25 @@ void display_debug_toggle(void) {
     /* Refuse while the animation player owns the bus rather than drawing over
      * it: both would keep blitting and the panel would tear between them. */
     if (!debug_active && display_paused) return;
+    /* A cycle: dashboard -> debug page -> camera page -> dashboard. The middle
+     * step keeps the panel and only changes what is drawn on it. */
+    if (debug_active && !debug_big) {
+        debug_big        = true;
+        debug_clear_band = 1;   /* the same banded clear as on entry */
+        /* Blank the debug text NOW, not at the next compose: the clear takes
+         * eight passes and the compose runs on the 10 Hz tick, so a stale dirty
+         * row could otherwise be painted straight over the digits. */
+        for (uint8_t r = 0; r < DBG_ROWS; r++) {
+            memset(dbg_text[r], ' ', DBG_COLS);  dbg_text[r][DBG_COLS]  = '\0';
+            memset(dbg_shown[r], ' ', DBG_COLS); dbg_shown[r][DBG_COLS] = '\0';
+        }
+        dbg_dirty = 0;
+        memset(cam_want, 0, sizeof(cam_want));
+        memset(cam_shown, 0, sizeof(cam_shown));   /* the clear leaves no segment lit */
+        dbg_force_recompose = true;
+        return;
+    }
+    debug_big    = false;
     debug_active = !debug_active;
     if (debug_active) {
         /* Hand the clear to the pump, one band per pass. This is a single call
