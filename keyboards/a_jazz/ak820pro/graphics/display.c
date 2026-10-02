@@ -781,8 +781,8 @@ static bool debug_pump_glyph(void) {
  * with (2026-10-02), and the moment worth filming -- the board dying on the
  * lights-off reserve -- is the one no RAM log survives. The second tap of Fn+D;
  * a third returns to the dashboard. It shares the debug page's machinery: the
- * banded clear on entry, the staged restore on exit, and row 8, the small Batt
- * row, for anyone close enough to read it.
+ * banded clear on entry, the staged restore on exit, and its glyph pump for a
+ * small bottom row.
  *
  * SEVEN-SEGMENT DIGITS DRAWN AS RECTANGLES, because no font asset is big enough:
  * the largest, the clock's, is cropped to 15x22 and holds only 0-9 and ':'.
@@ -794,7 +794,8 @@ static bool debug_pump_glyph(void) {
  *   line 1  the pack in volts, "3.712"; "----" with no estimate, " HI " at the
  *           top clamp (>= 4036 mV) and " LO " at the bottom (<= 3161 mV) --
  *           bounds, never numbers, as on the Batt row
- *   line 2  the level in percent, right-aligned under it; "---" unknown */
+ *   line 2  the level in percent, right-aligned under it; "---" unknown
+ *   row 8   the board's clock and the raw 5C (see dbg_compose) */
 #define CAM_DIG_W   26
 #define CAM_DIG_H   48
 #define CAM_SEG_T   6
@@ -1044,9 +1045,32 @@ static void dbg_compose(void) {
         dbg_row(8, "Batt", v);
     }
 
-    /* The camera page keeps only the Batt row, under its digits. */
+    /* The camera page: blank above its digits, and row 8 carries the board's
+     * own clock and the raw 5C with its age -- "14:03:27      5C 62@3". The
+     * clock is for time-lapse video, which stamps no frame: every frame then
+     * dates itself, to the second, from the clock the timekeeper keeps right. */
     if (debug_big) {
         for (uint8_t r = 0; r < DBG_ROWS - 1; r++) dbg_row(r, "", "");
+        char t[9] = "--:--:--";
+        rtc_time_t now;
+        if (rtc_get_time(&now)) {
+            const uint8_t f[3] = {now.hours, now.minutes, now.seconds};
+            for (uint8_t i = 0; i < 3; i++) {
+                t[i * 3]     = (char)('0' + f[i] / 10u);
+                t[i * 3 + 1] = (char)('0' + f[i] % 10u);
+            }
+        }
+        uint8_t  raw  = ch582_get_battery();
+        uint32_t rage = ch582_battery_age_ms();
+        p = dbg_append(v, "5C ");
+        if (raw <= 100 && rage < 20000u) {
+            p = dbg_u32(p, raw);
+            p = dbg_append(p, "@");
+            dbg_u32(p, rage / 1000u);
+        } else {
+            dbg_append(p, "--");
+        }
+        dbg_row(8, t, v);
         cam_compose();
     }
 }
