@@ -549,8 +549,10 @@ void housekeeping_task_kb(void) {
     /* Per-pass work is deliberately NOT sited: see the LOOP_SITE note in
      * ak820pro.h -- the timer reads cost ~2 ms a pass on this MCU. */
     /* ACCT(): D1's per-task accounting (loop_acct.h), one tick-register read
-     * either side; mutually exclusive scopes, everything else unaccounted. */
-    WDT_CALL(WDT_SITE_PARAM_REPEAT, ACCT(ACCT_HK_OTHER, param_repeat_task()));
+     * either side; mutually exclusive scopes, everything else unaccounted.
+     * The param repeat is not timed: a per-pass scope costs every pass, and
+     * it is near-empty unless a parameter key is held (trimmed after gate 3). */
+    WDT_CALL(WDT_SITE_PARAM_REPEAT, param_repeat_task());
     WDT_CALL(WDT_SITE_RTC_FAST, ACCT(ACCT_RTC_FAST, rtc_fast_task()));          // <= one queued PCF I2C transaction, only when no blit is in flight (R4)
     WDT_CALL(WDT_SITE_SECOND_EDGE, ACCT(ACCT_EDGE, display_second_edge_task()));  // clock digits repaint on the tick, not at the 10 Hz cadence (3.9)
     /* One queued glyph per iteration, arming a DMA and returning -- EXCEPT that
@@ -598,7 +600,7 @@ void housekeeping_task_kb(void) {
     }
 
     // Chain the user hook
-    WDT_CALL(WDT_SITE_USER_HK, ACCT(ACCT_HK_OTHER, housekeeping_task_user()));
+    WDT_CALL(WDT_SITE_USER_HK, housekeeping_task_user());   /* untimed, as the param repeat */
 
     // Kick the watchdog LAST -- after the 10 Hz block and the user hook, so a
     // kick certifies a COMPLETED pass. A kick at entry would hand a freshly

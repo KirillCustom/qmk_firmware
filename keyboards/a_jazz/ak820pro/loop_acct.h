@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "ch.h"
+#include "hal.h"   /* st_lld_get_counter(), inline */
 
 /* Per-task duration accounting for the main loop (Phase 1b, D1;
  * plans/BATTERY-GAUGE-REFINE-PLAN.md).
@@ -18,12 +19,21 @@
  * keyboard_task, the RGB effect, USB, raw HID -- is UNACCOUNTED, the pass
  * length less the scopes.
  *
- * Timestamps are chVTGetSystemTimeX(): the 16-bit system tick at
- * CH_CFG_ST_FREQUENCY (5.33 us), one timer-register read, the same source the
- * row ISR times itself with ~7,700 times a second. Not timer_read32(), which
- * takes a lock. An earlier per-pass site profiler cost ~2 ms a pass, which
- * is the fault it was looking for (ak820pro.h, LOOP_SITE); this one is
+ * Timestamps are the 16-bit system tick at CH_CFG_ST_FREQUENCY (5.33 us),
+ * read INLINE with st_lld_get_counter() -- the counter chVTGetSystemTimeX()
+ * returns through an out-of-line stGetCounter() call. Not timer_read32(),
+ * which takes a lock. An earlier per-pass site profiler cost ~2 ms a pass,
+ * which is the fault it was looking for (ak820pro.h, LOOP_SITE); this one is
  * gated on a runtime flag so its cost can be measured on and off (gate 3).
+ *
+ * ⚠️ Gate 3 (2026-10-05) measured the first version at 0.092 ms a pass,
+ * 2.5% of the main loop's passes (the gate is 1%). It made three calls per
+ * scope, and every pass summed, added in 64 bits and cleared all twelve
+ * scopes. Main-loop cycles are dear here: the row ISR takes ~73% of the CPU,
+ * so each one costs ~3.7x in wall time. So now: no calls, one 32-bit add per
+ * scope into a running total, one 48-byte copy per pass, and the per-scope
+ * work only on the rare slow pass and on a fold into the 64-bit totals every
+ * ACCT_FOLD_PASSES passes.
  *
  * Main-loop only. Counters are since boot or since health_reset(). */
 
@@ -39,22 +49,28 @@ enum acct_scope {
     ACCT_EECFG,       /* kb_eeconfig_task: the deferred kb-config flush */
     ACCT_EDGE,        /* display_second_edge_task: the clock digits on the tick */
     ACCT_ANIM,        /* anim_task */
-    ACCT_HK_OTHER,    /* the rest of housekeeping: param repeat/status, the
-                       * hold tasks, the consumer sequencer, the user hook */
+    ACCT_HK_OTHER,    /* the rest of the 10 Hz block: param status, the hold
+                       * tasks, the consumer sequencer. The per-pass param
+                       * repeat and user hook are NOT timed (trimmed after
+                       * gate 3): they fall in UNACCOUNTED. */
     ACCT_N,
     ACCT_UNACCOUNTED = ACCT_N,   /* reported, never a scope */
     ACCT_REPORTED
 };
 
-extern bool loop_acct_on;
-void loop_acct_add(uint8_t scope, sysinterval_t ticks);
+extern bool     loop_acct_on;
+/* Running per-scope ticks since boot, wrapping at 2^32 (read only as
+ * differences). The scope index is a constant at every ACCT(), so the add is a
+ * load, an add and a store at a fixed address. */
+extern uint32_t loop_acct_run[ACCT_N];
 
+#define ACCT_NOW() ((uint16_t)st_lld_get_counter())
 #define ACCT(scope, call)                                                          \
     do {                                                                           \
         if (loop_acct_on) {                                                        \
-            systime_t acct_t0_ = chVTGetSystemTimeX();                             \
+            uint16_t acct_t0_ = ACCT_NOW();                                        \
             call;                                                                  \
-            loop_acct_add((scope), chTimeDiffX(acct_t0_, chVTGetSystemTimeX()));   \
+            loop_acct_run[(scope)] += (uint16_t)(ACCT_NOW() - acct_t0_);           \
         } else {                                                                   \
             call;                                                                  \
         }                                                                          \
