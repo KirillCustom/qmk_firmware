@@ -69,7 +69,7 @@ static void drop_partial(void) {
  * passes' length less them as UNACCOUNTED (clipped at 0 over the fold, where
  * the old per-pass version clipped each pass: the same to within each gap's
  * +-1 ms). */
-static void fold(void) {
+__attribute__((noinline)) static void fold(void) {
     uint32_t accounted = 0;
     for (uint8_t s = 0; s < ACCT_N; s++) {
         uint32_t d = loop_acct_run[s] - fold_base[s];
@@ -83,7 +83,7 @@ static void fold(void) {
     fold_n      = 0;
 }
 
-static void ring_put(uint8_t pass_ms, const uint32_t *ticks, uint32_t unacc) {
+__attribute__((noinline)) static void ring_put(uint8_t pass_ms, const uint32_t *ticks, uint32_t unacc) {
     ring_entry_t *e = &ring[ring_next];
     e->uptime_ms = timer_read32();
     if (e->uptime_ms == 0) e->uptime_ms = 1;
@@ -98,8 +98,10 @@ static void ring_put(uint8_t pass_ms, const uint32_t *ticks, uint32_t unacc) {
     ring_written++;
 }
 
-/* A slow pass (>= SLOW_MS, < ALIAS_MS): its own ticks, attributed. */
-static void slow_pass(uint32_t gap_ms) {
+/* A slow pass (>= SLOW_MS, < ALIAS_MS): its own ticks, attributed. Out of
+ * line, with fold() and ring_put(): inlined, their frame and register saves
+ * were paid by EVERY pass end, the common one included (codex, flash 1b). */
+__attribute__((noinline)) static void slow_pass(uint32_t gap_ms) {
     uint32_t t[ACCT_N], accounted = 0;
     for (uint8_t s = 0; s < ACCT_N; s++) {
         t[s] = loop_acct_run[s] - pass_base[s];
@@ -187,12 +189,14 @@ bool loop_acct_fill(uint8_t page, uint8_t *out28) {
         uint8_t first = (page == 1) ? 0u : 7u;
         for (uint8_t s = first; s < first + 7u && s < ACCT_REPORTED; s++) PUT32(slow_ticks[s]);
     } else if (page == 3 || page == 4) {
-        /* The folded totals plus what is pending since the last fold, read
-         * without folding (this runs mid-pass, from raw HID). */
+        /* The folded totals plus the COMPLETED passes since the last fold, read
+         * without folding. This runs mid-pass (raw HID), so the pass in
+         * progress -- not yet in fold_gap_ms, and perhaps about to be dropped
+         * -- is left out: pass_base, not loop_acct_run (codex, flash 1b). */
         uint64_t all[ACCT_REPORTED];
         uint32_t accounted = 0;
         for (uint8_t s = 0; s < ACCT_N; s++) {
-            uint32_t d = loop_acct_run[s] - fold_base[s];
+            uint32_t d = pass_base[s] - fold_base[s];
             all[s] = all_ticks[s] + d;
             accounted += d;
         }
