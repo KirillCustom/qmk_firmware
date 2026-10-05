@@ -518,23 +518,18 @@ static void level_toward(uint16_t target) {
  * estimates hold the timer, they do not reset it), (b) no fresh estimate for
  * STALE_LOST_S, or (c) OVERRUN, T_OVERRUN of charging after the tail clock
  * reaches T_TAIL without FULL. All of it per mille, integer, once a second. */
-#define LEVEL_MODEL_CAP  990u
-#define LOST_PM          50u
-#define LOST_S           1800u   /* 30 min of accumulated contradiction */
-#define STALE_LOST_S     600u    /* 10 min with no fresh estimate */
-#define RISE_PM_PER_S    1u
-#define T_OVERRUN_S      3600u
-/* After an unplug, or a pause's stop, the pack's voltage relaxes for a minute
- * or two; an estimate from those reports is not the pack. B3's relaxation
- * trajectory sets RELAX_S. */
-#define RELAX_S          120u
-/* A charger pause this long hands the level back to the idle path. */
-#define PAUSE_S          600u
+/* The constants are battery.h's (BATTERY_*), so the simulator tests the
+ * values the firmware ships. */
+#define LEVEL_MODEL_CAP  BATTERY_MODEL_CAP
+#define LOST_PM          BATTERY_LOST_PM
+#define LOST_S           BATTERY_LOST_S
+#define STALE_LOST_S     BATTERY_STALE_LOST_S
+#define RISE_PM_PER_S    BATTERY_RISE_PM_PER_S
+#define T_OVERRUN_S      BATTERY_T_OVERRUN_S
+#define RELAX_S          BATTERY_RELAX_S
+#define PAUSE_S          BATTERY_PAUSE_S
+#define FLAT_X100        BATTERY_FLAT_X100
 _Static_assert(PAUSE_S >= RELAX_S, "a handover must not come before the relaxation");
-/* FROM-FLAT: a boot on USB whose first estimate is <= 10.00 counts. That is
- * <= 3248 mV UNDER CHARGE, >= 150 mV below the 3400 mV cut (itself a loaded
- * voltage), with room for the voltmeter's +-11 mV. */
-#define FLAT_X100        1000u
 _Static_assert(BATT_L_KNEE_PM < LEVEL_MODEL_CAP, "the knee is below the cap");
 
 /* The charging state (the log v5 chg byte's bits 0-2). */
@@ -834,10 +829,10 @@ static void supply_changed(battery_supply_t was) {
     if (was == BATTERY_SUPPLY_EXTERNAL && supply == BATTERY_SUPPLY_BATTERY) {
         if (modeled) chg_close(CHG_NONE);
         adopt_owed = false;
-        if (session) {
-            reseat = true;
-            relax_start();
-        }
+        if (session) reseat = true;
+        /* Owed from an earlier unplug too: a brief replug in between (no new
+         * session, so `session` stays clear) restarts RELAX_S here. */
+        if (reseat) relax_start();
     } else if (supply == BATTERY_SUPPLY_EXTERNAL) {
         relax_cancel();
     }
@@ -1148,7 +1143,13 @@ void battery_task(void) {
     bool fresh_report = c5_new;
     c5_new            = false;
     full_tick();
-    if (full && modeled) chg_close(CHG_FULL);   /* termination ends the model */
+    if (full && modeled) {   /* termination ends the model */
+        chg_close(CHG_FULL);
+        /* The pause that led here started RELAX_S; FULL needs no relaxed
+         * estimate, and emptying the ring would drop FULL until it refills. */
+        relax_cancel();
+        adopt_owed = false;
+    }
     /* A real session opens the model: CHRG low SESSION_TICKS continuously. */
     if (!modeled && !full && supply == BATTERY_SUPPLY_EXTERNAL && chrg_run >= SESSION_TICKS) chg_open();
     if (fresh_report) {

@@ -33,6 +33,23 @@ typedef enum {
 #define BATTERY_LOG_ENTRY_SIZE 18
 #define BATTERY_PROTO_VERSION  5
 
+/* The charging model's constants (Phase 1b, B; battery.c has the design).
+ * Here so the simulator tests the values the firmware ships. */
+#define BATTERY_MODEL_CAP     990u    /* per mille: the display's ceiling before FULL */
+#define BATTERY_LOST_PM       50u     /* M - U beyond this is a contradiction */
+#define BATTERY_LOST_S        1800u   /* ... for 30 min, accumulated: LOST */
+#define BATTERY_STALE_LOST_S  600u    /* no fresh estimate for 10 min: LOST */
+#define BATTERY_RISE_PM_PER_S 1u      /* the display rises at most this a second */
+#define BATTERY_T_OVERRUN_S   3600u   /* termination this long after the model's: LOST */
+/* After an unplug, or a pause's stop, the voltage relaxes; reports before
+ * RELAX_S are not the pack. B3's relaxation trajectory sets it. */
+#define BATTERY_RELAX_S       120u
+#define BATTERY_PAUSE_S       600u    /* a charger pause this long hands over to the idle path */
+/* FROM-FLAT: a boot on USB whose first estimate is <= 10.00 counts. That is
+ * <= 3248 mV UNDER CHARGE, >= 150 mV below the 3400 mV cut (itself a loaded
+ * voltage), with room for the voltmeter's +-11 mV. */
+#define BATTERY_FLAT_X100     1000u
+
 /* Enable the ADC. Call once from post-init. Blocks ~100 us (ADC warm-up). */
 void battery_init(void);
 
