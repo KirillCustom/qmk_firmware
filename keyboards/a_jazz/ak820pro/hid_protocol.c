@@ -371,8 +371,11 @@ enum {
      *   [26..27] pack mV from that estimate (0 none; at an estimate of 0 or 100,
      *            the clamp's bound)      [28..29] LED drive, per mille
      *   [30] battery_state()
-     *   [31] BATTERY_PROTO_VERSION: 3 or 4 (4: log v4). Older firmware
-     *        leaves the host's own byte here (0). */
+     *   [31] BATTERY_PROTO_VERSION: 3, 4 or 5; from 4 on it equals the
+     *        log's version (HC_BATTLOG). Older firmware leaves the host's own
+     *        byte here (0). From 5 the level reads 0xFFFF ("Charge") through
+     *        a charge with no trusted start, and the log carries the charging
+     *        model (Phase 1b, B). */
     /* Stall-measurement page 2 (LOOP-BUDGET-PLAN phase 1): [.., .., HC_GET2]
      * -> [.., .., HC_GET2, version, 28 bytes]. A SECOND page exists because
      * HC_GET's payload was already exactly full at 28 bytes -- there was no
@@ -395,11 +398,15 @@ enum {
     HC_GET5        = 0x08, /* retained watchdog operation; watchdog_record.h */
     HC_GET6        = 0x09, /* crash-hunt vitals, protocol >= 7; health.h */
     HC_CONN        = 0x02,
-    /* Battery log (battery.c), once a minute, 12 h: [.., .., HC_BATTLOG,
-     * idx_lo, idx_hi] -> [.., .., HC_BATTLOG, version (2), count u16, idx
-     * u16, ms since the newest entry u32, the 12-byte entry at idx (0 =
-     * oldest)]. Version 1 (b35d8672b3) had no version byte and two 8-byte
-     * entries. */
+    /* Battery log (battery.c), one entry per period (10 min): [.., ..,
+     * HC_BATTLOG, idx_lo, idx_hi] -> [.., .., HC_BATTLOG, version, count u16,
+     * idx u16, ms since the newest entry u32, entries ever written u16, the
+     * entry at idx (0 = oldest)]. battery_log_read() and battery.h have the
+     * layout. v5 (Phase 1b): an 18-byte entry (v4's 16 plus M and the
+     * charging state), and the period no longer in the reply -- the host
+     * reads it from HC_BATTCFG -- so 3 + 11 + 18 fills the 32-byte report.
+     * v4: the period u16 before the written count, a 16-byte entry. Version
+     * 1 (b35d8672b3) had no version byte and two 8-byte entries. */
     HC_BATTLOG     = 0x0A,
     /* Low-battery thresholds, RAM only: [.., .., HC_BATTCFG, op, warn u16,
      * cut u16] with op 0 = read, 1 = set (0 mV disables either) ->
