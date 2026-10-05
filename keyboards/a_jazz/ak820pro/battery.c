@@ -464,9 +464,11 @@ static uint16_t clamp_s    = 0;
 static bool     full       = false;
 
 /* What is saved, and when. ⚠️ Every internal-flash write blanks the whole LED
- * matrix for a few ms -- interrupts are masked for the program, the vector
- * table and the row ISR live in flash, and the M0 has no VTOR to move them (JD
- * sees the blink; 2026-09-29). Saving every whole-percent change was ~100
+ * matrix for a few ms: the row ISR de-selects every row while the flash is in
+ * its program state, because each per-line program window masks interrupts
+ * (the vector table and the row ISR live in flash, and the M0 has no VTOR) and
+ * a row left lit across one shows at ~18x (docs/leds.md). JD sees the blink;
+ * 2026-09-29. Saving every whole-percent change was ~100
  * writes a discharge. The restore only uses a value in the clamp's 90..100
  * band, so save only there, in 2.5% steps, rounded DOWN so a restore never
  * overstates: FULL (on USB), then 97.5, 95, 92.5, 90 on battery, and one marker
