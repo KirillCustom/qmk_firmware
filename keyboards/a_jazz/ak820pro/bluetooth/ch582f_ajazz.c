@@ -460,6 +460,21 @@ static uint8_t          tx_retries   = 0;
  * and a keystroke is two frames -- so ACK loss shows up as throughput
  * collapse (you can out-type the link), not as mild latency. */
 static uint32_t tx_stat_sent = 0, tx_stat_timeout = 0, tx_stat_drop = 0;
+/* The other two ways a frame is lost without any long main-loop stall
+ * (Phase 1b, D1). tx_stat_drop counts only a full queue's rejection, so these
+ * read as zero drops until counted: a frame abandoned after its retransmits,
+ * and a queued state frame overwritten by a newer one (which can collapse a
+ * double-tap into one press). Plain counters, every build. */
+static uint32_t tx_stat_giveup = 0, tx_stat_replaced = 0;
+
+/* UART receive errors, from the serial driver's event flags. The driver now
+ * reports a hardware overrun (a byte lost with the FIFO full) as
+ * SD_OVERRUN_ERROR, the flag it already raised for a full input queue.
+ * Counted per task pass that saw each, not per byte: a trend. In every build
+ * since Phase 1b (D1) -- they were console-only, so the daily build that the
+ * stall soaks run on could not see a byte lost on the link. */
+static event_listener_t uart_err_listener;
+static uint32_t         uart_err_overrun, uart_err_framing, uart_err_parity;
 
 #ifdef CONSOLE_ENABLE
 /* ACK turnaround, instrumented builds (2026-09-23): docs/wireless.md asks for
@@ -472,13 +487,6 @@ static uint32_t tx_stat_sent = 0, tx_stat_timeout = 0, tx_stat_drop = 0;
 #define ACK_BUCKETS 16u
 static systime_t tx_first_sent_st;
 static uint32_t  ack_hist[ACK_BUCKETS], ack_orphan, ack_after_retry, ack_max_us;
-/* UART receive errors, from the serial driver's event flags. The driver now
- * reports a hardware overrun (a byte lost with the FIFO full) as
- * SD_OVERRUN_ERROR, the flag it already raised for a full input queue.
- * Counted per task pass that saw each, not per byte: a trend, for the
- * wireless tests. */
-static event_listener_t uart_err_listener;
-static uint32_t         uart_err_overrun, uart_err_framing, uart_err_parity;
 #endif
 
 /* Health-counter readout (health.c). Main-loop only, like everything here. */
@@ -486,6 +494,17 @@ void ch582_tx_stats(uint32_t *sent, uint32_t *timeouts, uint32_t *drops) {
     *sent     = tx_stat_sent;
     *timeouts = tx_stat_timeout;
     *drops    = tx_stat_drop;
+}
+
+void ch582_link_stats(ch582_link_stats_t *out) {
+    out->sent         = tx_stat_sent;
+    out->timeouts     = tx_stat_timeout;
+    out->queue_full   = tx_stat_drop;
+    out->giveups      = tx_stat_giveup;
+    out->replaced     = tx_stat_replaced;
+    out->uart_overrun = uart_err_overrun;
+    out->uart_framing = uart_err_framing;
+    out->uart_parity  = uart_err_parity;
 }
 
 static inline uint8_t tx_next(uint8_t i) { return (uint8_t)((i + 1) % CH582_TXQ_LEN); }
@@ -504,7 +523,11 @@ static void ch582_tx_pump(void) {
     if (tx_in_flight) {
         if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS) return;   /* still waiting for ACK */
         tx_stat_timeout++;
-        if (++tx_retries > CH582_TX_MAX_RETRIES) { ch582_tx_pop(); return; } /* give up, move on */
+        if (++tx_retries > CH582_TX_MAX_RETRIES) {                          /* give up, move on */
+            tx_stat_giveup++;
+            ch582_tx_pop();
+            return;
+        }
         sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len); /* retransmit */
         tx_sent_time = timer_read();
         return;
@@ -577,6 +600,7 @@ void ch582_send_command(uint8_t cmd, const uint8_t *params, uint8_t param_len) {
             }
             last->data[param_len + 1] = (uint8_t)(s & 0xFF);
             last->len                 = param_len + 2;
+            tx_stat_replaced++;
             return;
         }
     }
@@ -905,7 +929,6 @@ void ch582_task(void) {
         ch582_poll_status();
     }
 
-#ifdef CONSOLE_ENABLE
     {
         static bool listening = false;
         if (!listening) {   /* lazily: the listener binds to this (main) thread */
@@ -919,7 +942,6 @@ void ch582_task(void) {
         if (f & SD_FRAMING_ERROR) uart_err_framing++;
         if (f & SD_PARITY_ERROR)  uart_err_parity++;
     }
-#endif
 
     uint8_t c;
     uint8_t bytes_processed = 0;

@@ -62,6 +62,21 @@ uint8_t ch582_get_host_leds(void);
 /* Cumulative TX health counters (sent / ACK timeouts / queue-full drops). */
 void ch582_tx_stats(uint32_t *sent, uint32_t *timeouts, uint32_t *drops);
 
+/* Every way the link can lose input, since boot (Phase 1b, D1). Each can lose
+ * a keystroke with no >= 25 ms main-loop gap, so they are read beside the
+ * stall counters, never inferred from them. Plain counters, every build. */
+typedef struct {
+    uint32_t sent;          /* frames first sent */
+    uint32_t timeouts;      /* ACK waits that expired (each retransmits or gives up) */
+    uint32_t queue_full;    /* frames refused by a full TX queue (tx_stat_drop) */
+    uint32_t giveups;       /* frames abandoned after CH582_TX_MAX_RETRIES */
+    uint32_t replaced;      /* queued 0xA1/0xA3 state frames overwritten by a newer one */
+    uint32_t uart_overrun;  /* task passes that saw each UART error flag */
+    uint32_t uart_framing;
+    uint32_t uart_parity;
+} ch582_link_stats_t;
+void ch582_link_stats(ch582_link_stats_t *out);
+
 #ifdef WDT_TEST_HOOKS
 /* Fault injection (instrumented builds): queue bytes the parser consumes as
  * if received from the module. See findings-ch582-states.md. */
