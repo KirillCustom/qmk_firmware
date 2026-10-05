@@ -369,18 +369,23 @@ uint16_t battery_pack_mv(void) {
  * that -- not charge -- is what a timed run calibrates, and it is what a user
  * wants to know.
  *
- * FITTED from JD's unit, the 2026-09-28 drain test at full white
- * (scripts/battery_fit.py, history/battery-2026-09-28-drain/): 0% is the RGB
- * cut at 3400 mV (JD, 2026-10-01), reached 51.6 equivalent full-white hours
- * after FULL; knots at even steps of level. The clamp's exit came out at 89.6%,
- * so the top knot keeps LEVEL_CLAMP_EXIT's 90%. One run, one unit: validate on
- * a run it was not fitted to. ⚠️ The 4.00-4.02 V plateau holds ~20% of the
- * runtime in ~20 mV, so a few mV there (lighter load, less sag) is ~10%. It
- * replaced a generic Li-ion table scaled to 90% at the clamp, which read 44% at
- * 3.80 V where this run had ~23% left. */
-static const uint16_t curve_mv[] = {3400, 3460, 3491, 3523, 3537, 3566, 3596, 3640, 3676,
-                                    3721, 3747, 3783, 3813, 3832, 3846, 3855, 3867, 3894,
-                                    3943, 3982, 3999, 4006, 4008, 4011, 4017, 4036};
+ * FITTED from JD's unit on TWO drain tests at full white, 2026-09-28 (51.6
+ * equivalent full-white hours from FULL to the cut) and 2026-10-02 (50.4 h),
+ * by scripts/battery_fit.py --refit (history/battery-2026-10-01-drain/
+ * refit-output.txt). Each knot is the mean of the two runs' smoothed voltages
+ * at that fraction of runtime. 0% is the RGB cut at 3400 mV (JD, 2026-10-01);
+ * the top knot keeps LEVEL_CLAMP_EXIT's 90% (the clamp's exit fell at 89.6%
+ * and 90.3%). Leave-one-out, each run's own curve scored on the other: below
+ * 3.95 V within 0.54-0.59 points rms (worst 2.1); on the 3.95-4.036 V plateau
+ * 3.1-3.2 rms, worst 8.9 -- inside the plan's thresholds, with little room.
+ * ⚠️ The plateau holds ~20% of the runtime in ~20 mV: a few mV there (lighter
+ * load, less sag, one run's pack a little different) is ~10%, and 2 mV of
+ * estimator offset moves the worst error to ~10. Two runs of one pack at one
+ * load: a consistency check, not a confidence bound. The one-run curve this
+ * replaces (759e265796) differed by at most 5 mV at any knot. */
+static const uint16_t curve_mv[] = {3400, 3456, 3490, 3520, 3538, 3564, 3591, 3640, 3680,
+                                    3723, 3748, 3785, 3814, 3831, 3846, 3856, 3868, 3896,
+                                    3945, 3981, 3996, 4003, 4007, 4010, 4016, 4036};
 static const uint16_t curve_pm[] = {   0,   10,   20,   30,   40,   50,   60,   80,  100,
                                      125,  150,  200,  250,  300,  350,  400,  450,  500,
                                      550,  600,  650,  700,  750,  800,  850,  900};
@@ -440,9 +445,13 @@ static uint16_t c5_level_charging(uint16_t e) {
  * middle. Below the clamp the voltage is the authority and nothing is restored. */
 #define LEVEL_CLAMP_GUESS  950u
 #define LEVEL_CLAMP_EXIT   900u
-/* 10 points over the 09-25 clamp span (5.3 h) at full white. It matters little:
- * the clamp is only ~10 points wide, and the voltage takes over at its exit. */
-#define COUNTDOWN_S_PER_PM 190u
+/* The clamp's span at full white, from the two drain tests: run 1 left the
+ * clamp at 89.6% after 5.36 equivalent hours (5.36 h * 3600 / 104 pm = 185.5
+ * s/pm), run 2 at 90.3% after 4.90 h (4.90 * 3600 / 97.2 = 181.5); the mean,
+ * 183.5, rounded. From FULL the countdown reaches its 905 floor in 95 * 184 s
+ * = 4.86 h, about when the voltage takes over. It matters little: the clamp
+ * is only ~10 points wide. (It was 190, from the 09-25 run's 5.3 h.) */
+#define COUNTDOWN_S_PER_PM 184u
 /* Charging at the clamp (the CV phase, 5.5 h on 09-28): creep toward the cap.
  * Faster below the clamp floor, at about a 1 A charge's real rate (0.4 %/min):
  * plugged in near full, `5C` jumps straight to 100 on the charge current's
@@ -629,14 +638,21 @@ battery_state_t battery_state(void) {
  * every timer and never clears the cut. This sheds load; it does not
  * disconnect the cell -- the pack's protector does that.
  *
+ * The warning fires once per discharge. It re-arms only after a REAL charging
+ * session (`session`: CHRG low 60 s), never on a voltage: a brief dump
+ * plug-in, or a pack relaxing upward after one, used to re-arm it and re-fire
+ * it on unplugging (10-01 01:06). A new threshold over HC_BATTCFG re-arms it
+ * too, so it can be tested on demand.
+ *
  * Thresholds are RAM-only and settable over HC_BATTCFG (pack mV); 0 disables
- * either. Both defaults sit inside the fitted range (3.30-3.84 V). */
+ * either. The warning's default is the curve's 10%: 3680 mV, ~5 h before the
+ * cut at full white (it was 3550 mV, ~4.5%, ~2.3 h). The cut's is the curve's
+ * 0%, 3400 mV. */
 #define WARN_HOLD_TICKS    300u    /* 30 s at 10 Hz */
 #define EXT_RESTORE_TICKS  50u     /* 5 s of external power */
-#define WARN_REARM_MV      100u
 #define CRITICAL_ZEROES    3u
 
-static uint16_t warn_mv    = 3550;
+static uint16_t warn_mv    = 3680;
 static uint16_t cut_mv     = 3400;
 static uint16_t warn_ticks = 0, cut_ticks = 0;
 static bool     warned     = false;
@@ -650,7 +666,7 @@ static void cut_lights(void) {
 static void protection_tick(void) {
     if (supply == BATTERY_SUPPLY_EXTERNAL) {
         warn_ticks = cut_ticks = 0;
-        warned     = false;
+        if (session) warned = false;
         if (power_lights_cut() && ext_evidence_ticks >= EXT_RESTORE_TICKS) power_set_lights_cut(false);
         return;
     }
@@ -678,7 +694,6 @@ static void protection_tick(void) {
         }
     } else {
         warn_ticks = 0;
-        if (warned && (!warn_mv || mv > warn_mv + WARN_REARM_MV)) warned = false;
     }
 
     if (cut_mv && !top && mv < cut_mv) {
@@ -811,6 +826,7 @@ void battery_cfg(uint8_t op, uint16_t new_warn, uint16_t new_cut, uint8_t *out) 
         warn_mv    = new_warn;
         cut_mv     = new_cut;
         warn_ticks = cut_ticks = 0;
+        warned     = false;   /* a new threshold is a new warning to give */
     }
     out[0] = (uint8_t)(warn_mv & 0xFF); out[1] = (uint8_t)(warn_mv >> 8);
     out[2] = (uint8_t)(cut_mv & 0xFF);  out[3] = (uint8_t)(cut_mv >> 8);
