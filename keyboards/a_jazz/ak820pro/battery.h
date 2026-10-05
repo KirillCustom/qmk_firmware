@@ -29,9 +29,9 @@ typedef enum {
 } battery_state_t;
 
 /* HC_BATTLOG reply format, and HC_CONN byte 31 (the battery fields' layout). */
-#define BATTERY_LOG_VERSION    4
-#define BATTERY_LOG_ENTRY_SIZE 16
-#define BATTERY_PROTO_VERSION  4
+#define BATTERY_LOG_VERSION    5
+#define BATTERY_LOG_ENTRY_SIZE 18
+#define BATTERY_PROTO_VERSION  5
 
 /* Enable the ADC. Call once from post-init. Blocks ~100 us (ADC warm-up). */
 void battery_init(void);
@@ -82,10 +82,13 @@ uint16_t battery_led_pm(void);
 uint8_t battery_flags(void);
 
 /* Raw-HID readouts. battery_log_read fills `out` (29 bytes): version u8 (BATTERY_LOG_VERSION),
- * stored count u16, the requested index u16, ms since the newest entry u32, the
- * log period in s u16, entries ever written (low 16 bits) u16, then the 16-byte
- * entry at `idx` (0 = oldest). battery_cfg applies op 1 (set warn/cut in PACK
+ * stored count u16, the requested index u16, ms since the newest entry u32,
+ * entries ever written (low 16 bits) u16, then the 18-byte entry at `idx`
+ * (0 = oldest). v5 dropped the period from the reply to fit the entry: the
+ * host reads it from battery_cfg's out[6..7]. battery_cfg applies op 1 (set warn/cut in PACK
  * mV, 0 disables either) and fills `out` (8 bytes) with warn u16, cut u16,
  * lights_cut u8, warned u8, and the log period in s (u16). */
 void battery_log_read(uint16_t idx, uint8_t *out);
+/* FROM-FLAT's test on the boot's first estimate, in hundredths of a count. */
+bool battery_first_estimate_is_flat(uint16_t first_x100);
 void battery_cfg(uint8_t op, uint16_t warn_mv, uint16_t cut_mv, uint8_t *out);
