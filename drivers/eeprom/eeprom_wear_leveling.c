@@ -24,6 +24,18 @@ void eeprom_read_block(void *buf, const void *addr, size_t len) {
     wear_leveling_read((uint32_t)addr, buf, len);
 }
 
+/* Board hook, called before every write into the emulated EEPROM with its
+ * logical address -- before wear_leveling_write() decides whether anything
+ * changed. A board can attribute the physical writes that follow to the
+ * eeconfig region being written (the AK820 Pro counts which writer blinks its
+ * LEDs). Default is an empty no-op, so nothing changes for other boards. */
+__attribute__((weak)) void eeprom_wear_leveling_write_hook(uint32_t addr, const void *buf, size_t len) {
+    (void)addr;
+    (void)buf;
+    (void)len;
+}
+
 void eeprom_write_block(const void *buf, void *addr, size_t len) {
+    eeprom_wear_leveling_write_hook((uint32_t)addr, buf, len);
     wear_leveling_write((uint32_t)addr, buf, len);
 }
