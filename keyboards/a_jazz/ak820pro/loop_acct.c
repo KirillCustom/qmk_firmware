@@ -6,6 +6,12 @@
 
 #define SLOW_MS  10u
 #define RING_LEN 16u
+/* The 16-bit tick wraps every 349.5 ms, so a scope that long would read as
+ * its remainder and its time would land in "unaccounted" (codex, gate 2). A
+ * scope can only be that long inside a pass at least that long, so such a
+ * pass is counted, ringed with 0xFF scope bytes, and kept out of the scope
+ * totals and the largest-scope counts. */
+#define ALIAS_MS 340u
 #define ST_HZ    ((uint32_t)CH_CFG_ST_FREQUENCY)
 /* ms <-> ticks in 32 bits: ticks = ms * (ST_HZ / 500) / 2, exact at 187,500 Hz
  * (375 / 2), and a 60 s pass is 22.5 M -- no overflow, no 64-bit divide on
@@ -20,7 +26,10 @@ static uint32_t slow_ticks[ACCT_REPORTED];   /* summed over slow passes */
 static uint64_t all_ticks[ACCT_REPORTED];    /* summed over every pass: u64, since
                                              * a u32 of ticks overflows in ~6 h */
 static uint16_t top_count[ACCT_REPORTED];
-static uint32_t passes, slow_passes, ring_written;
+static uint32_t passes, slow_passes, ring_written, long_passes;
+/* The pass in progress when the accounting was reset, enabled or disabled
+ * began before it: its gap is health.c's, but its scopes are not all here. */
+static bool     skip_next = true;   /* and at boot, until the first closed pass */
 
 typedef struct {
     uint32_t uptime_ms;
@@ -40,9 +49,15 @@ static uint8_t ticks_to_ms8(uint32_t t) {
     return (uint8_t)(ms > 255u ? 255u : ms);
 }
 
+void loop_acct_discard(void) {
+    memset(pass_ticks, 0, sizeof pass_ticks);
+    skip_next = true;
+}
+
 void loop_acct_pass_end(uint32_t gap_ms) {
-    if (!loop_acct_on) {
+    if (!loop_acct_on || skip_next) {
         memset(pass_ticks, 0, sizeof pass_ticks);
+        skip_next = false;
         return;
     }
     uint32_t accounted = 0;
@@ -54,6 +69,19 @@ void loop_acct_pass_end(uint32_t gap_ms) {
     uint32_t unacc  = pass_t > accounted ? pass_t - accounted : 0u;
 
     passes++;
+    if (gap_ms >= ALIAS_MS) {   /* scope times may have wrapped: attribute nothing */
+        long_passes++;
+        slow_passes++;
+        ring_entry_t *e = &ring[ring_next];
+        e->uptime_ms = timer_read32();
+        if (e->uptime_ms == 0) e->uptime_ms = 1;
+        e->pass_ms = 255u;
+        memset(e->scope_ms, 0xFF, sizeof e->scope_ms);
+        ring_next = (uint8_t)((ring_next + 1u) % RING_LEN);
+        ring_written++;
+        memset(pass_ticks, 0, sizeof pass_ticks);
+        return;
+    }
     for (uint8_t s = 0; s < ACCT_N; s++) all_ticks[s] += pass_ticks[s];
     all_ticks[ACCT_UNACCOUNTED] += unacc;
 
@@ -86,13 +114,15 @@ void loop_acct_reset(void) {
     memset(all_ticks, 0, sizeof all_ticks);
     memset(top_count, 0, sizeof top_count);
     memset(ring, 0, sizeof ring);
-    passes = slow_passes = ring_written = 0;
+    passes = slow_passes = ring_written = long_passes = 0;
     ring_next = 0;
+    skip_next = true;
 }
 
 void loop_acct_set_enabled(bool on) {
     loop_acct_on = on;
     memset(pass_ticks, 0, sizeof pass_ticks);
+    skip_next = true;
 }
 
 bool loop_acct_fill(uint8_t page, uint8_t *out28) {
@@ -107,6 +137,7 @@ bool loop_acct_fill(uint8_t page, uint8_t *out28) {
         *p++ = RING_LEN;
         *p++ = ring_next;
         PUT32(passes); PUT32(slow_passes); PUT32(ST_HZ); PUT32(timer_read32()); PUT32(ring_written);
+        PUT32(long_passes);
     } else if (page == 1 || page == 2) {
         uint8_t first = (page == 1) ? 0u : 7u;
         for (uint8_t s = first; s < first + 7u && s < ACCT_REPORTED; s++) PUT32(slow_ticks[s]);

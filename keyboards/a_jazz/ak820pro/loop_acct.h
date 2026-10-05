@@ -60,8 +60,14 @@ void loop_acct_add(uint8_t scope, sysinterval_t ticks);
         }                                                                          \
     } while (0)
 
-/* health_loop_tick(): one pass ended, `gap_ms` long (its own measurement). */
+/* health_loop_tick(): one pass ended, `gap_ms` long (its own measurement). A
+ * pass of ALIAS_MS (340 ms) or more is counted as slow and ringed with 0xFF
+ * scope bytes, but kept out of the scope totals: the 16-bit tick may have
+ * wrapped inside it. */
 void loop_acct_pass_end(uint32_t gap_ms);
+/* health_loop_tick() before its settle: drop whatever scope time accumulated,
+ * and do not count the pass that follows (it began before the drop). */
+void loop_acct_discard(void);
 void loop_acct_reset(void);
 void loop_acct_set_enabled(bool on);
 
@@ -69,7 +75,9 @@ void loop_acct_set_enabled(bool on);
  * Scope order is enum acct_scope, with UNACCOUNTED last (ACCT_REPORTED = 13).
  *   page 0: u8 enabled, u8 ACCT_REPORTED, u8 ring length (16), u8 next ring
  *           slot; u32 passes, u32 slow passes, u32 CH_CFG_ST_FREQUENCY,
- *           u32 uptime_ms, u32 ring entries ever written, u32 reserved
+ *           u32 uptime_ms, u32 ring entries ever written, u32 long passes
+ *           (>= 340 ms: counted slow, not attributed). The pass after a
+ *           reset or an on/off is not counted at all.
  *   page 1: u32 slow-pass ticks, scopes 0-6     page 2: scopes 7-12
  *   page 3: u32 all-pass MILLISECONDS, scopes 0-6   page 4: scopes 7-12
  *   page 5: u16 times each scope was the largest in a slow pass, 0-12

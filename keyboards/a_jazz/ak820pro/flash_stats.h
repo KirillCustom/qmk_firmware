@@ -21,8 +21,11 @@
  * settle costs nothing and counts nothing.
  *
  * The PHYSICAL counts are taken at the backing store: a write SESSION at each
- * unlock (backing_store_pre_write_hook), and each line PROGRAM and page ERASE
- * at backing_store_operation_begin. A session is attributed to the writer whose
+ * unlock (backing_store_pre_write_hook), and each line PROGRAM and each ERASE
+ * at backing_store_operation_begin. ⚠️ An ERASE here is one WHOLE-STORE erase:
+ * wear_leveling_efl.c calls the hook once before looping over every sector of
+ * the 2 KB backing store -- two 1 KB pages on the SN32F299 (codex, gate 2).
+ * For endurance, each page takes one erase cycle per count; do not halve it. A session is attributed to the writer whose
  * EEPROM write opened it; one not opened by an EEPROM write (boot-time
  * consolidation, a format) is OTHER. Wear-levelling consolidation happens
  * inside the session that overflowed the log, and shows as that writer's
@@ -73,6 +76,8 @@ void flash_stats_reset(void);
  *           u8 rtc_last_stored_path, u16 rtc_last_stored,
  *           u32 rtc_proposals_sof, u32 rtc_proposals_pcf,
  *           u32 rtc_stores_sof, u32 rtc_stores_pcf,
- *           u32 last_erase_uptime_ms (0: none), u16 reserved
+ *           u32 last_erase_uptime_ms (0: none),
+ *           u16 the backing store's size in bytes (WEAR_LEVELING_BACKING_SIZE:
+ *               an erase erases all of it)
  * Returns false for an unknown page. */
 bool flash_stats_fill(uint8_t page, uint8_t *out28);

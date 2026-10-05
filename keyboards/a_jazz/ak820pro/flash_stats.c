@@ -5,6 +5,7 @@
 #include "eeprom.h"
 #include "nvm_eeprom_eeconfig_internal.h"   /* EECONFIG_* offsets in the emulated EEPROM */
 #include "flash_stats.h"
+#include "wear_leveling_efl_config.h"   /* WEAR_LEVELING_BACKING_SIZE */
 
 /* The writer the next session belongs to, set by the EEPROM write that is
  * about to open it, and consumed (back to OTHER) when it does. */
@@ -129,6 +130,7 @@ bool flash_stats_fill(uint8_t page, uint8_t *out28) {
             PUT32(rtc_proposals[0]); PUT32(rtc_proposals[1]);            /* 14 */
             PUT32(rtc_stores[0]); PUT32(rtc_stores[1]);                  /* 22 */
             PUT32(last_erase_ms);                                        /* 26 */
+            PUT16(WEAR_LEVELING_BACKING_SIZE);                           /* 28: an erase is all of it */
             break;
         default:
             return false;

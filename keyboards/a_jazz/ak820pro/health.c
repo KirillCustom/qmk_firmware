@@ -149,6 +149,7 @@ void health_loop_tick(void) {
 
     if (now < HEALTH_SETTLE_MS) {
         last = now;
+        loop_acct_discard();   /* boot's scope time is not the first counted pass's */
         return;
     }
     uint32_t gap = now - last;
