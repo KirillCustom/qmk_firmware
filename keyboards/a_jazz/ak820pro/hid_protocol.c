@@ -17,6 +17,8 @@
 #include "watchdog.h"                 /* boot reset cause for HC_CONN */
 #include "indicators.h"               /* battery_is_absent for HC_CONN */
 #include "battery.h"                  /* VDD for HC_CONN */
+#include "flash_stats.h"              /* HC_FLASHW */
+#include "loop_acct.h"                /* HC_ACCT */
 
 // Apply a 7-byte time payload to the RTC:
 //   [0]=year-2000 [1]=month [2]=day [3]=weekday [4]=hour [5]=min [6]=sec
@@ -404,6 +406,21 @@ enum {
      * [.., .., HC_BATTCFG, op, warn u16, cut u16, lights_cut, warned,
      * log period s u16]. */
     HC_BATTCFG     = 0x0B,
+    /* Phase 1b diagnostics, protocol >= 8. Paged: [.., .., cmd, page] ->
+     * [.., .., cmd, page, 28 bytes]; an unknown page answers RTC_UNHANDLED.
+     *   HC_FLASHW: internal-flash write sessions, programs and erases by
+     *              writer, kb fields, the RTC period's proposals (C1;
+     *              flash_stats.h has the pages).
+     *   HC_ACCT:   per-task accounting of slow passes (D1; loop_acct.h).
+     *              Page 0xF0 with [4] = 0/1 turns the accounting off/on,
+     *              page 0xF1 clears it; both then answer page 0.
+     *   HC_LINK:   [.., .., HC_LINK] -> [.., .., HC_LINK, version, u32 sent,
+     *              timeouts, queue_full, giveups, replaced, u16 uart overrun,
+     *              framing, parity, u16 reserved] -- every way the CH582F link
+     *              can lose a frame (D1; ch582_link_stats). */
+    HC_FLASHW      = 0x0C,
+    HC_ACCT        = 0x0D,
+    HC_LINK        = 0x0E,
     /* Clock-sync status (PLAN.md 3.7): [.., .., HC_RTC, page] ->
      *   [.., .., HC_RTC, page, block...]
      * page 1 = the 21-byte RTC_GET_TIME[11..31] tail at [4..24];
@@ -474,7 +491,7 @@ enum {
     HC_BLITFAULT   = 0x77,
 #endif
 };
-#define HEALTH_PROTO_VERSION 7
+#define HEALTH_PROTO_VERSION 8   /* 8: HC_FLASHW, HC_ACCT, HC_LINK (Phase 1b) */
 
 #ifdef WDT_TEST_HOOKS
 extern volatile uint8_t wdt_test_fault_in_handler;   /* fault.c */
@@ -548,6 +565,42 @@ static void health_command(uint8_t *data, uint8_t length) {
             break;
         case HC_RESET:
             health_reset();
+            break;
+        case HC_FLASHW:
+            if (length < 32 || !flash_stats_fill(data[3], &data[4])) data[0] = RTC_UNHANDLED;
+            break;
+        case HC_ACCT:
+            if (length < 32) {
+                data[0] = RTC_UNHANDLED;
+                break;
+            }
+            if (data[3] == 0xF0) {
+                loop_acct_set_enabled(data[4] != 0);
+                data[3] = 0;
+            } else if (data[3] == 0xF1) {
+                loop_acct_reset();
+                data[3] = 0;
+            }
+            if (!loop_acct_fill(data[3], &data[4])) data[0] = RTC_UNHANDLED;
+            break;
+        case HC_LINK:
+            if (length >= 32) {
+                ch582_link_stats_t ls;
+                ch582_link_stats(&ls);
+                uint8_t *p = &data[4];
+                const uint32_t w[5] = {ls.sent, ls.timeouts, ls.queue_full, ls.giveups, ls.replaced};
+                for (uint8_t i = 0; i < 5; i++)
+                    for (uint8_t b = 0; b < 4; b++) *p++ = (uint8_t)(w[i] >> (8 * b));
+                const uint32_t h[3] = {ls.uart_overrun, ls.uart_framing, ls.uart_parity};
+                for (uint8_t i = 0; i < 3; i++) {
+                    uint16_t x = h[i] > 0xFFFFu ? 0xFFFFu : (uint16_t)h[i];
+                    *p++ = (uint8_t)x; *p++ = (uint8_t)(x >> 8);
+                }
+                *p++ = 0; *p++ = 0;
+                data[3] = HEALTH_PROTO_VERSION;
+            } else {
+                data[0] = RTC_UNHANDLED;
+            }
             break;
         case HC_CONN:
             data[3] = (uint8_t)ch582_get_conn_state();

@@ -26,6 +26,8 @@
 #include "indicators.h"
 #include "battery.h"
 #include "power.h"
+#include "loop_acct.h"     /* D1: ACCT() around each board task */
+#include "flash_stats.h"   /* C1: flash write sessions by writer */
 
 void early_hardware_init_post(void) {
     // Configure SPI0 pins for the LCD panel. SEL0 is left UNMUXED: our bare-metal bus
@@ -546,9 +548,11 @@ void housekeeping_task_kb(void) {
 #endif
     /* Per-pass work is deliberately NOT sited: see the LOOP_SITE note in
      * ak820pro.h -- the timer reads cost ~2 ms a pass on this MCU. */
-    WDT_CALL(WDT_SITE_PARAM_REPEAT, param_repeat_task());
-    WDT_CALL(WDT_SITE_RTC_FAST, rtc_fast_task());             // <= one queued PCF I2C transaction, only when no blit is in flight (R4)
-    WDT_CALL(WDT_SITE_SECOND_EDGE, display_second_edge_task());  // clock digits repaint on the tick, not at the 10 Hz cadence (3.9)
+    /* ACCT(): D1's per-task accounting (loop_acct.h), one tick-register read
+     * either side; mutually exclusive scopes, everything else unaccounted. */
+    WDT_CALL(WDT_SITE_PARAM_REPEAT, ACCT(ACCT_HK_OTHER, param_repeat_task()));
+    WDT_CALL(WDT_SITE_RTC_FAST, ACCT(ACCT_RTC_FAST, rtc_fast_task()));          // <= one queued PCF I2C transaction, only when no blit is in flight (R4)
+    WDT_CALL(WDT_SITE_SECOND_EDGE, ACCT(ACCT_EDGE, display_second_edge_task()));  // clock digits repaint on the tick, not at the 10 Hz cadence (3.9)
     /* One queued glyph per iteration, arming a DMA and returning -- EXCEPT that
      * it also drives the Fn+D page's banded clears and the staged restore, and
      * lcd_clear_rect() ends in lcd_blit_wait(): bounded (a 128x16 band is
@@ -556,7 +560,7 @@ void housekeeping_task_kb(void) {
      * on 2026-09-03. It is also the ONLY thing that advances debug_exit_step,
      * which is why display_housekeeping_task() may gate on that flag: keep this
      * call OUT of that function (see the gate's comment in display.c). */
-    WDT_CALL(WDT_SITE_DISPLAY_PUMP, display_blit_pump());
+    WDT_CALL(WDT_SITE_DISPLAY_PUMP, ACCT(ACCT_PUMP, display_blit_pump()));
 #ifdef CONSOLE_ENABLE
     blit_stat_task();
 #endif
@@ -569,24 +573,24 @@ void housekeeping_task_kb(void) {
         uint32_t hk_t0 = last_t;
 #endif
 
-        LOOP_SITE(LOOP_SITE_LEDS,     update_leds());
-        LOOP_SITE(LOOP_SITE_BATT,     battery_task());        // one ~11 us VDD conversion
-        LOOP_SITE(LOOP_SITE_BATT,     power_task());          // idle ladder, battery only
-        LOOP_SITE(LOOP_SITE_PAIR,     bt_pair_hold_task());   // hold-to-pair fires under the finger, not on release
-        LOOP_SITE(LOOP_SITE_PAIR,     dbg_hold_task());       // hold-Fn+D resets the health counters
-        LOOP_SITE(LOOP_SITE_CONSUMER, modified_consumer_task());  // drop held mods once a knob spin stops
+        LOOP_SITE(LOOP_SITE_LEDS,     ACCT(ACCT_LEDS, update_leds()));
+        LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, battery_task()));   // one ~11 us VDD conversion
+        LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, power_task()));     // idle ladder, battery only
+        LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, bt_pair_hold_task()));   // hold-to-pair fires under the finger, not on release
+        LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, dbg_hold_task()));       // hold-Fn+D resets the health counters
+        LOOP_SITE(LOOP_SITE_CONSUMER, ACCT(ACCT_HK_OTHER, modified_consumer_task()));  // drop held mods once a knob spin stops
 #ifdef PARAM_OVERLAY
-        LOOP_SITE(LOOP_SITE_PARAM,    param_status_task());   // surface setting changes in the info band
+        LOOP_SITE(LOOP_SITE_PARAM,    ACCT(ACCT_HK_OTHER, param_status_task()));   // surface setting changes in the info band
 #endif
 #ifdef CONSOLE_ENABLE
         key_stat_task();       // dropped-keystroke localisation; see key_press_count
 #endif
 
-        if (!anim_active()) LOOP_SITE(LOOP_SITE_RTCTASK, rtc_task());   // RTC I2C (port A) glitches the flash SPI1 pins (A12/A13) mid-DMA
-        LOOP_SITE(LOOP_SITE_ANIM, anim_task());                      // one animation frame per 100 ms
-        WDT_CALL(WDT_SITE_DISPLAY_HK, display_housekeeping_task());      // its sub-draws are sited individually
-        LOOP_SITE(LOOP_SITE_EECFG,  kb_eeconfig_task());               // settled, coalesced kb-config flush
-        LOOP_SITE(LOOP_SITE_HEALTH, health_task());                    // [health] console line, on change only
+        if (!anim_active()) LOOP_SITE(LOOP_SITE_RTCTASK, ACCT(ACCT_RTC, rtc_task()));   // RTC I2C (port A) glitches the flash SPI1 pins (A12/A13) mid-DMA
+        LOOP_SITE(LOOP_SITE_ANIM, ACCT(ACCT_ANIM, anim_task()));                   // one animation frame per 100 ms
+        WDT_CALL(WDT_SITE_DISPLAY_HK, ACCT(ACCT_DISP_HK, display_housekeeping_task()));   // its sub-draws are sited individually
+        LOOP_SITE(LOOP_SITE_EECFG,  ACCT(ACCT_EECFG, kb_eeconfig_task()));          // settled, coalesced kb-config flush
+        LOOP_SITE(LOOP_SITE_HEALTH, ACCT(ACCT_HEALTH, health_task()));              // [health] console line, on change only
 #ifdef LOOPGAP_INSTRUMENT
         uint32_t hk = timer_elapsed32(hk_t0);
         if (hk > hk_worst_ms) hk_worst_ms = hk;
@@ -594,7 +598,7 @@ void housekeeping_task_kb(void) {
     }
 
     // Chain the user hook
-    WDT_CALL(WDT_SITE_USER_HK, housekeeping_task_user());
+    WDT_CALL(WDT_SITE_USER_HK, ACCT(ACCT_HK_OTHER, housekeeping_task_user()));
 
     // Kick the watchdog LAST -- after the 10 Hz block and the user hook, so a
     // kick certifies a COMPLETED pass. A kick at entry would hand a freshly
@@ -647,6 +651,7 @@ void backing_store_pre_write_hook(void) {
     WDT_SCOPE(WDT_SITE_EFL_DRAIN);
     loop_stall_mark = LOOP_MARK_FLASH;   /* every internal-flash writer passes here */
     health_note_flash_write();
+    flash_stats_session();               /* and whose write this session is (C1) */
     /* lcd_blit_wait() rather than a bare spin: a blit whose completion IRQ was
      * missed never clears, so the old loop burned its full second here on every
      * single flash write and left the bus asserted. See lcd_blit_wait(). */
@@ -710,6 +715,7 @@ bool rgb_matrix_eeprom_flush_allowed(void) {
 static uint32_t efl_saved_path;
 void backing_store_operation_begin(bool erase) {
     efl_saved_path = watchdog_record_enter(erase ? WDT_SITE_EFL_ERASE : WDT_SITE_EFL_WRITE);
+    flash_stats_op(erase);
 }
 void backing_store_operation_end(void) {
     watchdog_record_leave(&efl_saved_path);

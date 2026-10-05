@@ -8,6 +8,8 @@
 #include "watchdog_record.h"
 #include "graphics/lcd_bus.h"
 #include "bluetooth/ch582f_ajazz.h"
+#include "loop_acct.h"     /* D1: the per-task attribution of each pass */
+#include "flash_stats.h"   /* C1: which writer each flash session belongs to */
 
 /* Worst main-loop gap since boot, max-hold. Measured unconditionally: one
  * timer read and a compare per pass. The first 10 s are ignored -- boot
@@ -143,6 +145,7 @@ void health_loop_tick(void) {
      * so a second reader of loop_stall_mark would always see NONE. */
     last_mark = loop_stall_mark;
     loop_stall_mark = LOOP_MARK_NONE;
+    flash_stats_pass();
 
     if (now < HEALTH_SETTLE_MS) {
         last = now;
@@ -162,6 +165,7 @@ void health_loop_tick(void) {
         default: break;
     }
     if (gap >= 25 && last_mark != LOOP_MARK_FLASH) count_ge_25ms_nonflash++;
+    loop_acct_pass_end(gap);   /* the same pass and gap, so its slow passes are count_ge_10ms's */
 }
 
 uint8_t health_last_mark(void) { return last_mark; }
@@ -182,6 +186,8 @@ void health_reset(void) {
     raw_edges = 0; consumes = 0; cooked_changes = 0;
     isr_entries = 0; isr_ticks_sum = 0; isr_ticks_min = 0xFFFFu; isr_ticks_max = 0;
     chSysUnlock();
+    loop_acct_reset();     /* main-loop state, like everything they count */
+    flash_stats_reset();
 }
 
 void health_fill2(uint8_t *out28) {

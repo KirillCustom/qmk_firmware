@@ -5,6 +5,7 @@
 #include "quantum.h"
 #include "hal.h"
 #include "health.h"   /* health_note_rx_malformed() -- main-loop context only */
+#include "loop_acct.h" /* D1: this task's share of each main-loop pass */
 
 #ifndef CH582_SERIAL_DRIVER
 #    define CH582_SERIAL_DRIVER SD2
@@ -335,7 +336,7 @@ void bluetooth_init(void) {
 }
 
 void bluetooth_task(void) {
-    ch582_task();
+    ACCT(ACCT_CH582, ch582_task());
 }
 
 bool bluetooth_is_connected(void) {

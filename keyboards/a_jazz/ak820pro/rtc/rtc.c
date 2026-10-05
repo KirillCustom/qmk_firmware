@@ -6,6 +6,7 @@
 #include "rtc.h"
 #include "quantum.h"
 #include "kb_eeconfig.h"   /* persisted divider period (phase 4) */
+#include "flash_stats.h"   /* C1: which path proposes each save */
 #include "hal.h"
 #include "../graphics/lcd_bus.h"
 #include "../graphics/display.h"   /* display_splash_done() */
@@ -666,7 +667,9 @@ static void rtc_ref_task(void)
     if (timer_read32() >= 600000u && P_nom >= 28000 && P_nom <= 40000) {
         uint16_t st = kb_eeconfig_get_rtc_period();
         uint32_t dd = (P_nom > st) ? (P_nom - st) : (st - P_nom);
-        if (st == 0 || dd >= 64) kb_eeconfig_set_rtc_period((uint16_t)P_nom);
+        bool     sv = (st == 0 || dd >= 64);
+        flash_stats_rtc_proposal((uint16_t)P_nom, FLASH_RTC_PATH_SOF, sv);
+        if (sv) kb_eeconfig_set_rtc_period((uint16_t)P_nom);
     }
 }
 
@@ -1001,7 +1004,9 @@ static void rtc_clock_discipline(void)
                     if (timer_read32() >= 600000u && np >= 28000 && np <= 40000) {
                         uint16_t st = kb_eeconfig_get_rtc_period();
                         uint32_t d  = (np > st) ? (np - st) : (st - np);
-                        if (st == 0 || d >= 64) kb_eeconfig_set_rtc_period((uint16_t)np);   /* 64: PLAN.md C3 */
+                        bool     sv = (st == 0 || d >= 64);
+                        flash_stats_rtc_proposal((uint16_t)np, FLASH_RTC_PATH_PCF, sv);
+                        if (sv) kb_eeconfig_set_rtc_period((uint16_t)np);   /* 64: PLAN.md C3 */
                     }
                     printf("[rtc] trim %lu -> %lu (%ld ticks / %ld s)\n",
                            (unsigned long)period, (unsigned long)np,
