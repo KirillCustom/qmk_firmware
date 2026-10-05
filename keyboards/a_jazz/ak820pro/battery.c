@@ -859,6 +859,15 @@ static void level_tick_1hz(void) {
 
 uint16_t battery_level_permille(void) { return level; }
 
+/* The charging model, for diagnostics and the simulator: M in pm (0xFFFF when
+ * no model runs), the charging state (CHG_*, the log's chg bits 0-2), and the
+ * discharge curve itself. */
+uint16_t battery_model_pm(void) {
+    return (modeled && (chg_st == CHG_MODEL || chg_st == CHG_FROM_FLAT)) ? m_pm : 0xFFFFu;
+}
+uint8_t  battery_chg_state(void) { return chg_state_now(); }
+uint16_t battery_curve_pm(uint16_t mv) { return curve(mv); }
+
 uint8_t battery_level_pct(void) {
     if (level == LEVEL_UNKNOWN) return 0xFF;
     /* Whole percent. It was 5% steps, which JD found hid how fast the level was

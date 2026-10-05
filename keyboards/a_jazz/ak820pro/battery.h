@@ -91,4 +91,10 @@ uint8_t battery_flags(void);
 void battery_log_read(uint16_t idx, uint8_t *out);
 /* FROM-FLAT's test on the boot's first estimate, in hundredths of a count. */
 bool battery_first_estimate_is_flat(uint16_t first_x100);
+/* The charging model (Phase 1b, B): M in pm, 0xFFFF when none runs; the
+ * charging state, 0 none, 1 UNKNOWN-CHG ("Charge"), 2 FROM-FLAT, 3 MODEL,
+ * 4 LOST ("Charge"), 5 FULL; and the discharge curve, pm for a pack mV. */
+uint16_t battery_model_pm(void);
+uint8_t  battery_chg_state(void);
+uint16_t battery_curve_pm(uint16_t mv);
 void battery_cfg(uint8_t op, uint16_t warn_mv, uint16_t cut_mv, uint8_t *out);
