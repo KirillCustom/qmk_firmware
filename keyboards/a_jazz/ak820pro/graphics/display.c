@@ -316,9 +316,10 @@ static bool display_backlight_init(void) {
  * was a trade against another.
  *
  * ⚠️ DESCENDERS ARE CLIPPED IN THAT ATLAS. g/p/q/y and friends lost their
- * tails, because nothing but the clock draws with FONT_CLOCK. If you ever draw
- * general text at this size, regenerate the atlas at its full 15x34 cell and
- * hand these 12 rows back -- do not try to fix it by nudging offsets. */
+ * tails, because only the clock and the Fn+D camera page draw with FONT_CLOCK,
+ * and neither draws a descender (the camera page: digits . : % V < > -). If you
+ * ever draw general text at this size, regenerate the atlas at its full 15x34
+ * cell and hand these 12 rows back -- do not try to fix it by nudging offsets. */
 #define CLOCK_Y 56
 /* 23, not the clock cell's 22: the playback readout uses the 20px face, whose
  * cell is 23 rows, borrowing one row from the 4-row gap below. The clear rect
@@ -346,7 +347,7 @@ static bool draw_locks_staged(bool first);   // Fn+D restore: one lock-band comp
 static void draw_text_slot(bool force);
 static void draw_debug_page(void);   // Fn+D full-panel diagnostics
 static bool debug_pump_glyph(void);  // one changed debug cell, non-blocking
-static bool cam_pump_segment(void);  // one changed camera-page segment, non-blocking
+static bool cam_pump_glyph(void);    // one changed camera-page cell, non-blocking
 static bool debug_restore_step(void); // one stage of the post-debug dashboard repaint
 static void draw_conn_row(void);      // three-transport strip, top row
 
@@ -757,7 +758,7 @@ static bool debug_pump_glyph(void) {
         if (++debug_clear_band > DBG_CLEAR_BANDS) debug_clear_band = 0;
         return true;
     }
-    if (debug_big && cam_pump_segment()) return true;
+    if (debug_big && cam_pump_glyph()) return true;
     if (!dbg_dirty) return false;
     for (uint8_t r = 0; r < DBG_ROWS; r++) {
         if (!(dbg_dirty & (1u << r))) continue;
@@ -776,126 +777,141 @@ static bool debug_pump_glyph(void) {
 }
 
 /* --- Fn+D's camera page ----------------------------------------------------------
- * The pack and the level in digits a camera can read across a room. The debug
+ * The pack and the level in text a camera can read across a room. The debug
  * page's 6x14 text is ~3 px tall on the security camera JD films battery runs
  * with (2026-10-02), and the moment worth filming -- the board dying on the
  * lights-off reserve -- is the one no RAM log survives. The second tap of Fn+D;
  * a third returns to the dashboard. It shares the debug page's machinery: the
- * banded clear on entry, the staged restore on exit, and its glyph pump for a
- * small bottom row.
+ * banded clear on entry, the staged restore on exit, and one glyph per pass.
  *
- * SEVEN-SEGMENT DIGITS DRAWN AS RECTANGLES, because no font asset is big enough:
- * the largest, the clock's, is cropped to 15x22 and holds only 0-9 and ':'.
- * lcd_fill_rect() is a CPU push at wire speed -- a 6x18 segment is ~0.1 ms --
- * and cam_pump_segment() paints ONE changed segment per main-loop pass, so no
- * pass comes near the 10 ms leading indicator (the debug page's history above
- * is why that matters).
+ * In the CLOCK's font (15x22, the largest face), since 2026-10-06. It replaced
+ * seven-segment digits drawn as rectangles, which JD found ugly and cryptic;
+ * the atlas, cropped for the clock, still holds all 95 ASCII glyphs, and the
+ * ones drawn here (digits . : % V < > -) have no descenders, which the crop cut
+ * (see CLOCK_Y). The previews were rendered from the shipped atlases first.
  *
- *   line 1  the pack in volts, "3.712"; "----" with no estimate, " HI " at the
- *           top clamp (>= 4036 mV) and " LO " at the bottom (<= 3161 mV) --
- *           bounds, never numbers, as on the Batt row
- *   line 2  the level in percent, right-aligned under it; "---" unknown
- *   row 8   the board's clock and the raw 5C (see dbg_compose) */
-#define CAM_DIG_W   26
-#define CAM_DIG_H   48
-#define CAM_SEG_T   6
-#define CAM_Y1      4
-#define CAM_Y2      (CAM_Y1 + CAM_DIG_H + 10)
-#define CAM_DIGITS  7                     /* 4 for the volts, 3 for the percent */
-#define CAM_SEG_DP  7                     /* bit 7 of digit 0: the decimal point */
-#define COL_CAM_BG  0x0000                /* the banded clear leaves black */
-_Static_assert(CAM_Y2 + CAM_DIG_H <= (DBG_ROWS - 1) * DBG_ROW_H, "camera digits must clear the Batt row");
-/* Line 1: 1 + 26, a 10 px gap holding the point, then 26 + 6 + 26 + 6 + 26 = 126.
- * Line 2 sits under line 1's last three digits. */
-static const uint8_t cam_x[CAM_DIGITS] = {1, 37, 69, 101, 37, 69, 101};
-_Static_assert(101 + CAM_DIG_W <= PANEL_WIDTH, "camera digits must fit the panel");
+ *   line 1  the pack, "3.712V"; ">4.036V" / "<3.161V" at the top and bottom
+ *           clamps (bounds, never numbers, as on the Batt row); "-.---V" none
+ *   line 2  the level, "58%"; "--%" unknown
+ *   line 3  the board's clock, "14:03:27", for time-lapse video: every frame
+ *           dates itself from the clock the timekeeper keeps right
+ *   line 4  the raw 5C and its age in s, "5C 62@3" (the 10x23 status face)
+ *
+ * Each line is a FIXED grid of cells, so a changed character repaints only its
+ * own cell (a glyph tile paints its background too, so a space clears one).
+ * Text is centred by padding within the grid; each grid's width is chosen so
+ * the usual length sits exactly centred (6 chars of volts, 3 of percent, 8 of
+ * clock, 7 of 5C) and the rest are off by at most half a cell. */
+#define CAM_BIG_ADV   15   /* FONT_CLOCK's advance (draw_clock's 8 * 15) */
+#define CAM_LINES     4
+#define CAM_MAX_COLS  11
+typedef struct {
+    uint16_t font;
+    uint8_t  adv, cols, y;
+} cam_line_t;
+static const cam_line_t cam_lines[CAM_LINES] = {
+    {FONT_CLOCK,  CAM_BIG_ADV,     8,  4},
+    {FONT_CLOCK,  CAM_BIG_ADV,     7,  32},
+    {FONT_CLOCK,  CAM_BIG_ADV,     8,  64},
+    {FONT_STATUS, FONT_STATUS_ADV, 11, 98},
+};
+_Static_assert(8 * CAM_BIG_ADV <= PANEL_WIDTH && 11 * FONT_STATUS_ADV <= PANEL_WIDTH, "camera lines must fit the panel");
+_Static_assert(98 + 23 <= PANEL_HEIGHT, "the 5C line must fit the panel");
+static char    cam_text[CAM_LINES][CAM_MAX_COLS];
+static char    cam_shown[CAM_LINES][CAM_MAX_COLS];
+static uint8_t cam_dirty;   /* bit per line: text differs from the panel */
 
-static uint8_t cam_want[CAM_DIGITS];   /* segments wanted: bit 0..6 = a..g */
-static uint8_t cam_shown[CAM_DIGITS];  /* segments on the panel */
-
-/* a = top, b = upper right, c = lower right, d = bottom, e = lower left,
- * f = upper left, g = middle. */
-static uint8_t cam_glyph(char ch) {
-    switch (ch) {
-        case '0': return 0x3F;
-        case '1': return 0x06;
-        case '2': return 0x5B;
-        case '3': return 0x4F;
-        case '4': return 0x66;
-        case '5': return 0x6D;
-        case '6': return 0x7D;
-        case '7': return 0x07;
-        case '8': return 0x7F;
-        case '9': return 0x6F;
-        case '-': return 0x40;
-        case 'H': return 0x76;
-        case 'I': return 0x30;   /* e+f, the LEFT pair, so "HI" cannot read as "H1" */
-        case 'L': return 0x38;
-        case 'O': return 0x3F;
-        default:  return 0x00;
-    }
+/* Blank both grids: the banded clear on entry leaves the panel blank, which is
+ * what a grid of spaces looks like. */
+static void cam_reset(void) {
+    memset(cam_text, ' ', sizeof(cam_text));
+    memset(cam_shown, ' ', sizeof(cam_shown));
+    cam_dirty = 0;
 }
 
-/* The rect of segment s of digit d, inclusive. Corners stay empty: the classic
- * look, and every segment a separate rect. */
-static void cam_seg_rect(uint8_t d, uint8_t s, uint16_t r[4]) {
-    const uint16_t x = cam_x[d], y = (d < 4) ? CAM_Y1 : CAM_Y2;
-    const uint16_t W = CAM_DIG_W, H = CAM_DIG_H, T = CAM_SEG_T, M = CAM_DIG_H / 2;
-    uint16_t x0, y0, x1, y1;
-    switch (s) {
-        case 0:  x0 = x + T;     x1 = x + W - T - 1; y0 = y;             y1 = y + T - 1;         break;
-        case 1:  x0 = x + W - T; x1 = x + W - 1;     y0 = y + T;         y1 = y + M - 1;         break;
-        case 2:  x0 = x + W - T; x1 = x + W - 1;     y0 = y + M;         y1 = y + H - T - 1;     break;
-        case 3:  x0 = x + T;     x1 = x + W - T - 1; y0 = y + H - T;     y1 = y + H - 1;         break;
-        case 4:  x0 = x;         x1 = x + T - 1;     y0 = y + M;         y1 = y + H - T - 1;     break;
-        case 5:  x0 = x;         x1 = x + T - 1;     y0 = y + T;         y1 = y + M - 1;         break;
-        case 6:  x0 = x + T;     x1 = x + W - T - 1; y0 = y + M - T / 2; y1 = y + M + T / 2 - 1; break;
-        default: x0 = x + W + 2; x1 = x + W + 1 + T; y0 = y + H - T;     y1 = y + H - 1;         break;
+/* COMPOSE ONLY: line `i` becomes `s`, centred in its grid. */
+static void cam_set(uint8_t i, const char *s) {
+    const uint8_t cols = cam_lines[i].cols;
+    uint8_t n = 0;
+    while (s[n] && n < cols) n++;
+    uint8_t pad = (uint8_t)((cols - n) / 2u);
+    char    line[CAM_MAX_COLS];
+    memset(line, ' ', sizeof(line));
+    memcpy(&line[pad], s, n);
+    if (memcmp(line, cam_text[i], cols) != 0) {
+        memcpy(cam_text[i], line, cols);
+        cam_dirty |= (uint8_t)(1u << i);
     }
-    r[0] = x0; r[1] = y0; r[2] = x1; r[3] = y1;
 }
 
 /* COMPOSE ONLY -- no LCD I/O. Once a second, from dbg_compose(). */
 static void cam_compose(void) {
-    char t[CAM_DIGITS];
-    bool dot = false;
+    char t[12], *p;
+
     uint8_t  med = battery_5c_rounded();
     uint16_t pk  = battery_pack_mv();
-    if (battery_is_absent() || !pk) memcpy(t, "----", 4);
-    else if (med == 100u)           memcpy(t, " HI ", 4);
-    else if (med == 0u)             memcpy(t, " LO ", 4);
-    else {
-        t[0] = (char)('0' + (pk / 1000u) % 10u);
-        t[1] = (char)('0' + (pk / 100u) % 10u);
-        t[2] = (char)('0' + (pk / 10u) % 10u);
-        t[3] = (char)('0' + pk % 10u);
-        dot  = true;
+    p = t;
+    if (battery_is_absent() || !pk) {
+        p = dbg_append(t, "-.---");
+    } else {
+        if (med == 100u) *p++ = '>';
+        else if (med == 0u) *p++ = '<';
+        *p++ = (char)('0' + (pk / 1000u) % 10u);
+        *p++ = '.';
+        *p++ = (char)('0' + (pk / 100u) % 10u);
+        *p++ = (char)('0' + (pk / 10u) % 10u);
+        *p++ = (char)('0' + pk % 10u);
     }
+    dbg_append(p, "V");
+    cam_set(0, t);
+
     uint8_t lv = battery_level_pct();   /* 0xFF unknown */
     if (lv > 100u) {
-        memcpy(&t[4], "---", 3);
+        cam_set(1, "--%");
     } else {
-        t[4] = (lv >= 100u) ? '1' : ' ';
-        t[5] = (lv >= 10u) ? (char)('0' + (lv / 10u) % 10u) : ' ';
-        t[6] = (char)('0' + lv % 10u);
+        dbg_append(dbg_u32(t, lv), "%");
+        cam_set(1, t);
     }
-    for (uint8_t i = 0; i < CAM_DIGITS; i++) cam_want[i] = cam_glyph(t[i]);
-    if (dot) cam_want[0] |= (uint8_t)(1u << CAM_SEG_DP);
+
+    char clk[9] = "--:--:--";
+    rtc_time_t now;
+    if (rtc_get_time(&now)) {
+        const uint8_t f[3] = {now.hours, now.minutes, now.seconds};
+        for (uint8_t i = 0; i < 3; i++) {
+            clk[i * 3]     = (char)('0' + f[i] / 10u);
+            clk[i * 3 + 1] = (char)('0' + f[i] % 10u);
+        }
+    }
+    cam_set(2, clk);
+
+    uint8_t  raw  = ch582_get_battery();
+    uint32_t rage = ch582_battery_age_ms();
+    p = dbg_append(t, "5C ");
+    if (raw <= 100 && rage < 20000u) {
+        p = dbg_u32(p, raw);
+        p = dbg_append(p, "@");
+        dbg_u32(p, rage / 1000u);
+    } else {
+        dbg_append(p, "--");
+    }
+    cam_set(3, t);
 }
 
-/* One changed segment per call: lit to white, or put out to the background.
- * Returns true if it painted. Called from debug_pump_glyph() with the bus idle. */
-static bool cam_pump_segment(void) {
-    for (uint8_t d = 0; d < CAM_DIGITS; d++) {
-        uint8_t diff = cam_want[d] ^ cam_shown[d];
-        if (!diff) continue;
-        uint8_t s = 0;
-        while (!(diff & (1u << s))) s++;
-        uint16_t r[4];
-        cam_seg_rect(d, s, r);
-        lcd_fill_rect(r[0], r[1], r[2], r[3], ((cam_want[d] >> s) & 1u) ? COL_FG : COL_CAM_BG);
-        cam_shown[d] ^= (uint8_t)(1u << s);
-        return true;
+/* One changed cell per call, non-blocking, as debug_pump_glyph(). Returns true
+ * if it owned this pass. */
+static bool cam_pump_glyph(void) {
+    for (uint8_t i = 0; i < CAM_LINES; i++) {
+        if (!(cam_dirty & (1u << i))) continue;
+        const cam_line_t *ln = &cam_lines[i];
+        const uint16_t    x0 = (uint16_t)((PANEL_WIDTH - ln->cols * ln->adv) / 2u);
+        for (uint8_t c = 0; c < ln->cols; c++) {
+            if (cam_text[i][c] == cam_shown[i][c]) continue;
+            if (!lcd_draw_flash_glyph_try(ln->font, cam_text[i][c], (uint16_t)(x0 + c * ln->adv), ln->y))
+                return true;   /* bus busy: keep the cell dirty, retry next pass */
+            cam_shown[i][c] = cam_text[i][c];
+            return true;
+        }
+        cam_dirty &= (uint8_t)~(1u << i);   /* line fully painted */
     }
     return false;
 }
@@ -1045,32 +1061,10 @@ static void dbg_compose(void) {
         dbg_row(8, "Batt", v);
     }
 
-    /* The camera page: blank above its digits, and row 8 carries the board's
-     * own clock and the raw 5C with its age -- "14:03:27      5C 62@3". The
-     * clock is for time-lapse video, which stamps no frame: every frame then
-     * dates itself, to the second, from the clock the timekeeper keeps right. */
+    /* The camera page draws none of the debug rows: its four lines are its
+     * own (cam_compose), and a debug cell left non-blank would paint over them. */
     if (debug_big) {
-        for (uint8_t r = 0; r < DBG_ROWS - 1; r++) dbg_row(r, "", "");
-        char t[9] = "--:--:--";
-        rtc_time_t now;
-        if (rtc_get_time(&now)) {
-            const uint8_t f[3] = {now.hours, now.minutes, now.seconds};
-            for (uint8_t i = 0; i < 3; i++) {
-                t[i * 3]     = (char)('0' + f[i] / 10u);
-                t[i * 3 + 1] = (char)('0' + f[i] % 10u);
-            }
-        }
-        uint8_t  raw  = ch582_get_battery();
-        uint32_t rage = ch582_battery_age_ms();
-        p = dbg_append(v, "5C ");
-        if (raw <= 100 && rage < 20000u) {
-            p = dbg_u32(p, raw);
-            p = dbg_append(p, "@");
-            dbg_u32(p, rage / 1000u);
-        } else {
-            dbg_append(p, "--");
-        }
-        dbg_row(8, t, v);
+        for (uint8_t r = 0; r < DBG_ROWS; r++) dbg_row(r, "", "");
         cam_compose();
     }
 }
@@ -1096,8 +1090,7 @@ void display_debug_toggle(void) {
             memset(dbg_shown[r], ' ', DBG_COLS); dbg_shown[r][DBG_COLS] = '\0';
         }
         dbg_dirty = 0;
-        memset(cam_want, 0, sizeof(cam_want));
-        memset(cam_shown, 0, sizeof(cam_shown));   /* the clear leaves no segment lit */
+        cam_reset();   /* the clear leaves the panel blank: a grid of spaces */
         dbg_force_recompose = true;
         return;
     }
