@@ -76,6 +76,9 @@ typedef struct {
     uint32_t uart_parity;
 } ch582_link_stats_t;
 void ch582_link_stats(ch582_link_stats_t *out);
+/* D2 round 2 (flash 1c): the profile of slow ch582_task calls, HC_LINK pages
+ * 0x21-0x2A (layout at ch582_prof_fill in the .c). False for an unknown page. */
+bool ch582_prof_fill(uint8_t page, uint8_t *out28);
 
 #ifdef WDT_TEST_HOOKS
 /* Fault injection (instrumented builds): queue bytes the parser consumes as

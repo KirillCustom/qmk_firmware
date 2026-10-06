@@ -417,7 +417,12 @@ enum {
      *   HC_LINK:   [.., .., HC_LINK] -> [.., .., HC_LINK, version, u32 sent,
      *              timeouts, queue_full, giveups, replaced, u16 uart overrun,
      *              framing, parity, u16 reserved] -- every way the CH582F link
-     *              can lose a frame (D1; ch582_link_stats). */
+     *              can lose a frame (D1; ch582_link_stats). With a page
+     *              0x21-0x2A at [3]: [.., .., HC_LINK, page, 28 bytes], the
+     *              profile of slow ch582_task calls (D2 round 2, flash 1c;
+     *              ch582_prof_fill). Firmware without it answers page 0's
+     *              layout with [3] = the version (8), which a host checking the
+     *              echoed page rejects -- hence pages from 0x21. */
     HC_FLASHW      = 0x0C,
     HC_ACCT        = 0x0D,
     HC_LINK        = 0x0E,
@@ -584,7 +589,16 @@ static void health_command(uint8_t *data, uint8_t length) {
             if (!loop_acct_fill(data[3], &data[4])) data[0] = RTC_UNHANDLED;
             break;
         case HC_LINK:
-            if (length >= 32) {
+            if (length >= 32 && data[3] != 0) {
+                /* Pages 0x21-0x2A: D2's profile of slow ch582_task calls (flash
+                 * 1c), echoing the page; page 0 (what older hosts send) is
+                 * below. Any other nonzero page is unhandled. */
+                if (ch582_prof_fill(data[3], &data[4])) {
+                    /* data[3] stays the page */
+                } else {
+                    data[0] = RTC_UNHANDLED;
+                }
+            } else if (length >= 32) {
                 ch582_link_stats_t ls;
                 ch582_link_stats(&ls);
                 uint8_t *p = &data[4];

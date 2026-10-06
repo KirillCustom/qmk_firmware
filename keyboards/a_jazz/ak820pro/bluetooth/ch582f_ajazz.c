@@ -508,6 +508,94 @@ void ch582_link_stats(ch582_link_stats_t *out) {
     out->uart_parity  = uart_err_parity;
 }
 
+/* Phase 1b, D2 round 2 (flash 1c): WHERE a slow ch582_task call goes. The
+ * first battery soak (2026-10-05/06) put the battery-only stalls here --
+ * ch582 the largest scope in 4720 of 5494 slow passes, ~7-8 ms each -- while
+ * the task's average cost per pass was the same on USB and on battery. So it
+ * is an occasional long call, and this splits each call >= PROF_SLOW_TICKS
+ * into: the control block (selects, pending actions, the poll, UART flags),
+ * the RX drain and parse, the 5C hook (battery_5c_report, its trimmed-mean
+ * sort), the 5B/5C acknowledgement writes, and the TX pump. Shares D1's
+ * runtime flag (loop_acct_on) and its inline tick (ACCT_NOW); a call longer
+ * than the 16-bit tick's 349.5 ms would alias, and is not expected here. */
+#define PROF_SLOW_TICKS ((uint16_t)(CH_CFG_ST_FREQUENCY / 250u))   /* 4 ms */
+#define PROF_RING       8u
+enum { PROF_CTRL, PROF_RX, PROF_C5, PROF_ACK, PROF_TX, PROF_N };
+typedef struct {
+    uint32_t uptime_ms;
+    uint16_t total;
+    uint16_t sec[PROF_N];
+    uint8_t  bytes;   /* RX bytes this call drained */
+    uint8_t  n5c;     /* 5C reports this call parsed */
+} prof_entry_t;
+static prof_entry_t prof_ring[PROF_RING];
+static uint8_t      prof_next;
+static uint32_t     prof_slow_calls, prof_slow_sec[PROF_N];   /* ticks, slow calls only */
+static uint32_t     prof_c5_reports, prof_c5_ticks;           /* every call */
+static uint16_t     prof_c5_max;                              /* the longest one 5C hook */
+static uint16_t     prof_call_c5, prof_call_ack;              /* this call */
+static uint8_t      prof_call_n5c;
+
+__attribute__((noinline)) static void prof_end(uint16_t p0, uint16_t p1, uint16_t p2, uint8_t bytes) {
+    uint16_t now   = ACCT_NOW();
+    uint16_t total = (uint16_t)(now - p0);
+    if (total < PROF_SLOW_TICKS) return;
+    uint16_t rx_all = (uint16_t)(p2 - p1);
+    uint16_t hooks  = (uint16_t)(prof_call_c5 + prof_call_ack);
+    uint16_t sec[PROF_N];
+    sec[PROF_CTRL] = (uint16_t)(p1 - p0);
+    sec[PROF_RX]   = rx_all > hooks ? (uint16_t)(rx_all - hooks) : 0u;
+    sec[PROF_C5]   = prof_call_c5;
+    sec[PROF_ACK]  = prof_call_ack;
+    sec[PROF_TX]   = (uint16_t)(now - p2);
+    prof_slow_calls++;
+    prof_entry_t *e = &prof_ring[prof_next];
+    e->uptime_ms = timer_read32();
+    if (e->uptime_ms == 0) e->uptime_ms = 1;
+    e->total = total;
+    for (uint8_t i = 0; i < PROF_N; i++) {
+        prof_slow_sec[i] += sec[i];
+        e->sec[i] = sec[i];
+    }
+    e->bytes  = bytes;
+    e->n5c    = prof_call_n5c;
+    prof_next = (uint8_t)((prof_next + 1u) % PROF_RING);
+}
+
+/* HC_LINK pages 0x21-0x2A (hid_protocol.c), 28 bytes, little-endian, ticks at
+ * CH_CFG_ST_FREQUENCY. Numbered from 0x21 so no page can equal a protocol
+ * version: firmware without the profile echoes the version (8) in that byte.
+ *   0x21: u32 slow calls (>= 4 ms), u32 their ticks per section: control,
+ *         RX, 5C hook, ack writes, TX pump
+ *   0x22: u32 5C reports (every call), u32 their hook ticks, u16 the longest
+ *         one, u8 next ring slot, u8 ring length, u16 PROF_SLOW_TICKS
+ *   0x23-0x2A: ring slot 0-7: u32 uptime_ms (0: empty), u16 total, u16 x 5
+ *         sections, u8 RX bytes, u8 5C reports */
+#define PROF_PAGE0 0x21u
+bool ch582_prof_fill(uint8_t page, uint8_t *out28) {
+    uint8_t *p = out28;
+    memset(out28, 0, 28);
+#define P32(x) do { uint32_t v_ = (x); *p++ = v_ & 0xFF; *p++ = (v_ >> 8) & 0xFF; *p++ = (v_ >> 16) & 0xFF; *p++ = (uint8_t)(v_ >> 24); } while (0)
+#define P16(x) do { uint16_t v_ = (x); *p++ = v_ & 0xFF; *p++ = (uint8_t)(v_ >> 8); } while (0)
+    if (page == PROF_PAGE0) {
+        P32(prof_slow_calls);
+        for (uint8_t i = 0; i < PROF_N; i++) P32(prof_slow_sec[i]);
+    } else if (page == PROF_PAGE0 + 1u) {
+        P32(prof_c5_reports); P32(prof_c5_ticks); P16(prof_c5_max);
+        *p++ = prof_next; *p++ = PROF_RING; P16(PROF_SLOW_TICKS);
+    } else if (page >= PROF_PAGE0 + 2u && page < PROF_PAGE0 + 2u + PROF_RING) {
+        const prof_entry_t *e = &prof_ring[page - (PROF_PAGE0 + 2u)];
+        P32(e->uptime_ms); P16(e->total);
+        for (uint8_t i = 0; i < PROF_N; i++) P16(e->sec[i]);
+        *p++ = e->bytes; *p++ = e->n5c;
+    } else {
+        return false;
+    }
+#undef P16
+#undef P32
+    return true;
+}
+
 static inline uint8_t tx_next(uint8_t i) { return (uint8_t)((i + 1) % CH582_TXQ_LEN); }
 
 /* Drop the head frame (ACKed or given up) and stop waiting on it. */
@@ -792,6 +880,8 @@ uint8_t ch582_get_target_slot(void) {
 
 void ch582_task(void) {
     WDT_SCOPE(WDT_SITE_WIRELESS);
+    const bool prof = loop_acct_on;   /* D2's profile: see prof_end() */
+    uint16_t   p0   = prof ? ACCT_NOW() : 0u;
     /* Rolling 3-byte window over the RX stream. The module interleaves two frame
      * formats with no length prefix, and the stream can drop bytes on a burst, so
      * a fixed [type,data,cksum] state machine desyncs permanently. Matching on a
@@ -946,6 +1036,9 @@ void ch582_task(void) {
 
     uint8_t c;
     uint8_t bytes_processed = 0;
+    uint16_t p1 = prof ? ACCT_NOW() : 0u;
+    prof_call_c5 = prof_call_ack = 0;
+    prof_call_n5c = 0;
 
     /* Drain the queue fully (capped to bound worst-case latency) so a connect
      * burst doesn't overflow the serial input buffer and shed bytes. */
@@ -1092,7 +1185,18 @@ void ch582_task(void) {
                         battery_level     = d;
                         battery_last_recv = timer_read32();
                         battery_reports++;
-                        battery_5c_report(d);   /* every report, not the last of a burst */
+                        if (prof) {
+                            uint16_t h0 = ACCT_NOW();
+                            battery_5c_report(d);   /* every report, not the last of a burst */
+                            uint16_t dh = (uint16_t)(ACCT_NOW() - h0);
+                            prof_call_c5 = (uint16_t)(prof_call_c5 + dh);
+                            prof_c5_ticks += dh;
+                            prof_c5_reports++;
+                            if (dh > prof_c5_max) prof_c5_max = dh;
+                            prof_call_n5c++;
+                        } else {
+                            battery_5c_report(d);
+                        }
                         battery_seen      = true;
                         /* Lowest ever seen, for the debug page. The module is the
                          * only thing that can read the cell, and we have no idea
@@ -1107,7 +1211,15 @@ void ch582_task(void) {
             }
 #if CH582_ACK_FRAMES
             /* Mirror stock: ack 5B (connection state) and 5C (battery), never 5A. */
-            if (type == 0x5B || type == 0x5C) ch582_send_ack();
+            if (type == 0x5B || type == 0x5C) {
+                if (prof) {
+                    uint16_t a0 = ACCT_NOW();
+                    ch582_send_ack();
+                    prof_call_ack = (uint16_t)(prof_call_ack + (uint16_t)(ACCT_NOW() - a0));
+                } else {
+                    ch582_send_ack();
+                }
+            }
 #endif
             matched = true;
         }
@@ -1140,5 +1252,7 @@ void ch582_task(void) {
      * stop a needless retransmit, whose own ACK then arrived with nothing in
      * flight (an orphan) -- or, worse, popped the NEXT frame, since `61 0D 0A`
      * carries no sequence number. */
+    uint16_t p2 = prof ? ACCT_NOW() : 0u;
     ch582_tx_pump();
+    if (prof) prof_end(p0, p1, p2, bytes_processed);
 }
