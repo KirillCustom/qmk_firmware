@@ -60,6 +60,10 @@ void flash_stats_op(bool erase);
 #define FLASH_RTC_PATH_SOF 1u
 #define FLASH_RTC_PATH_PCF 2u
 void flash_stats_rtc_proposal(uint16_t period, uint8_t path, bool stored);
+/* C2: the persistence scheduler (rtc_persist.c) saved `period`, a candidate
+ * from `path`. Since C2 the proposals pass stored = false and only this counts
+ * stores. */
+void flash_stats_rtc_store(uint16_t period, uint8_t path);
 
 void flash_stats_reset(void);
 

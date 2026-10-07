@@ -96,6 +96,12 @@ void flash_stats_rtc_proposal(uint16_t period, uint8_t path, bool stored) {
     }
 }
 
+void flash_stats_rtc_store(uint16_t period, uint8_t path) {
+    rtc_last_stored      = period;
+    rtc_last_stored_path = path;
+    rtc_stores[(path == FLASH_RTC_PATH_PCF) ? 1u : 0u]++;
+}
+
 void flash_stats_reset(void) {
     memset(sessions, 0, sizeof sessions);
     memset(programs, 0, sizeof programs);

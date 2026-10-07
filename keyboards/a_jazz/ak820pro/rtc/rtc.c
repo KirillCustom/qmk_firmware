@@ -7,6 +7,7 @@
 #include "quantum.h"
 #include "kb_eeconfig.h"   /* persisted divider period (phase 4) */
 #include "flash_stats.h"   /* C1: which path proposes each save */
+#include "rtc_persist.h"   /* C2: proposals here, every save there */
 #include "hal.h"
 #include "../graphics/lcd_bus.h"
 #include "../graphics/display.h"   /* display_splash_done() */
@@ -659,18 +660,12 @@ static void rtc_ref_task(void)
     } else {
         last_sign = 0;
     }
-    /* Persist any accepted sane value after 10 min uptime when it moved
-     * >= 64 ticks from the stored one (PLAN.md C3; was 32) -- INCLUDING a
-     * window whose delta is 0: a cleanly converged loop otherwise never
-     * stored anything (seen 2026-09-01: 33212 held for two windows, EEPROM
-     * still 0, next reboot re-seeded at 33600). */
-    if (timer_read32() >= 600000u && P_nom >= 28000 && P_nom <= 40000) {
-        uint16_t st = kb_eeconfig_get_rtc_period();
-        uint32_t dd = (P_nom > st) ? (P_nom - st) : (st - P_nom);
-        bool     sv = (st == 0 || dd >= 64);
-        flash_stats_rtc_proposal((uint16_t)P_nom, FLASH_RTC_PATH_SOF, sv);
-        if (sv) kb_eeconfig_set_rtc_period((uint16_t)P_nom);
-    }
+    /* Propose every accepted window's value -- INCLUDING a window whose delta
+     * is 0: a cleanly converged loop otherwise never stored anything (seen
+     * 2026-09-01: 33212 held for two windows, EEPROM still 0, next reboot
+     * re-seeded at 33600). Whether and when it is SAVED is rtc_persist.c's
+     * (C2): first at 10 min if nothing is stored, then <= 4 a day. */
+    if (P_nom >= 28000 && P_nom <= 40000) rtc_persist_propose((uint16_t)P_nom, FLASH_RTC_PATH_SOF);
 }
 
 /* Coherent sub-second read (PLAN.md 3.1). Lock-free: a tick landing inside
@@ -990,24 +985,17 @@ static void rtc_clock_discipline(void)
                      * trim. Estimator arithmetic above is unchanged. */
                     P_nom = np;
                     reload_pending = true;
-                    /* Persist ANY accepted, sane trim once the board has been
-                     * up a while and the value moved meaningfully from what is
-                     * stored. NOT a wait-for-convergence rule: near lock the
-                     * measurement windows grow very long and step sizes are
-                     * not guaranteed monotonic (the recorded 695->46 trace
-                     * happened to shrink), so a "two small steps" trigger
-                     * could wait forever. Persisting incrementally means every
-                     * boot starts from the best value yet seen; the 32-tick
-                     * threshold (~0.1%) keeps temperature wander from causing
-                     * steady rewrites. The write itself is coalesced/deferred
-                     * by kb_eeconfig. (Phase 4.1, Codex plan-review #15.) */
-                    if (timer_read32() >= 600000u && np >= 28000 && np <= 40000) {
-                        uint16_t st = kb_eeconfig_get_rtc_period();
-                        uint32_t d  = (np > st) ? (np - st) : (st - np);
-                        bool     sv = (st == 0 || d >= 64);
-                        flash_stats_rtc_proposal((uint16_t)np, FLASH_RTC_PATH_PCF, sv);
-                        if (sv) kb_eeconfig_set_rtc_period((uint16_t)np);   /* 64: PLAN.md C3 */
-                    }
+                    /* Propose ANY accepted, sane trim. NOT a wait-for-convergence
+                     * rule: near lock the measurement windows grow very long
+                     * and step sizes are not guaranteed monotonic (the
+                     * recorded 695->46 trace happened to shrink), so a "two
+                     * small steps" trigger could wait forever. The SAVE is
+                     * rtc_persist.c's (C2). A 64-tick threshold alone did NOT
+                     * keep temperature wander from causing steady rewrites, as
+                     * this comment used to claim: on battery this path saved
+                     * 6-8 times a day (C1, 2026-10-05/07), each blanking the
+                     * LEDs. The scheduler's 6 h budget is what bounds it. */
+                    if (np >= 28000 && np <= 40000) rtc_persist_propose((uint16_t)np, FLASH_RTC_PATH_PCF);
                     printf("[rtc] trim %lu -> %lu (%ld ticks / %ld s)\n",
                            (unsigned long)period, (unsigned long)np,
                            (long)ticks, (long)real);
@@ -1524,6 +1512,7 @@ void rtc_task(void)
     usb_active_mirror = ua;
 
     rtc_ref_task();      /* Phase 2: SOF window evaluation + reference-source transitions */
+    rtc_persist_task();  /* C2: the one place the period is saved, <= once a minute */
 
 #ifdef RTC_AUTO_CALIBRATION
 
