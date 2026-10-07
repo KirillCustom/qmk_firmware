@@ -278,6 +278,10 @@ bool battery_ran_from_pack(void)      { return ran_from_pack; }
 static uint8_t  c5_ring[C5_RING];
 static uint8_t  c5_count    = 0;
 static uint8_t  c5_pos      = 0;
+/* How many of the ring's c5_count reports hold each value 0..100: the trimmed
+ * mean's sorted order without sorting (see c5_trimmed_mean_x100). Kept in step
+ * with the ring on every insert, eviction and forget. */
+static uint8_t  c5_hist[101];
 static bool     c5_new      = false;         /* a report arrived since the last tick */
 static uint16_t c5_est      = C5_EST_NONE;   /* hundredths of a count */
 static uint8_t  c5_zero_run = 0;             /* consecutive reports of 0 */
@@ -288,11 +292,13 @@ static uint16_t lg_c5_sum = 0, lg_c5_n = 0;
 static uint8_t  lg_c5_min = C5_NONE, lg_c5_max = 0;
 static bool     lg_c5_saturated = false;
 
-/* The estimate reads c5_ring[0 .. c5_count-1], so writing must restart at 0 too:
- * resuming at the old c5_pos would sort new reports among forgotten ones. */
+/* The estimate counts c5_ring[0 .. c5_count-1] through c5_hist, so the ring,
+ * its write position and the counts restart together: resuming at the old
+ * c5_pos would evict forgotten reports' counts that are no longer there. */
 static void c5_forget(void) {
     c5_count    = 0;
     c5_pos      = 0;
+    memset(c5_hist, 0, sizeof(c5_hist));
     c5_est      = C5_EST_NONE;
     c5_zero_run = 0;
 }
@@ -305,21 +311,36 @@ static bool c5_fresh(void) {
 static bool c5_top(uint16_t e)    { return e != C5_EST_NONE && e >= C5_TOP_X100; }
 static bool c5_bottom(uint16_t e) { return e < C5_BOTTOM_X100; }
 
-/* ~1000 compares for a full ring, at one report per ~2 s. */
+/* The mean of the middle three quarters of the ring's reports (an eighth
+ * trimmed from each end), in hundredths of a count.
+ *
+ * ⚠️ BY COUNTING, NOT SORTING (Phase 1b, D). It used to insertion-sort a copy of
+ * the ring on every report: ~1.75 ms of wall time each on the board (mean,
+ * worst 3.6 ms), and the module answers each 5 s battery poll with three
+ * reports at once -- ~6 ms of one main-loop pass, which is what made the
+ * battery-only >= 10 ms stalls (flash 1c's profile, 2026-10-07: 73.5% of the
+ * slow CH582F calls' time). On USB at the clamp every report is 100 and the
+ * sort moved nothing, which is why it was battery-only. Walking c5_hist from
+ * 0 upward -- skip the lowest `trim` reports, sum the next `n` -- is the same
+ * sum over the same sorted order, so the same result to the bit
+ * (scripts/battery_sim, c5_equivalence, against the sort verbatim). */
 static uint16_t c5_trimmed_mean_x100(void) {
-    uint8_t s[C5_RING];
-    for (uint8_t i = 0; i < c5_count; i++) {
-        uint8_t v = c5_ring[i], j = i;
-        while (j > 0 && s[j - 1] > v) {
-            s[j] = s[j - 1];
-            j--;
-        }
-        s[j] = v;
-    }
     uint8_t  trim = (uint8_t)(c5_count / 8u);
     uint8_t  n    = (uint8_t)(c5_count - 2u * trim);
+    uint8_t  skip = trim, keep = n;
     uint16_t sum  = 0;
-    for (uint8_t i = trim; i < c5_count - trim; i++) sum += s[i];
+    for (uint8_t v = 0; v <= 100u && keep; v++) {
+        uint8_t c = c5_hist[v];
+        if (!c) continue;
+        if (skip) {
+            uint8_t k = c < skip ? c : skip;
+            skip = (uint8_t)(skip - k);
+            c    = (uint8_t)(c - k);
+        }
+        uint8_t t = c < keep ? c : keep;
+        sum  = (uint16_t)(sum + (uint16_t)t * v);
+        keep = (uint8_t)(keep - t);
+    }
     return (uint16_t)(((uint32_t)sum * 100u + n / 2u) / n);
 }
 
@@ -327,7 +348,9 @@ static uint16_t c5_trimmed_mean_x100(void) {
 void battery_5c_report(uint8_t v) {
     if (v > 100u) return;
     c5_new          = true;
+    if (c5_count == C5_RING) c5_hist[c5_ring[c5_pos]]--;   /* the oldest report leaves */
     c5_ring[c5_pos] = v;
+    c5_hist[v]++;
     c5_pos          = (uint8_t)((c5_pos + 1u) % C5_RING);
     if (c5_count < C5_RING) c5_count++;
     c5_est      = (c5_count >= C5_MIN_EST) ? c5_trimmed_mean_x100() : C5_EST_NONE;
