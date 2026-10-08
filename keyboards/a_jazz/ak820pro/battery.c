@@ -180,6 +180,7 @@ static bool             reseat        = false;
 
 static void c5_forget(void);
 static void supply_changed(battery_supply_t was);
+static void boot_first_latch(uint16_t est);
 
 static bool charging_now(void) {
     return supply == BATTERY_SUPPLY_EXTERNAL && chrg_hold != 0;
@@ -355,17 +356,24 @@ void battery_5c_report(uint8_t v) {
     if (c5_count < C5_RING) c5_count++;
     c5_est      = (c5_count >= C5_MIN_EST) ? c5_trimmed_mean_x100() : C5_EST_NONE;
     c5_zero_run = (v == 0u) ? (uint8_t)(c5_zero_run < UINT8_MAX ? c5_zero_run + 1u : c5_zero_run) : 0u;
+    /* FROM-FLAT's input is the FIRST estimate: exactly five reports. The
+     * module answers each poll with three at once, so the next task can
+     * already see a sixth (codex, gate 7: 10,10,10 then 10,10,11 is 10.00
+     * at five, 10.17 at six). */
+    if (c5_count == C5_MIN_EST) boot_first_latch(c5_est);
 
     /* v5: the extrema follow every report. They used to update only while the
      * 16-bit sum accepted one, so after ~661 reports of 99 a later 100 reached
      * the estimator but not the log (codex, plan round 6). */
     if (v < lg_c5_min) lg_c5_min = v;
     if (v > lg_c5_max) lg_c5_max = v;
-    if (lg_c5_n < UINT16_MAX && lg_c5_sum <= (uint16_t)(UINT16_MAX - v)) {
+    if (!lg_c5_saturated && lg_c5_n < UINT16_MAX && lg_c5_sum <= (uint16_t)(UINT16_MAX - v)) {
         lg_c5_sum += v;
         lg_c5_n++;
     } else {
-        lg_c5_saturated = true;   /* c5_mean and c5_n cover the reports before this */
+        lg_c5_saturated = true;   /* c5_mean and c5_n cover the reports before this, and
+                                   * no later one: a smaller report after a rejected one
+                                   * would break the prefix (codex, gate 7) */
     }
 }
 
@@ -581,6 +589,14 @@ static uint8_t  chg_latch  = 0;
 /* The boot's first estimate, taken on USB before any time on the pack. */
 static uint16_t boot_first_x100  = 0xFFFFu;
 static bool     boot_first_taken = false;
+
+/* FROM-FLAT's input: the boot's first estimate, on USB, before any time on
+ * the pack. Latched once, from battery_5c_report at the fifth report. */
+static void boot_first_latch(uint16_t est) {
+    if (boot_first_taken || supply != BATTERY_SUPPLY_EXTERNAL || ran_from_pack) return;
+    boot_first_x100  = est;
+    boot_first_taken = true;
+}
 /* Relaxation: at an unplug owing a re-seat, or a pause's stop, the ring is
  * emptied once more RELAX_S later, so the next estimate is built only from
  * reports received at least that long after. */
@@ -673,12 +689,19 @@ static void model_advance(void) {
 
 /* A real charging session opens the model. */
 static void chg_open(void) {
+    /* A handover still waiting for its relaxed estimate adopted nothing: the
+     * number it holds is the closed session's display, not a start (codex,
+     * gate 7). The plan: MODEL from the adopted level, or UNKNOWN-CHG. */
+    bool unadopted = adopt_owed;
     modeled  = true;
     m_top_up = false;
     lost_a_s = stale_s = pause_s = 0;
     adopt_owed = false;
     relax_cancel();
-    if (level != LEVEL_UNKNOWN) {
+    if (unadopted) {
+        level  = LEVEL_UNKNOWN;
+        chg_st = CHG_UNKNOWN;
+    } else if (level != LEVEL_UNKNOWN) {
         chg_st   = CHG_MODEL;
         m_top_up = level > LEVEL_MODEL_CAP;   /* a 100 kept through a top-up (just full) */
         model_start(level);
@@ -1178,12 +1201,6 @@ void battery_task(void) {
     if (fresh_report) {
         uint16_t m = battery_5c_x100();
         if (m != C5_EST_NONE) {
-            /* FROM-FLAT's input: the boot's first estimate, on USB, before any
-             * time on the pack. Latched once. */
-            if (!boot_first_taken && supply == BATTERY_SUPPLY_EXTERNAL && !ran_from_pack) {
-                boot_first_x100  = m;
-                boot_first_taken = true;
-            }
             level_report(m);
         }
     }
