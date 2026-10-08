@@ -42,9 +42,13 @@ typedef enum {
 #define BATTERY_RISE_PM_PER_S 1u      /* the display rises at most this a second */
 #define BATTERY_T_OVERRUN_S   3600u   /* termination this long after the model's: LOST */
 /* After an unplug, or a pause's stop, the voltage relaxes; reports before
- * RELAX_S are not the pack. B3's relaxation trajectory sets it. */
-#define BATTERY_RELAX_S       120u
-#define BATTERY_PAUSE_S       600u    /* a charger pause this long hands over to the idle path */
+ * RELAX_S are not the pack. B3 trial 1 (10-07, 40 min from 2%) read the
+ * level it implies at the unplug ~1 point high 6-10 min after, ~0.6 at 15 and
+ * ~0.3 at 30: 30 min. PROVISIONAL until trial 2 films the first 6 min. */
+#define BATTERY_RELAX_S       1800u
+/* A charger pause this long hands over to the idle path: 10 min, and never
+ * less than RELAX_S. */
+#define BATTERY_PAUSE_S       1800u
 /* FROM-FLAT: a boot on USB whose first estimate is <= 10.00 counts. That is
  * <= 3248 mV UNDER CHARGE, >= 150 mV below the 3400 mV cut (itself a loaded
  * voltage), with room for the voltmeter's +-11 mV. */
