@@ -589,13 +589,20 @@ static uint8_t  chg_latch  = 0;
 /* The boot's first estimate, taken on USB before any time on the pack. */
 static uint16_t boot_first_x100  = 0xFFFFu;
 static bool     boot_first_taken = false;
+/* A handover's held number, not yet adopted or re-seated from a relaxed
+ * estimate: shown, but no start for a session (chg_open). */
+static bool     level_held       = false;
 
 /* FROM-FLAT's input: the boot's first estimate, on USB, before any time on
- * the pack. Latched once, from battery_5c_report at the fifth report. */
+ * the pack. Latched once, from battery_5c_report at the fifth report. The
+ * FIRST, whatever the supply then: one taken before the supply is known, or
+ * on the pack, makes this no flat boot on USB, and no later estimate becomes
+ * the first (codex, gate 7's verification). On USB the supply resolves within
+ * EXT_ENTER_TICKS, long before the module's fifth report. */
 static void boot_first_latch(uint16_t est) {
-    if (boot_first_taken || supply != BATTERY_SUPPLY_EXTERNAL || ran_from_pack) return;
-    boot_first_x100  = est;
+    if (boot_first_taken) return;
     boot_first_taken = true;
+    boot_first_x100  = (supply == BATTERY_SUPPLY_EXTERNAL && !ran_from_pack) ? est : 0xFFFFu;
 }
 /* Relaxation: at an unplug owing a re-seat, or a pause's stop, the ring is
  * emptied once more RELAX_S later, so the next estimate is built only from
@@ -691,8 +698,10 @@ static void model_advance(void) {
 static void chg_open(void) {
     /* A handover still waiting for its relaxed estimate adopted nothing: the
      * number it holds is the closed session's display, not a start (codex,
-     * gate 7). The plan: MODEL from the adopted level, or UNKNOWN-CHG. */
-    bool unadopted = adopt_owed;
+     * gate 7). The plan: MODEL from the adopted level, or UNKNOWN-CHG. An
+     * unplug in between does not make it one either (its verification). */
+    bool unadopted = adopt_owed || level_held;
+    level_held     = false;
     modeled  = true;
     m_top_up = false;
     lost_a_s = stale_s = pause_s = 0;
@@ -726,6 +735,7 @@ static void chg_handover(void) {
     if (chg_st == CHG_LOST || chg_st == CHG_UNKNOWN) level = LEVEL_UNKNOWN;
     chg_close(CHG_NONE);
     adopt_owed = true;   /* relax_task has run from the stop: the next estimate is relaxed */
+    level_held = true;   /* until adopt_relaxed: the display, not a start */
 }
 
 static void chg_lost(uint8_t why) {
@@ -785,6 +795,7 @@ static void adopt_relaxed(uint16_t m) {
         level = c5_level(m);
     }
     relax_done = false;
+    level_held = false;
 }
 
 static uint8_t chg_state_now(void) {
@@ -838,7 +849,8 @@ static void level_report(uint16_t m) {
     if (supply != BATTERY_SUPPLY_EXTERNAL) return;   /* UNKNOWN: touch nothing */
 
     if (full) {
-        level = LEVEL_FULL;
+        level      = LEVEL_FULL;
+        level_held = false;
         return;
     }
     /* Charging, or paused inside a modeled session: the model owns the level
@@ -1195,6 +1207,7 @@ void battery_task(void) {
          * estimate, and emptying the ring would drop FULL until it refills. */
         relax_cancel();
         adopt_owed = false;
+        level_held = false;
     }
     /* A real session opens the model: CHRG low SESSION_TICKS continuously. */
     if (!modeled && !full && supply == BATTERY_SUPPLY_EXTERNAL && chrg_run >= SESSION_TICKS) chg_open();
