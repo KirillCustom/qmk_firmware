@@ -11,6 +11,8 @@ void display_housekeeping_task(void);
 /* Per main-loop pass: one extra housekeeping pass on an RTC second edge
  * (clock-sync plan 3.9). Call before display_blit_pump(). */
 void display_second_edge_task(void);
+/* The end of a main-loop pass: housekeeping_task_kb() calls it last. */
+void display_pass_end(void);
 /* True once the boot splash has been cleared and the dashboard owns the panel. */
 bool display_splash_done(void);
 

@@ -602,6 +602,8 @@ void housekeeping_task_kb(void) {
     // Chain the user hook
     WDT_CALL(WDT_SITE_USER_HK, housekeeping_task_user());   /* untimed, as the param repeat */
 
+    display_pass_end();   /* the battery icon's one-component-a-pass limit (display.c) */
+
     // Kick the watchdog LAST -- after the 10 Hz block and the user hook, so a
     // kick certifies a COMPLETED pass. A kick at entry would hand a freshly
     // wedged pass another full timeout and prove nothing about what follows.

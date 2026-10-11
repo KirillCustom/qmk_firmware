@@ -1578,10 +1578,12 @@ static uint8_t batt_dirty = 0;
 static bool    bolt_clean = false;   /* the bolt slot was cleared with the panel */
 static uint8_t bolt_step  = 0;       /* cross rows painted (the cross goes in halves) */
 static uint8_t txt_done   = 0;       /* glyphs of the current text painted */
+static bool    txt_placed = false;   /* its x is set and its vacated cells cleared */
 /* At most ONE component per main-loop pass. display_housekeeping_task() runs
- * from the RTC second edge AND the 10 Hz tick, and both can land in one pass
- * (codex, flash 2c finding 1). display_second_edge_task() clears this at the
- * top of every pass. */
+ * from the RTC second edge AND the 10 Hz tick, and the deferred dashboard
+ * redraw (draw_status) runs before both, so two or three can land in one pass
+ * (codex, flash 2c finding 1 and its verification). display_pass_end(), the
+ * last thing housekeeping_task_kb() does, clears this once a pass. */
 static bool    batt_painted_this_pass = false;
 #define BATT_TXT_CHUNK   3           /* glyphs per call: 10x23 is ~2.5 ms each */
 #define CROSS_ROWS_CALL  6           /* cross rows per call: two rects a row */
@@ -1652,7 +1654,7 @@ static void draw_battery(bool force) {
         /* The callers (draw_status, the Fn+D restore) have just cleared the
          * panel: nothing of ours is on it. */
         last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
-        bolt_clean = true; bolt_step = 0; txt_done = 0;
+        bolt_clean = true; bolt_step = 0; txt_done = 0; txt_placed = false;
         batt_dirty = BATT_DIRTY_ALL;
     }
     /* The bar the panel should show. Marked by the fill it would paint, not by
@@ -1673,7 +1675,7 @@ static void draw_battery(bool force) {
     }
     /* Charging state changes the bolt, and presence owns the same rect. */
     if (chrg != last_chrg || absent != last_absent) { batt_dirty |= BATT_DIRTY_BOLT; bolt_step = 0; }
-    if (!same_txt)                                  { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; }
+    if (!same_txt) { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; txt_placed = false; }
     if (want_fw != last_fw || (want_fw && want_col != last_col)) batt_dirty |= BATT_DIRTY_BAR;
     last_chrg   = chrg;
     last_absent = absent;
@@ -1756,16 +1758,23 @@ static void draw_battery(bool force) {
                 lcd_clear_rect(last_txt_x, STATUS_Y, last_txt_w, lcd_font_height(FONT_STATUS));
                 last_txt_x = PANEL_WIDTH; last_txt_w = 0;
             }
+            txt_placed = false;
             batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT;
             return;
         }
-        if (txt_done == 0) {
-            uint16_t w = lcd_flash_text_width(FONT_STATUS, txt);
-            uint16_t x = (uint16_t)(PANEL_WIDTH - 4 - w);
-            if (x > last_txt_x)
+        if (!txt_placed) {
+            uint16_t w     = lcd_flash_text_width(FONT_STATUS, txt);
+            uint16_t x     = (uint16_t)(PANEL_WIDTH - 4 - w);
+            bool     clear = x > last_txt_x;
+            if (clear)
                 lcd_clear_rect(last_txt_x, STATUS_Y, (uint16_t)(x - last_txt_x), lcd_font_height(FONT_STATUS));
             last_txt_x = x;
             last_txt_w = w;
+            txt_placed = true;
+            /* A shortening text's clear is this call's work; its glyphs start
+             * on the next (codex, flash 2c verification: clear plus three
+             * glyphs in one pass). */
+            if (clear) return;
         }
         char    chunk[BATT_TXT_CHUNK + 1];
         uint8_t k = (uint8_t)(n - txt_done);
@@ -1774,7 +1783,7 @@ static void draw_battery(bool force) {
         chunk[k] = '\0';
         lcd_draw_flash_text(FONT_STATUS, (uint16_t)(last_txt_x + txt_done * (last_txt_w / n)), STATUS_Y, chunk);
         txt_done = (uint8_t)(txt_done + k);
-        if (txt_done >= n) { txt_done = 0; batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT; }
+        if (txt_done >= n) { txt_done = 0; txt_placed = false; batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT; }
         return;
     }
 
@@ -2742,8 +2751,11 @@ static void draw_status(bool force) {
  * gone before it starts polling the PCF. */
 bool display_splash_done(void) { return splash_cleared; }
 
+void display_pass_end(void) {
+    batt_painted_this_pass = false;
+}
+
 void display_second_edge_task(void) {
-    batt_painted_this_pass = false;   /* first display call of every pass */
     static uint32_t edge_seen = UINT32_MAX;
     uint32_t sec = rtc_get_seconds();
     if (sec != edge_seen) {
