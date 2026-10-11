@@ -1520,22 +1520,14 @@ extern bool charge_is_charging(void);   // ak820pro.c
 #define BOLT_X  (BATT_X0 + BATT_W + BATT_NUB_W + 4)
 #define BOLT_Y  (BATT_Y0 - 1)
 
-static void draw_bolt(uint16_t x, uint16_t y, uint16_t col) {
-    lcd_fill_rect(x + 6, y +  0, x + 6, y +  0, col);
-    lcd_fill_rect(x + 5, y +  1, x + 6, y +  2, col);
-    lcd_fill_rect(x + 4, y +  3, x + 5, y +  4, col);
-    lcd_fill_rect(x + 3, y +  5, x + 5, y +  5, col);
-    lcd_fill_rect(x + 3, y +  6, x + 8, y +  6, col);
-    lcd_fill_rect(x + 2, y +  7, x + 7, y +  7, col);
-    lcd_fill_rect(x + 4, y +  8, x + 7, y +  8, col);
-    lcd_fill_rect(x + 4, y +  9, x + 6, y +  9, col);
-    lcd_fill_rect(x + 4, y + 10, x + 5, y + 10, col);
-    lcd_fill_rect(x + 3, y + 11, x + 4, y + 12, col);
-    lcd_fill_rect(x + 3, y + 13, x + 3, y + 13, col);
-}
+/* The bolt's horizontal runs, {x0, y0, x1, y1} from the slot's origin. */
+static const uint8_t bolt_runs[][4] = {
+    {6, 0, 6, 0}, {5, 1, 6, 2}, {4, 3, 5, 4}, {3, 5, 5, 5}, {3, 6, 8, 6}, {2, 7, 7, 7},
+    {4, 8, 7, 8}, {4, 9, 6, 9}, {4, 10, 5, 10}, {3, 11, 4, 12}, {3, 13, 3, 13},
+};
 
 // Bottom row: battery icon (left) + percentage (right-aligned).
-/* Bolt footprint: draw_bolt() paints x+2..x+8, y+0..y+13. */
+/* Bolt footprint: bolt_runs paint x+2..x+8, y+0..y+13. */
 #define BOLT_W    9
 #define BOLT_H    14
 
@@ -1555,16 +1547,39 @@ static void draw_bolt(uint16_t x, uint16_t y, uint16_t col) {
  * leave the cross's last columns on the panel when it is taken down. */
 #define ICON_SLOT_W ((CROSS_WH > BOLT_W) ? CROSS_WH : BOLT_W)
 
-/* Rows [r0, r1) of the cross: draw_battery() paints it in halves, since the
- * whole of it is 24 synchronous rects (flash 2c, codex finding 2). */
-static void draw_cross(uint16_t x, uint16_t y, uint16_t col, uint8_t r0, uint8_t r1) {
-    for (uint8_t i = r0; i < r1 && i < CROSS_WH; i++) {
-        uint16_t yy = y + i;
-        uint16_t a  = (uint16_t)(x + i);                    /* the "\" stroke */
-        uint16_t b  = (uint16_t)(x + (CROSS_WH - 1) - i);   /* the "/" stroke  */
-        lcd_fill_rect(a, yy, (a < x + CROSS_WH - 1) ? (uint16_t)(a + 1) : a, yy, col);
-        lcd_fill_rect((b > x) ? (uint16_t)(b - 1) : b, yy, b, yy, col);
+static void slot_run(uint16_t *t, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint16_t col) {
+    for (uint8_t y = y0; y <= y1 && y < BOLT_H; y++)
+        for (uint8_t x = x0; x <= x1 && x < ICON_SLOT_W; x++) t[y * ICON_SLOT_W + x] = col;
+}
+
+/* The bolt slot -- the bolt, the cross, or blank -- as ONE RAM tile in ONE
+ * transfer (flash 2c). It was a clear and 11 lcd_fill_rect runs for the bolt,
+ * 24 for the cross, each paying an 11-byte window command sent byte by byte:
+ * 19 ms at every plug-in, measured on flash 2b and 2c alike (the plug-in
+ * snapshots of 2026-10-11), the lesson draw_ampm learned first. The tile paints
+ * its own background, so no clear goes first, and it is always the whole slot
+ * (ICON_SLOT_W, the wider of the two), so neither leaves pixels under the
+ * other. */
+static void draw_bolt_slot(bool absent, bool chrg) {
+    static uint16_t tile[ICON_SLOT_W * BOLT_H];
+    memset(tile, 0, sizeof(tile));                      /* black background */
+    if (absent) {
+        /* Two-pixel strokes, clamped at the edges, CROSS_Y_OFF down. */
+        for (uint8_t i = 0; i < CROSS_WH; i++) {
+            uint8_t y = (uint8_t)(CROSS_Y_OFF + i);
+            uint8_t a = i;                              /* the "\" stroke */
+            uint8_t b = (uint8_t)(CROSS_WH - 1 - i);    /* the "/" stroke  */
+            slot_run(tile, a, y, (a < CROSS_WH - 1) ? (uint8_t)(a + 1) : a, y, COL_BATT_LOW);
+            slot_run(tile, (b > 0) ? (uint8_t)(b - 1) : b, y, b, y, COL_BATT_LOW);
+        }
+    } else if (chrg) {
+        for (uint8_t i = 0; i < sizeof(bolt_runs) / sizeof(bolt_runs[0]); i++)
+            slot_run(tile, bolt_runs[i][0], bolt_runs[i][1], bolt_runs[i][2], bolt_runs[i][3], COL_BOLT);
     }
+    /* CPU pushes share SPI0 with the DMA blits, and lcd_blit_ram does not wait
+     * on its own (draw_ampm). */
+    lcd_blit_wait();
+    lcd_blit_ram(tile, BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
 }
 #define BATT_IN_H (BATT_IN_Y1 - BATT_IN_Y0 + 1)
 
@@ -1575,8 +1590,6 @@ static void draw_cross(uint16_t x, uint16_t y, uint16_t col, uint8_t r0, uint8_t
 #define BATT_DIRTY_BAR     0x08u
 #define BATT_DIRTY_ALL     0x0Fu
 static uint8_t batt_dirty = 0;
-static bool    bolt_clean = false;   /* the bolt slot was cleared with the panel */
-static uint8_t bolt_step  = 0;       /* cross rows painted (the cross goes in halves) */
 static uint8_t txt_done   = 0;       /* glyphs of the current text painted */
 static bool    txt_placed = false;   /* its x is set and its vacated cells cleared */
 /* At most ONE component per main-loop pass. display_housekeeping_task() runs
@@ -1586,7 +1599,6 @@ static bool    txt_placed = false;   /* its x is set and its vacated cells clear
  * last thing housekeeping_task_kb() does, clears this once a pass. */
 static bool    batt_painted_this_pass = false;
 #define BATT_TXT_CHUNK   3           /* glyphs per call: 10x23 is ~2.5 ms each */
-#define CROSS_ROWS_CALL  6           /* cross rows per call: two rects a row */
 
 static void draw_battery(bool force) {
     static bool     last_chrg  = false;
@@ -1654,7 +1666,7 @@ static void draw_battery(bool force) {
         /* The callers (draw_status, the Fn+D restore) have just cleared the
          * panel: nothing of ours is on it. */
         last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
-        bolt_clean = true; bolt_step = 0; txt_done = 0; txt_placed = false;
+        txt_done = 0; txt_placed = false;
         batt_dirty = BATT_DIRTY_ALL;
     }
     /* The bar the panel should show. Marked by the fill it would paint, not by
@@ -1674,7 +1686,7 @@ static void draw_battery(bool force) {
                                 : COL_BATT_OK;
     }
     /* Charging state changes the bolt, and presence owns the same rect. */
-    if (chrg != last_chrg || absent != last_absent) { batt_dirty |= BATT_DIRTY_BOLT; bolt_step = 0; }
+    if (chrg != last_chrg || absent != last_absent) batt_dirty |= BATT_DIRTY_BOLT;
     if (!same_txt) { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; txt_placed = false; }
     if (want_fw != last_fw || (want_fw && want_col != last_col)) batt_dirty |= BATT_DIRTY_BAR;
     last_chrg   = chrg;
@@ -1713,23 +1725,8 @@ static void draw_battery(bool force) {
      * earlier version recoloured the whole icon cyan, which hid the level
      * exactly when "15% and charging" is the most useful thing to know. */
     if (batt_dirty & BATT_DIRTY_BOLT) {
-        /* One rect, three states. Clear first on any transition so the bolt's
-         * footprint cannot leave pixels under the cross or vice versa -- they
-         * overlap without covering each other. Not after a forced clear. */
-        if (bolt_step == 0) {
-            if (!bolt_clean) lcd_clear_rect(BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
-            bolt_clean = false;
-        }
-        if (absent) {
-            uint8_t r1 = (uint8_t)(bolt_step + CROSS_ROWS_CALL);
-            if (r1 > CROSS_WH) r1 = CROSS_WH;
-            draw_cross(BOLT_X, BOLT_Y + CROSS_Y_OFF, COL_BATT_LOW, bolt_step, r1);
-            bolt_step = r1;
-            if (bolt_step < CROSS_WH) return;   /* the other half next call */
-        } else if (chrg) {
-            draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
-        }
-        bolt_step = 0;
+        /* One rect, three states, one transfer (draw_bolt_slot). */
+        draw_bolt_slot(absent, chrg);
         batt_dirty &= (uint8_t)~BATT_DIRTY_BOLT;
         return;
     }
