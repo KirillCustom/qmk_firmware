@@ -1555,8 +1555,10 @@ static void draw_bolt(uint16_t x, uint16_t y, uint16_t col) {
  * leave the cross's last columns on the panel when it is taken down. */
 #define ICON_SLOT_W ((CROSS_WH > BOLT_W) ? CROSS_WH : BOLT_W)
 
-static void draw_cross(uint16_t x, uint16_t y, uint16_t col) {
-    for (uint8_t i = 0; i < CROSS_WH; i++) {
+/* Rows [r0, r1) of the cross: draw_battery() paints it in halves, since the
+ * whole of it is 24 synchronous rects (flash 2c, codex finding 2). */
+static void draw_cross(uint16_t x, uint16_t y, uint16_t col, uint8_t r0, uint8_t r1) {
+    for (uint8_t i = r0; i < r1 && i < CROSS_WH; i++) {
         uint16_t yy = y + i;
         uint16_t a  = (uint16_t)(x + i);                    /* the "\" stroke */
         uint16_t b  = (uint16_t)(x + (CROSS_WH - 1) - i);   /* the "/" stroke  */
@@ -1566,26 +1568,6 @@ static void draw_cross(uint16_t x, uint16_t y, uint16_t col) {
 }
 #define BATT_IN_H (BATT_IN_Y1 - BATT_IN_Y0 + 1)
 
-/* Right-aligned text in the battery row's number slot. Factored out because the
- * percentage and the "No Batt" label share the same bookkeeping: the slot is
- * right-aligned, so a SHORTER string starts further right and would leave its
- * old leftmost cells behind ("100%" -> "99%", and "No Batt" -> "5%"). Clear
- * exactly what is vacated; a longer string overpaints every old cell itself.
- *
- * 20px face: the clock crop freed the rows the small one was forced into. Cell
- * 23 at STATUS_Y = 104..126, ink 108..122, row 127 margin. PANEL_WIDTH - 4 and
- * not - 1, because viewed from the right the bezel hides the last couple of
- * columns -- which was clipping the '%'. */
-static void draw_batt_slot(const char *str, uint16_t *last_x, uint16_t *last_w) {
-    uint16_t w = lcd_flash_text_width(FONT_STATUS, str);
-    uint16_t x = (uint16_t)(PANEL_WIDTH - 4 - w);
-    if (x > *last_x)
-        lcd_clear_rect(*last_x, STATUS_Y, (uint16_t)(x - *last_x), lcd_font_height(FONT_STATUS));
-    lcd_draw_flash_text(FONT_STATUS, x, STATUS_Y, str);
-    *last_x = x;
-    *last_w = w;
-}
-
 /* draw_battery()'s pending components, one painted per call (flash 2c). */
 #define BATT_DIRTY_OUTLINE 0x01u
 #define BATT_DIRTY_BOLT    0x02u
@@ -1594,11 +1576,20 @@ static void draw_batt_slot(const char *str, uint16_t *last_x, uint16_t *last_w) 
 #define BATT_DIRTY_ALL     0x0Fu
 static uint8_t batt_dirty = 0;
 static bool    bolt_clean = false;   /* the bolt slot was cleared with the panel */
+static uint8_t bolt_step  = 0;       /* cross rows painted (the cross goes in halves) */
+static uint8_t txt_done   = 0;       /* glyphs of the current text painted */
+/* At most ONE component per main-loop pass. display_housekeeping_task() runs
+ * from the RTC second edge AND the 10 Hz tick, and both can land in one pass
+ * (codex, flash 2c finding 1). display_second_edge_task() clears this at the
+ * top of every pass. */
+static bool    batt_painted_this_pass = false;
+#define BATT_TXT_CHUNK   3           /* glyphs per call: 10x23 is ~2.5 ms each */
+#define CROSS_ROWS_CALL  6           /* cross rows per call: two rects a row */
 
 static void draw_battery(bool force) {
-    static uint8_t  last_batt  = 0xFE;
     static bool     last_chrg  = false;
     static uint16_t last_fw    = 0;            /* fill bar width on the panel, px */
+    static uint16_t last_col   = 0;            /* ...and its colour               */
     static uint16_t last_txt_x = PANEL_WIDTH;  /* where the percent text starts   */
     static uint16_t last_txt_w = 0;            /* ...and how wide it is            */
     static bool     last_absent = false;       /* no pack fitted: cross, no number */
@@ -1661,19 +1652,34 @@ static void draw_battery(bool force) {
         /* The callers (draw_status, the Fn+D restore) have just cleared the
          * panel: nothing of ours is on it. */
         last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
-        bolt_clean = true;
+        bolt_clean = true; bolt_step = 0; txt_done = 0;
         batt_dirty = BATT_DIRTY_ALL;
     }
-    /* Charging state changes the bolt; presence owns the same rect and also
-     * suppresses the number and the bar, so it marks all of them. */
-    if (chrg != last_chrg || absent != last_absent) batt_dirty |= BATT_DIRTY_BOLT;
-    if (batt != last_batt || absent != last_absent) batt_dirty |= BATT_DIRTY_BAR;
-    if (!same_txt)                                  batt_dirty |= BATT_DIRTY_TEXT;
-    last_batt   = batt;
+    /* The bar the panel should show. Marked by the fill it would paint, not by
+     * the level: at 0% the supply alone moves "Low"'s red sliver (codex, flash
+     * 2c finding 3), and a level step inside one column needs no paint. */
+    uint16_t want_fw = 0, want_col = 0;
+    if (batt <= 100 && !absent) {
+        // Proportional fill. Round up so any nonzero charge shows at least one
+        // column -- an empty-looking icon at 3% would read as "dead".
+        want_fw = (uint16_t)(((uint32_t)batt * BATT_IN_W + 99u) / 100u);
+        if (want_fw > BATT_IN_W) want_fw = BATT_IN_W;
+        /* "Low" keeps a red sliver: the text glyphs cannot be recoloured, and
+         * an empty white outline beside it would not read as a warning. */
+        if (want_fw == 0 && batt == 0 && st == BATTERY_STATE_BATTERY) want_fw = 2;
+        want_col = (batt <= 20) ? COL_BATT_LOW
+                 : (batt <= 50) ? COL_BATT_WARN
+                                : COL_BATT_OK;
+    }
+    /* Charging state changes the bolt, and presence owns the same rect. */
+    if (chrg != last_chrg || absent != last_absent) { batt_dirty |= BATT_DIRTY_BOLT; bolt_step = 0; }
+    if (!same_txt)                                  { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; }
+    if (want_fw != last_fw || (want_fw && want_col != last_col)) batt_dirty |= BATT_DIRTY_BAR;
     last_chrg   = chrg;
     last_absent = absent;
     memcpy(last_txt, txt, sizeof(last_txt));
-    if (!batt_dirty) return;
+    if (!batt_dirty || batt_painted_this_pass) return;
+    batt_painted_this_pass = true;
 
     /* Repaint only what moved. This used to clear the whole 128x22 strip -- a
      * 5.6 KB DMA, ~7.6 ms with the main loop parked -- on every percent tick
@@ -1705,60 +1711,85 @@ static void draw_battery(bool force) {
      * earlier version recoloured the whole icon cyan, which hid the level
      * exactly when "15% and charging" is the most useful thing to know. */
     if (batt_dirty & BATT_DIRTY_BOLT) {
-        batt_dirty &= (uint8_t)~BATT_DIRTY_BOLT;
         /* One rect, three states. Clear first on any transition so the bolt's
          * footprint cannot leave pixels under the cross or vice versa -- they
          * overlap without covering each other. Not after a forced clear. */
-        if (!bolt_clean) lcd_clear_rect(BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
-        bolt_clean = false;
-        if (absent)    draw_cross(BOLT_X, BOLT_Y + CROSS_Y_OFF, COL_BATT_LOW);
-        else if (chrg) draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
+        if (bolt_step == 0) {
+            if (!bolt_clean) lcd_clear_rect(BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
+            bolt_clean = false;
+        }
+        if (absent) {
+            uint8_t r1 = (uint8_t)(bolt_step + CROSS_ROWS_CALL);
+            if (r1 > CROSS_WH) r1 = CROSS_WH;
+            draw_cross(BOLT_X, BOLT_Y + CROSS_Y_OFF, COL_BATT_LOW, bolt_step, r1);
+            bolt_step = r1;
+            if (bolt_step < CROSS_WH) return;   /* the other half next call */
+        } else if (chrg) {
+            draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
+        }
+        bolt_step = 0;
+        batt_dirty &= (uint8_t)~BATT_DIRTY_BOLT;
         return;
     }
 
     /* The text slot: the level, "Low", a state word while the level is
-     * unknown, or -- with no pack -- "No Batt", which at 10px/cell
-     * is 70px against the 78px between the cross and the bezel margin. */
+     * unknown, or -- with no pack -- "No Batt", which at 10px/cell is 70px
+     * against the 78px between the cross and the bezel margin.
+     *
+     * Right-aligned, so a SHORTER string starts further right and would leave
+     * its old leftmost cells behind ("100%" -> "99%", and "No Batt" -> "5%").
+     * Clear exactly what is vacated; a longer string overpaints every old cell
+     * itself. 20px face: the clock crop freed the rows the small one was forced
+     * into. Cell 23 at STATUS_Y = 104..126, ink 108..122, row 127 margin.
+     * PANEL_WIDTH - 4 and not - 1, because viewed from the right the bezel
+     * hides the last couple of columns -- which was clipping the '%'.
+     *
+     * Painted BATT_TXT_CHUNK glyphs a call, since one glyph is ~2.5 ms of
+     * synchronous LCD work and "No Batt" whole was ~17.5 ms (codex, flash 2c
+     * finding 2). The font is monospaced (lcd_flash_text_width), so glyph i
+     * sits at x + i * w / n. A text that changes mid-way restarts at its own
+     * x: everything left of it is cleared, and the rest is overpainted. */
     if (batt_dirty & BATT_DIRTY_TEXT) {
-        batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT;
-        if (txt[0]) {
-            draw_batt_slot(txt, &last_txt_x, &last_txt_w);
-        } else if (last_txt_w) {
-            lcd_clear_rect(last_txt_x, STATUS_Y, last_txt_w, lcd_font_height(FONT_STATUS));
-            last_txt_x = PANEL_WIDTH; last_txt_w = 0;
+        uint8_t n = (uint8_t)strlen(txt);
+        if (!n) {
+            if (last_txt_w) {
+                lcd_clear_rect(last_txt_x, STATUS_Y, last_txt_w, lcd_font_height(FONT_STATUS));
+                last_txt_x = PANEL_WIDTH; last_txt_w = 0;
+            }
+            batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT;
+            return;
         }
+        if (txt_done == 0) {
+            uint16_t w = lcd_flash_text_width(FONT_STATUS, txt);
+            uint16_t x = (uint16_t)(PANEL_WIDTH - 4 - w);
+            if (x > last_txt_x)
+                lcd_clear_rect(last_txt_x, STATUS_Y, (uint16_t)(x - last_txt_x), lcd_font_height(FONT_STATUS));
+            last_txt_x = x;
+            last_txt_w = w;
+        }
+        char    chunk[BATT_TXT_CHUNK + 1];
+        uint8_t k = (uint8_t)(n - txt_done);
+        if (k > BATT_TXT_CHUNK) k = BATT_TXT_CHUNK;
+        memcpy(chunk, &txt[txt_done], k);
+        chunk[k] = '\0';
+        lcd_draw_flash_text(FONT_STATUS, (uint16_t)(last_txt_x + txt_done * (last_txt_w / n)), STATUS_Y, chunk);
+        txt_done = (uint8_t)(txt_done + k);
+        if (txt_done >= n) { txt_done = 0; batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT; }
         return;
     }
 
     batt_dirty &= (uint8_t)~BATT_DIRTY_BAR;   /* the only mark left */
-    if (batt > 100 || absent) {
-        /* No level to fill: nothing known yet, or no pack at all -- where a
-         * "0%" bar next to the cross would state a flat battery and a missing
-         * one in the same breath. The bar comes down. */
-        if (last_fw) {
-            lcd_clear_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_W, BATT_IN_H);
-            last_fw = 0;
-        }
-        return;
-    }
-    // Proportional fill. Round up so any nonzero charge shows at least one
-    // column -- an empty-looking icon at 3% would read as "dead".
-    uint16_t fw = (uint16_t)(((uint32_t)batt * BATT_IN_W + 99u) / 100u);
-    if (fw > BATT_IN_W) fw = BATT_IN_W;
-    /* "Low" keeps a red sliver: the text glyphs cannot be recoloured, and
-     * an empty white outline beside it would not read as a warning. */
-    if (fw == 0 && batt == 0 && st == BATTERY_STATE_BATTERY) fw = 2;
-    /* A drop vacates columns on the right; a rise, or a colour change at
-     * the 20/50 thresholds, is covered by repainting the whole bar. */
-    if (fw < last_fw)
-        lcd_clear_rect((uint16_t)(BATT_IN_X0 + fw), BATT_IN_Y0, (uint16_t)(last_fw - fw), BATT_IN_H);
-    if (fw > 0) {
-        uint16_t col = (batt <= 20) ? COL_BATT_LOW
-                     : (batt <= 50) ? COL_BATT_WARN
-                                    : COL_BATT_OK;
-        lcd_fill_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_X0 + fw - 1, BATT_IN_Y1, col);
-    }
-    last_fw = fw;
+    /* With no level to fill (nothing known yet, or no pack, where a "0%" bar
+     * next to the cross would state a flat battery and a missing one in the
+     * same breath) want_fw is 0 and the bar comes down. A drop vacates columns
+     * on the right; a rise, or a colour change at the 20/50 thresholds, is
+     * covered by repainting the whole bar. */
+    if (want_fw < last_fw)
+        lcd_clear_rect((uint16_t)(BATT_IN_X0 + want_fw), BATT_IN_Y0, (uint16_t)(last_fw - want_fw), BATT_IN_H);
+    if (want_fw > 0)
+        lcd_fill_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_X0 + want_fw - 1, BATT_IN_Y1, want_col);
+    last_fw  = want_fw;
+    last_col = want_col;
 }
 
 // --- Lock indicator band ---------------------------------------------------
@@ -2712,6 +2743,7 @@ static void draw_status(bool force) {
 bool display_splash_done(void) { return splash_cleared; }
 
 void display_second_edge_task(void) {
+    batt_painted_this_pass = false;   /* first display call of every pass */
     static uint32_t edge_seen = UINT32_MAX;
     uint32_t sec = rtc_get_seconds();
     if (sec != edge_seen) {
