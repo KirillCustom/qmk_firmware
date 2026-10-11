@@ -631,6 +631,20 @@ static void ch582_tx_pump(void) {
     tx_stat_sent++;
 }
 
+bool ch582_tx_drain(uint16_t timeout_ms) {
+    /* A reset that beats the main loop's pump strands whatever is queued: for
+     * the jump, the key releases clear_keyboard() just queued, which would
+     * leave a key down at the BT host for the whole flash (codex, flash 2b
+     * finding 1). A give-up is not a delivery, so it fails the drain. */
+    uint32_t giveups = tx_stat_giveup;
+    uint16_t t0      = timer_read();
+    while (tx_in_flight || tx_head != tx_tail) {
+        if (timer_elapsed(t0) >= timeout_ms) return false;
+        ch582_task();
+    }
+    return tx_stat_giveup == giveups;
+}
+
 /* The module ACKed the in-flight frame -> drop it and let the next one go. Also
  * the first proof the module's UART is up (see module_alive). */
 static void ch582_tx_ack(void) {

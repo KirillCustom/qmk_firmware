@@ -34,6 +34,10 @@ void ch582_cancel_connect(void);
 void ch582_poll_status(void);
 void ch582_send_command(uint8_t cmd, const uint8_t *params, uint8_t param_len);
 void ch582_send_keyboard_report(report_keyboard_t *report);
+/* Pump the TX queue until it is empty, for at most timeout_ms. False on the
+ * timeout, or if any frame was given up rather than ACKed meanwhile. For the
+ * raw-HID bootloader jump (hid_protocol.c). */
+bool ch582_tx_drain(uint16_t timeout_ms);
 bool ch582_is_connected(void);
 bool ch582_is_pairing(void);
 /* True when the selected profile is the 2.4GHz dongle (not a BT slot). */

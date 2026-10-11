@@ -502,7 +502,9 @@ enum {
      * through hostagent/ak820bootloader.py after its backups):
      *   [SET_VALUE, HEALTH_CHANNEL, HC_BOOTLOADER, 'B', 'O', 'O', 'T']
      * The four bytes keep a stray or garbled frame from jumping; anything else
-     * is unhandled. It never replies. Instrumented builds, and `dev` builds
+     * is unhandled. It replies only to refuse: [.., .., HC_BOOTLOADER, 'B',
+     * 'U', 'S', 'Y', why], why 1 = a key moved in the last 2 s, 2 = the BT
+     * releases were not delivered; the host retries. Instrumented builds, and `dev` builds
      * (build.sh) for JD's board while development lasts. ⚠️ Never daily or
      * fpb, the flavors releases ship: any process that can open raw HID could
      * then drop the board into a bootloader that looks dead (build.sh checks
@@ -818,10 +820,24 @@ static void health_command(uint8_t *data, uint8_t length) {
                 data[0] = RTC_UNHANDLED;
                 break;
             }
-            /* What Fn+Esc does (ak820pro.c, QK_BOOT): the splash, held 1.5 s
-             * so it can be read, then QMK's own reset path, which releases
-             * every key and ends in our bootloader_jump() (watchdog stopped
-             * first). The one path every flash so far has taken. */
+            /* Never mid-typing, and never with a key left down at the host
+             * (codex, flash 2b finding 1). Over BT, clear_keyboard()'s releases
+             * are frames in the CH582F's TX queue, which only the main loop
+             * pumps: pump them here and see them ACKed before the reset. Fn+Esc
+             * has the same gap, but there the hands are on the keys. */
+            if (last_input_activity_elapsed() < 2000u) {
+                memcpy(&data[3], "BUSY", 4); data[7] = 1;
+                break;
+            }
+            clear_keyboard();
+            if (!ch582_tx_drain(500)) {
+                memcpy(&data[3], "BUSY", 4); data[7] = 2;
+                break;
+            }
+            /* Then what Fn+Esc does (ak820pro.c, QK_BOOT): the splash, held
+             * 1.5 s so it can be read, then QMK's own reset path, which ends
+             * in our bootloader_jump() (watchdog stopped first). The one path
+             * every flash so far has taken. */
             display_bootloader_splash();
             wait_ms(1500);
             reset_keyboard();   /* does not return */
