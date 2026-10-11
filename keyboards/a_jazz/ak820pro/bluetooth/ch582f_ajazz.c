@@ -633,16 +633,27 @@ static void ch582_tx_pump(void) {
 
 bool ch582_tx_drain(uint16_t timeout_ms) {
     /* A reset that beats the main loop's pump strands whatever is queued: for
-     * the jump, the key releases clear_keyboard() just queued, which would
-     * leave a key down at the BT host for the whole flash (codex, flash 2b
-     * finding 1). A give-up is not a delivery, so it fails the drain. */
-    uint32_t giveups = tx_stat_giveup;
+     * the jump, the key releases just queued, which would leave a key down at
+     * the BT host for the whole flash (codex, flash 2b finding 1). A give-up
+     * is not a delivery, and a full queue's drop never got queued, so either
+     * fails the drain. */
+    uint32_t giveups = tx_stat_giveup, drops = tx_stat_drop;
     uint16_t t0      = timer_read();
     while (tx_in_flight || tx_head != tx_tail) {
         if (timer_elapsed(t0) >= timeout_ms) return false;
         ch582_task();
     }
-    return tx_stat_giveup == giveups;
+    return tx_stat_giveup == giveups && tx_stat_drop == drops;
+}
+
+void ch582_send_releases(void) {
+    /* Straight onto the queue, not through clear_keyboard(): QMK skips a
+     * report equal to the last one it sent, so after a release that was given
+     * up, a second clear_keyboard() queues nothing and an empty drain would
+     * pass with the key still down at the host (codex, flash 2b verification). */
+    static const uint8_t none[8] = {0};
+    ch582_send_command(0xA1, none, 8);   /* keyboard: no modifiers, no keys */
+    ch582_send_command(0xA3, none, 2);   /* consumer: usage 0 */
 }
 
 /* The module ACKed the in-flight frame -> drop it and let the next one go. Also
