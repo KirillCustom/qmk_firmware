@@ -39,8 +39,8 @@ void ch582_send_keyboard_report(report_keyboard_t *report);
  * raw-HID bootloader jump (hid_protocol.c). */
 bool ch582_tx_drain(uint16_t timeout_ms);
 /* Queue fresh all-released keyboard (A1) and consumer (A3) frames, whatever
- * QMK last sent. For the same jump. */
-void ch582_send_releases(void);
+ * QMK last sent. False if a full queue dropped either. For the same jump. */
+bool ch582_send_releases(void);
 bool ch582_is_connected(void);
 bool ch582_is_pairing(void);
 /* True when the selected profile is the 2.4GHz dongle (not a BT slot). */

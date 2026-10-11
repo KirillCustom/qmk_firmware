@@ -646,14 +646,18 @@ bool ch582_tx_drain(uint16_t timeout_ms) {
     return tx_stat_giveup == giveups && tx_stat_drop == drops;
 }
 
-void ch582_send_releases(void) {
+bool ch582_send_releases(void) {
     /* Straight onto the queue, not through clear_keyboard(): QMK skips a
      * report equal to the last one it sent, so after a release that was given
      * up, a second clear_keyboard() queues nothing and an empty drain would
-     * pass with the key still down at the host (codex, flash 2b verification). */
+     * pass with the key still down at the host (codex, flash 2b verification).
+     * A full queue with no frame of the type to overwrite drops the release
+     * here, before any drain could see it (the second verification). */
     static const uint8_t none[8] = {0};
+    uint32_t drops = tx_stat_drop;
     ch582_send_command(0xA1, none, 8);   /* keyboard: no modifiers, no keys */
     ch582_send_command(0xA3, none, 2);   /* consumer: usage 0 */
+    return tx_stat_drop == drops;
 }
 
 /* The module ACKed the in-flight frame -> drop it and let the next one go. Also

@@ -830,8 +830,9 @@ static void health_command(uint8_t *data, uint8_t length) {
                 break;
             }
             clear_keyboard();
-            if (!ch582_is_usb()) ch582_send_releases();   /* every attempt, fresh */
-            if (!ch582_tx_drain(500)) {
+            /* Fresh, on every attempt, and refused if a full queue dropped one. */
+            bool queued = ch582_is_usb() || ch582_send_releases();
+            if (!queued || !ch582_tx_drain(500)) {
                 memcpy(&data[3], "BUSY", 4); data[7] = 2;
                 break;
             }
