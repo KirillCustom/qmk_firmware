@@ -1586,6 +1586,15 @@ static void draw_batt_slot(const char *str, uint16_t *last_x, uint16_t *last_w) 
     *last_w = w;
 }
 
+/* draw_battery()'s pending components, one painted per call (flash 2c). */
+#define BATT_DIRTY_OUTLINE 0x01u
+#define BATT_DIRTY_BOLT    0x02u
+#define BATT_DIRTY_TEXT    0x04u
+#define BATT_DIRTY_BAR     0x08u
+#define BATT_DIRTY_ALL     0x0Fu
+static uint8_t batt_dirty = 0;
+static bool    bolt_clean = false;   /* the bolt slot was cleared with the panel */
+
 static void draw_battery(bool force) {
     static uint8_t  last_batt  = 0xFE;
     static bool     last_chrg  = false;
@@ -1636,17 +1645,35 @@ static void draw_battery(bool force) {
     // as the bolt and suppresses the number.
     if (absent) snprintf(txt, sizeof(txt), "No Batt");
     bool same_txt = strcmp(txt, last_txt) == 0;
-    if (!force && batt == last_batt && chrg == last_chrg && absent == last_absent && same_txt) return;
-    /* Presence coming back must repaint the bar the absent branch cleared,
-     * even when the level itself did not move. */
-    bool level_changed  = force || batt != last_batt || absent != last_absent;
-    bool chrg_changed   = force || chrg != last_chrg;
-    bool absent_changed = force || absent != last_absent;
-    bool text_changed   = force || !same_txt;
+
+    /* ONE component per call (flash 2c). A plug-in changes the bolt, the text
+     * and the bar at once, and painting all three in one pass made a 27 ms
+     * pass, 19 ms of it here: over the 25 ms line where a keypress can be lost
+     * (the plug-in snapshot of 2026-10-11; flash 2's plug-ins were 33 ms). The
+     * bolt is a clear and 11 synchronous rects, the text one synchronous glyph
+     * each (lcd_draw_flash_text_staged() does not exist; see draw_debug_page),
+     * and the bar a clear and a rect. What changed is marked in batt_dirty, and
+     * each call paints the first mark: the outline (after a clear), the bolt,
+     * the text, then the bar. The housekeeping tick calls back while marks
+     * remain, so a plug-in settles in three ticks, ~300 ms. The Fn+D restore's
+     * battery stage and draw_status() now paint only the outline themselves. */
+    if (force) {
+        /* The callers (draw_status, the Fn+D restore) have just cleared the
+         * panel: nothing of ours is on it. */
+        last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
+        bolt_clean = true;
+        batt_dirty = BATT_DIRTY_ALL;
+    }
+    /* Charging state changes the bolt; presence owns the same rect and also
+     * suppresses the number and the bar, so it marks all of them. */
+    if (chrg != last_chrg || absent != last_absent) batt_dirty |= BATT_DIRTY_BOLT;
+    if (batt != last_batt || absent != last_absent) batt_dirty |= BATT_DIRTY_BAR;
+    if (!same_txt)                                  batt_dirty |= BATT_DIRTY_TEXT;
     last_batt   = batt;
     last_chrg   = chrg;
     last_absent = absent;
     memcpy(last_txt, txt, sizeof(last_txt));
+    if (!batt_dirty) return;
 
     /* Repaint only what moved. This used to clear the whole 128x22 strip -- a
      * 5.6 KB DMA, ~7.6 ms with the main loop parked -- on every percent tick
@@ -1654,11 +1681,11 @@ static void draw_battery(bool force) {
      * came to ~20 ms: three milliseconds under the line where a keypress can
      * be lost (docs/display.md). None of that clearing was needed. The outline
      * never changes, a glyph blit overpaints its whole cell, and the bar and
-     * the bolt have known rects -- so the outline is painted once, on `force`,
-     * whose callers (display_redraw_dashboard, the Fn+D restore) have just
-     * cleared the panel, and everything else clears exactly the pixels it
+     * the bolt have known rects -- so the outline is painted once, after a
+     * forced repaint's clear, and everything else clears exactly the pixels it
      * vacates. */
-    if (force) {
+    if (batt_dirty & BATT_DIRTY_OUTLINE) {
+        batt_dirty &= (uint8_t)~BATT_DIRTY_OUTLINE;
         uint16_t outline = COL_FG;
         // Body outline: four 1px edges rather than a filled rect, so the
         // interior stays background and the fill below can be drawn
@@ -1670,35 +1697,40 @@ static void draw_battery(bool force) {
         // Terminal nub on the right.
         lcd_fill_rect(BATT_X1 + 1, BATT_Y0 + BATT_NUB_INSET,
                       BATT_X1 + BATT_NUB_W, BATT_Y1 - BATT_NUB_INSET, outline);
-        /* The strip under us is blank: nothing of ours is on it. */
-        last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
+        return;
     }
 
     /* Outline stays white and the fill stays level-coloured even while
      * charging: the bolt carries that signal, so the two are orthogonal. The
      * earlier version recoloured the whole icon cyan, which hid the level
      * exactly when "15% and charging" is the most useful thing to know. */
-    if (chrg_changed || absent_changed) {
+    if (batt_dirty & BATT_DIRTY_BOLT) {
+        batt_dirty &= (uint8_t)~BATT_DIRTY_BOLT;
         /* One rect, three states. Clear first on any transition so the bolt's
          * footprint cannot leave pixels under the cross or vice versa -- they
-         * overlap without covering each other. */
-        if (!force) lcd_clear_rect(BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
+         * overlap without covering each other. Not after a forced clear. */
+        if (!bolt_clean) lcd_clear_rect(BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
+        bolt_clean = false;
         if (absent)    draw_cross(BOLT_X, BOLT_Y + CROSS_Y_OFF, COL_BATT_LOW);
         else if (chrg) draw_bolt(BOLT_X, BOLT_Y, COL_BOLT);
+        return;
     }
 
     /* The text slot: the level, "Low", a state word while the level is
      * unknown, or -- with no pack -- "No Batt", which at 10px/cell
      * is 70px against the 78px between the cross and the bezel margin. */
-    if (text_changed) {
+    if (batt_dirty & BATT_DIRTY_TEXT) {
+        batt_dirty &= (uint8_t)~BATT_DIRTY_TEXT;
         if (txt[0]) {
             draw_batt_slot(txt, &last_txt_x, &last_txt_w);
         } else if (last_txt_w) {
             lcd_clear_rect(last_txt_x, STATUS_Y, last_txt_w, lcd_font_height(FONT_STATUS));
             last_txt_x = PANEL_WIDTH; last_txt_w = 0;
         }
+        return;
     }
 
+    batt_dirty &= (uint8_t)~BATT_DIRTY_BAR;   /* the only mark left */
     if (batt > 100 || absent) {
         /* No level to fill: nothing known yet, or no pack at all -- where a
          * "0%" bar next to the cross would state a flat battery and a missing
@@ -1709,27 +1741,24 @@ static void draw_battery(bool force) {
         }
         return;
     }
-
-    if (level_changed) {
-        // Proportional fill. Round up so any nonzero charge shows at least one
-        // column -- an empty-looking icon at 3% would read as "dead".
-        uint16_t fw = (uint16_t)(((uint32_t)batt * BATT_IN_W + 99u) / 100u);
-        if (fw > BATT_IN_W) fw = BATT_IN_W;
-        /* "Low" keeps a red sliver: the text glyphs cannot be recoloured, and
-         * an empty white outline beside it would not read as a warning. */
-        if (fw == 0 && batt == 0 && st == BATTERY_STATE_BATTERY) fw = 2;
-        /* A drop vacates columns on the right; a rise, or a colour change at
-         * the 20/50 thresholds, is covered by repainting the whole bar. */
-        if (fw < last_fw)
-            lcd_clear_rect((uint16_t)(BATT_IN_X0 + fw), BATT_IN_Y0, (uint16_t)(last_fw - fw), BATT_IN_H);
-        if (fw > 0) {
-            uint16_t col = (batt <= 20) ? COL_BATT_LOW
-                         : (batt <= 50) ? COL_BATT_WARN
-                                        : COL_BATT_OK;
-            lcd_fill_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_X0 + fw - 1, BATT_IN_Y1, col);
-        }
-        last_fw = fw;
+    // Proportional fill. Round up so any nonzero charge shows at least one
+    // column -- an empty-looking icon at 3% would read as "dead".
+    uint16_t fw = (uint16_t)(((uint32_t)batt * BATT_IN_W + 99u) / 100u);
+    if (fw > BATT_IN_W) fw = BATT_IN_W;
+    /* "Low" keeps a red sliver: the text glyphs cannot be recoloured, and
+     * an empty white outline beside it would not read as a warning. */
+    if (fw == 0 && batt == 0 && st == BATTERY_STATE_BATTERY) fw = 2;
+    /* A drop vacates columns on the right; a rise, or a colour change at
+     * the 20/50 thresholds, is covered by repainting the whole bar. */
+    if (fw < last_fw)
+        lcd_clear_rect((uint16_t)(BATT_IN_X0 + fw), BATT_IN_Y0, (uint16_t)(last_fw - fw), BATT_IN_H);
+    if (fw > 0) {
+        uint16_t col = (batt <= 20) ? COL_BATT_LOW
+                     : (batt <= 50) ? COL_BATT_WARN
+                                    : COL_BATT_OK;
+        lcd_fill_rect(BATT_IN_X0, BATT_IN_Y0, BATT_IN_X0 + fw - 1, BATT_IN_Y1, col);
     }
+    last_fw = fw;
 }
 
 // --- Lock indicator band ---------------------------------------------------
@@ -2752,6 +2781,9 @@ void display_housekeeping_task(void) {
             display_playback_tick();
             LOOP_SITE(LOOP_SITE_CLOCK, draw_clock());
             LOOP_SITE(LOOP_SITE_BATT,  draw_battery(false)); // self-guards, only draws on change
+        } else if (batt_dirty) {
+            /* The rest of a battery repaint, one component per tick. */
+            LOOP_SITE(LOOP_SITE_BATT, draw_battery(false));
         }
     }
 }
