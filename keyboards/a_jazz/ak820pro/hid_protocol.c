@@ -489,11 +489,6 @@ enum {
      * Modes 1-4, 6 and 7 never reply, by design, and are refused while
      * degraded. The record's parent is test_fault (this scope), not raw_hid. */
     HC_FAULT       = 0x7F,
-    /* Test-only, instrumented builds: jump to the bootloader, so a flash
-     * during a diagnostic session needs no Fn+Esc. VIA's own jump command is
-     * gone from QMK; this is not a replacement for it, and the daily build
-     * does not carry it. */
-    HC_BOOTLOADER  = 0x79,
     /* Test-only: read one aligned RAM word. [.., .., HC_PEEK, a0..a3 LE] ->
      * [.., .., HC_PEEK, v0..v3 LE]. SRAM only. */
     HC_PEEK        = 0x78,
@@ -502,7 +497,27 @@ enum {
      * recovery and the display's repaint of a blit given up for good. */
     HC_BLITFAULT   = 0x77,
 #endif
+#if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
+    /* Jump to the bootloader, so a flash needs no Fn+Esc (flash.sh sends it
+     * through hostagent/ak820bootloader.py after its backups):
+     *   [SET_VALUE, HEALTH_CHANNEL, HC_BOOTLOADER, 'B', 'O', 'O', 'T']
+     * The four bytes keep a stray or garbled frame from jumping; anything else
+     * is unhandled. It never replies. Instrumented builds, and `dev` builds
+     * (build.sh) for JD's board while development lasts. ⚠️ Never daily or
+     * fpb, the flavors releases ship: any process that can open raw HID could
+     * then drop the board into a bootloader that looks dead (build.sh checks
+     * for the marker below). VIA's own jump command is gone from QMK; this is
+     * not a replacement for it. */
+    HC_BOOTLOADER  = 0x79,
+#endif
 };
+
+#if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
+/* build.sh's flavor check: present exactly when HC_BOOTLOADER is compiled in.
+ * The jump reads it, through the volatile, so --gc-sections cannot drop it;
+ * `used` alone keeps it in the object file but not in the link. */
+const volatile uint8_t ak820_raw_bootloader = 1;
+#endif
 #define HEALTH_PROTO_VERSION 8   /* 8: HC_FLASHW, HC_ACCT, HC_LINK (Phase 1b) */
 
 #ifdef WDT_TEST_HOOKS
@@ -756,9 +771,6 @@ static void health_command(uint8_t *data, uint8_t length) {
             data[3] = lcd_test_drop_tc;
             break;
         }
-        case HC_BOOTLOADER:
-            bootloader_jump();   /* does not return; watchdog stopped first */
-            break;
         case HC_FAULT: {
             WDT_SCOPE(WDT_SITE_TEST_FAULT);
             if (length < 4) break;
@@ -799,6 +811,21 @@ static void health_command(uint8_t *data, uint8_t length) {
             }
             for (;;) { /* not reached if the fault fired; the watchdog if not */ }
         }
+#endif
+#if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
+        case HC_BOOTLOADER:
+            if (!ak820_raw_bootloader || length < 7 || memcmp(&data[3], "BOOT", 4) != 0) {
+                data[0] = RTC_UNHANDLED;
+                break;
+            }
+            /* What Fn+Esc does (ak820pro.c, QK_BOOT): the splash, held 1.5 s
+             * so it can be read, then QMK's own reset path, which releases
+             * every key and ends in our bootloader_jump() (watchdog stopped
+             * first). The one path every flash so far has taken. */
+            display_bootloader_splash();
+            wait_ms(1500);
+            reset_keyboard();   /* does not return */
+            break;
 #endif
         default:
             data[0] = RTC_UNHANDLED;
