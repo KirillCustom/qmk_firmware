@@ -23,6 +23,31 @@
 #include "bluetooth/ch582f_ajazz.h"
 #include "health.h"        /* debug-page counters */
 
+#ifdef AK820_DEV_HOOKS
+#    include "loop_acct.h"   /* ACCT_NOW: the 16-bit system tick, 5.33 us */
+/* The display probe (flash 2d, dev builds only): the worst time of each stage
+ * of the Fn+D restore and of each housekeeping sub-draw, read over raw HID
+ * (HC_DEVHOOK, hid_protocol.c). Two stalls measured on flash 2c are each one
+ * of these: the page exit (32-33 ms, in the pump) and the settings overlay's
+ * retirement (31 ms, in housekeeping). In other builds DPROBE() is just the
+ * statement. */
+enum {
+    DP_RESTORE0  = 0,                         /* the 14 restore stages: 0..13 */
+    DP_TEXT_SLOT = DP_RESTORE0 + 14,
+    DP_STATUS, DP_LOCKS, DP_CLOCK, DP_BATT, DP_CONN,
+    DP_TEXT_ICON, DP_BAND_CLEAR, DP_DEBUG_PAGE, DP_DBG_GLYPH,
+    DP_N
+};
+static uint16_t dprobe_max[DP_N];             /* ticks */
+static inline void dprobe_note(uint8_t i, uint16_t t0) {
+    uint16_t d = (uint16_t)(ACCT_NOW() - t0);
+    if (i < DP_N && d > dprobe_max[i]) dprobe_max[i] = d;
+}
+#    define DPROBE(i, stmt) do { uint16_t dp_t0_ = ACCT_NOW(); stmt; dprobe_note((uint8_t)(i), dp_t0_); } while (0)
+#else
+#    define DPROBE(i, stmt) do { stmt; } while (0)
+#endif
+
 
 
 #define PANEL_BKL       A16
@@ -1576,8 +1601,9 @@ static void draw_bolt_slot(bool absent, bool chrg) {
         for (uint8_t i = 0; i < sizeof(bolt_runs) / sizeof(bolt_runs[0]); i++)
             slot_run(tile, bolt_runs[i][0], bolt_runs[i][1], bolt_runs[i][2], bolt_runs[i][3], COL_BOLT);
     }
-    /* CPU pushes share SPI0 with the DMA blits, and lcd_blit_ram does not wait
-     * on its own (draw_ampm). */
+    /* CPU pushes share SPI0 with the DMA blits. lcd_blit_ram quiesces the bus
+     * itself (bus_quiesce); the explicit wait is draw_ampm's pattern, and free
+     * when the bus is idle. */
     lcd_blit_wait();
     lcd_blit_ram(tile, BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
 }
@@ -2070,7 +2096,12 @@ void display_clear_text(void) {
 // 12x12 transport glyphs from rectangles -- colour is only available here, not
 // from the font atlases (their colour is baked in and a glyph blit paints its
 // whole cell). Play is a stepped triangle, the same trick as the padlock crown.
+static void draw_text_icon_runs(uint16_t x, uint16_t y, uint8_t icon);
 static void draw_text_icon(uint16_t x, uint16_t y, uint8_t icon) {
+    DPROBE(DP_TEXT_ICON, draw_text_icon_runs(x, y, icon));
+}
+
+static void draw_text_icon_runs(uint16_t x, uint16_t y, uint8_t icon) {
     switch (icon) {
         case DISPLAY_ICON_PLAY:
             for (uint16_t i = 0; i < 6; i++)
@@ -2444,7 +2475,7 @@ static bool rects_overlap(uint16_t ax, uint16_t ay, uint16_t aw, uint16_t ah,
  * breaks the other direction: entering the overlay, the icon's clear erases the
  * overlay's first glyph at x=4. Icon-first is required. */
 static void band_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
-    lcd_clear_rect(x, y, w, h);
+    DPROBE(DP_BAND_CLEAR, lcd_clear_rect(x, y, w, h));
 
     if (last_icon_drawn != DISPLAY_ICON_NONE &&
         rects_overlap(x, y, w, h, 0, last_icon_y, TEXT_ICON_W, TEXT_ICON_H))
@@ -2516,12 +2547,21 @@ void display_blit_pump(void) {
     if (debug_active) {
         if (lcd_blit_busy()) { pump_bus_busy(&blocked, &blocked_since); return; }
         blocked = false;
-        debug_pump_glyph();
+        DPROBE(DP_DBG_GLYPH, debug_pump_glyph());
         return;
     }
     /* Restoring the dashboard after Fn+D: one stage per pass. Ahead of the
      * queue because stage 1 clears the panel and discards whatever is in it. */
+#ifdef AK820_DEV_HOOKS
+    if (debug_exit_step) {
+        blocked = false;
+        uint8_t st = debug_exit_step;   /* 1..14, before the stage advances it */
+        DPROBE(DP_RESTORE0 + st - 1u, debug_restore_step());
+        return;
+    }
+#else
     if (debug_exit_step) { blocked = false; debug_restore_step(); return; }
+#endif
 
     if (gq_i >= gq_n || display_paused) {
         blocked = false;   /* stale grace must not carry into later work */
@@ -2748,6 +2788,23 @@ static void draw_status(bool force) {
  * gone before it starts polling the PCF. */
 bool display_splash_done(void) { return splash_cleared; }
 
+#ifdef AK820_DEV_HOOKS
+/* HC_DEVHOOK op 2: probe page 0 or 1 as 14 u16 microsecond values. */
+void display_probe_fill(uint8_t page, uint8_t *out28) {
+    memset(out28, 0, 28);
+    for (uint8_t k = 0; k < 14; k++) {
+        uint16_t i = (uint16_t)(page * 14u + k);
+        if (i >= DP_N) break;
+        uint64_t us = (uint64_t)dprobe_max[i] * 1000000u / CH_CFG_ST_FREQUENCY;
+        if (us > 0xFFFFu) us = 0xFFFFu;
+        out28[2 * k]     = (uint8_t)us;
+        out28[2 * k + 1] = (uint8_t)(us >> 8);
+    }
+}
+
+void display_probe_reset(void) { memset(dprobe_max, 0, sizeof(dprobe_max)); }
+#endif
+
 void display_pass_end(void) {
     batt_painted_this_pass = false;
 }
@@ -2766,7 +2823,7 @@ void display_housekeeping_task(void) {
         return;
 
     if (display_paused) return;   // animation owns the bus
-    if (debug_active) { draw_debug_page(); return; }   // Fn+D owns the panel
+    if (debug_active) { DPROBE(DP_DEBUG_PAGE, draw_debug_page()); return; }   // Fn+D owns the panel
     /* The Fn+D restore owns the panel too, one stage per main-loop pass from
      * display_blit_pump(). A 10 Hz tick landing inside it would paint into a
      * clear band still sweeping down, or run draw_locks(false) and collapse the
@@ -2793,19 +2850,19 @@ void display_housekeeping_task(void) {
         if (gq_pending()) return;
 
         // Connection digit every tick (~10 Hz) so its blink animates; self-guarded.
-        LOOP_SITE(LOOP_SITE_CONN, draw_conn_number(false));
+        LOOP_SITE(LOOP_SITE_CONN, DPROBE(DP_CONN, draw_conn_number(false)));
 
         // Wireless status overlay: recompute before the slot is drawn so an
         // appearing/releasing overlay repaints on this same tick.
-        LOOP_SITE(LOOP_SITE_STATUS, conn_status_update());
+        LOOP_SITE(LOOP_SITE_STATUS, DPROBE(DP_STATUS, conn_status_update()));
 
         // Host text slot: self-guards, and expires itself on the same tick.
-        LOOP_SITE(LOOP_SITE_TEXT, draw_text_slot(false));
+        LOOP_SITE(LOOP_SITE_TEXT, DPROBE(DP_TEXT_SLOT, draw_text_slot(false)));
 
         // Lock band: self-guards, only redraws when a lock state actually
         // changes. Needs the ~10 Hz tick rather than the 1 Hz clock path so a
         // Caps press shows up immediately.
-        LOOP_SITE(LOOP_SITE_LOCKS, draw_locks(false));
+        LOOP_SITE(LOOP_SITE_LOCKS, DPROBE(DP_LOCKS, draw_locks(false)));
 
         /* A forced clock-band repaint (owner or format change) paints on this
          * tick rather than up to a second later at the edge; the per-second
@@ -2820,11 +2877,11 @@ void display_housekeeping_task(void) {
             /* Advance the playback timer on the RTC second, so it runs at the
              * same cadence the band already repaints at -- no extra DMA. */
             display_playback_tick();
-            LOOP_SITE(LOOP_SITE_CLOCK, draw_clock());
-            LOOP_SITE(LOOP_SITE_BATT,  draw_battery(false)); // self-guards, only draws on change
+            LOOP_SITE(LOOP_SITE_CLOCK, DPROBE(DP_CLOCK, draw_clock()));
+            LOOP_SITE(LOOP_SITE_BATT,  DPROBE(DP_BATT, draw_battery(false))); // self-guards, only draws on change
         } else if (batt_dirty) {
             /* The rest of a battery repaint, one component per tick. */
-            LOOP_SITE(LOOP_SITE_BATT, draw_battery(false));
+            LOOP_SITE(LOOP_SITE_BATT, DPROBE(DP_BATT, draw_battery(false)));
         }
     }
 }

@@ -512,7 +512,23 @@ enum {
      * not a replacement for it. */
     HC_BOOTLOADER  = 0x79,
 #endif
+#ifdef AK820_DEV_HOOKS
+    /* Dev builds only (build.sh dev), for unattended display testing:
+     *   [.., .., HC_DEVHOOK, op, arg]
+     * op 1: press Fn+D (display_debug_toggle), so the bench can cycle the
+     *       pages and exit to the dashboard with no hands;
+     * op 2: the display probe, page arg (0 or 1): 14 u16 worst times in
+     *       microseconds at [4..31] (display.c, DP_*);
+     * op 3: reset the probe.
+     * Anything else is unhandled. */
+    HC_DEVHOOK     = 0x76,
+#endif
 };
+
+#ifdef AK820_DEV_HOOKS
+/* build.sh's flavor check: present exactly when HC_DEVHOOK is compiled in. */
+const volatile uint8_t ak820_dev_hooks = 1;
+#endif
 
 #if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
 /* build.sh's flavor check: present exactly when HC_BOOTLOADER is compiled in.
@@ -813,6 +829,17 @@ static void health_command(uint8_t *data, uint8_t length) {
             }
             for (;;) { /* not reached if the fault fired; the watchdog if not */ }
         }
+#endif
+#ifdef AK820_DEV_HOOKS
+        case HC_DEVHOOK:
+            if (!ak820_dev_hooks || length < 5) { data[0] = RTC_UNHANDLED; break; }
+            switch (data[3]) {
+                case 1: display_debug_toggle(); break;
+                case 2: { uint8_t pg = data[4]; display_probe_fill(pg, &data[4]); break; }
+                case 3: display_probe_reset(); break;
+                default: data[0] = RTC_UNHANDLED; break;
+            }
+            break;
 #endif
 #if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
         case HC_BOOTLOADER:

@@ -13,6 +13,11 @@ void display_housekeeping_task(void);
 void display_second_edge_task(void);
 /* The end of a main-loop pass: housekeeping_task_kb() calls it last. */
 void display_pass_end(void);
+#ifdef AK820_DEV_HOOKS
+/* The display probe (dev builds; HC_DEVHOOK in hid_protocol.c). */
+void display_probe_fill(uint8_t page, uint8_t *out28);
+void display_probe_reset(void);
+#endif
 /* True once the boot splash has been cleared and the dashboard owns the panel. */
 bool display_splash_done(void);
 
