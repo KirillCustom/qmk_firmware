@@ -44,10 +44,12 @@ typedef enum {
 /* After an unplug, or a pause's stop, the voltage relaxes; reports before
  * RELAX_S are not the pack. B3 trial 1 (10-07, 40 min from 2%) read the
  * level it implies at the unplug ~1 point high 6-10 min after, ~0.6 at 15 and
- * ~0.3 at 30: 30 min. PROVISIONAL until trial 2 films the first 6 min. */
+ * ~0.3 at 30: 30 min. Confirmed by B3's three relaxations (trial 1, the 10-08
+ * recharge, trial 3): at 30 min the implied level sits 0.1-0.35 point above its
+ * 60-min value. */
 #define BATTERY_RELAX_S       1800u
-/* A charger pause this long hands over to the idle path: 10 min, and never
- * less than RELAX_S. */
+/* A charger pause this long hands over to the idle path. Never less than
+ * RELAX_S, so it is RELAX_S (the plan's 10 min predates B3's RELAX_S). */
 #define BATTERY_PAUSE_S       1800u
 /* FROM-FLAT: a boot on USB whose first estimate is <= 10.00 counts. That is
  * <= 3248 mV UNDER CHARGE, >= 150 mV below the 3400 mV cut (itself a loaded

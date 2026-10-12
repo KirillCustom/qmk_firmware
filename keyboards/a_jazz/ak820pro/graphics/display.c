@@ -1681,8 +1681,9 @@ static void draw_battery(bool force) {
      * and the bar at once, and painting all three in one pass made a 27 ms
      * pass, 19 ms of it here: over the 25 ms line where a keypress can be lost
      * (the plug-in snapshot of 2026-10-11; flash 2's plug-ins were 33 ms). The
-     * bolt is a clear and 11 synchronous rects, the text one synchronous glyph
-     * each (lcd_draw_flash_text_staged() does not exist; see draw_debug_page),
+     * bolt was a clear and 11 synchronous rects (one RAM tile since, which was
+     * the real fix: draw_bolt_slot), the text one synchronous glyph each
+     * (lcd_draw_flash_text_staged() never existed; see draw_debug_page),
      * and the bar a clear and a rect. What changed is marked in batt_dirty, and
      * each call paints the first mark: the outline (after a clear), the bolt,
      * the text, then the bar. The housekeeping tick calls back while marks
@@ -2407,10 +2408,10 @@ static void conn_status_update(void) {
  * Most of that is per-glyph OVERHEAD, not data: a 6x14 glyph is 168 bytes, but
  * each one pays a window command, a flash read command, and a DMA arm.
  *
- * The band now paints ONE LINE per housekeeping pass, composed in RAM and
- * blitted once (lcd_draw_flash_text_staged), holding text_dirty until it
- * finishes. A line costs a few ms instead of ~26, and a two-line update
- * completes in two ticks -- fast enough to read as instant.
+ * SUPERSEDED: the next design was to paint ONE LINE per housekeeping pass,
+ * composed in RAM and blitted once (lcd_draw_flash_text_staged). That function
+ * was declared and never defined (see draw_debug_page's note). The glyph queue
+ * below is what the band uses.
  *
  * The clear rect and icon are drawn ONCE per repaint, on the first pass --
  * repeating them on every resume would erase the glyphs already painted. */
@@ -2420,13 +2421,9 @@ static void conn_status_update(void) {
  * made every update crawl in letter by letter -- visibly worse, and it hit the
  * RGB readout too, where instant feedback is the whole point.
  *
- * lcd_draw_flash_text_staged() removes the need to spread the work at all: it
- * pays the per-glyph setup once and issues a single blit for the line, so a
- * line costs a few ms rather than ~26. Budgeting by LINE then keeps the worst
- * pass small while a two-line update still completes in two ticks (~200 ms) and
- * reads as instant.
- *
- * Faster AND bounded, rather than trading one for the other. */
+ * SUPERSEDED, as above: lcd_draw_flash_text_staged() was to pay the per-glyph
+ * setup once and blit a line whole. It never existed. The glyph queue below
+ * bounds every pass instead, one glyph per main-loop pass. */
 /* Glyph queue: up to two runs (line 0, line 1), painted ONE GLYPH PER MAIN-LOOP
  * ITERATION by display_blit_pump(). Each turn either arms a DMA or returns on a
  * single lcd_blit_busy() compare, so the band never blocks the matrix scan.

@@ -108,9 +108,9 @@ const flash_asset_t *flash_asset(uint16_t id);
 void     lcd_draw_flash_image(uint16_t id, uint16_t x, uint16_t y);
 void     lcd_draw_flash_glyph(uint16_t font_id, char c, uint16_t x, uint16_t y);
 void     lcd_draw_flash_text(uint16_t font_id, uint16_t x, uint16_t y, const char *s);
-/* Same, but composed in RAM and blitted ONCE -- one LCD operation per line
- * instead of one per glyph. Much faster and it appears instantly. */
-void     lcd_draw_flash_text_staged(uint16_t font_id, uint16_t x, uint16_t y, const char *s);
+/* lcd_draw_flash_text_staged() was declared here and never defined; using it
+ * was a link error. Removed 2026-10-12. Bulk text goes through display.c's
+ * glyph queue; small shapes through lcd_blit_ram as one RAM tile. */
 uint16_t lcd_flash_text_width(uint16_t font_id, const char *s);
 
 // CPU, blocking: RGB565 tile from a firmware/RAM array -> panel rect.
