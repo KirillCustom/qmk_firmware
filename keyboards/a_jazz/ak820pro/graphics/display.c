@@ -2101,22 +2101,40 @@ static void draw_text_icon(uint16_t x, uint16_t y, uint8_t icon) {
     DPROBE(DP_TEXT_ICON, draw_text_icon_runs(x, y, icon));
 }
 
+/* The transport icon as ONE RAM tile in ONE transfer (flash 2e). Drawn as
+ * lcd_fill_rect runs, the play triangle was ~9 ms (the flash 2d probe, music
+ * playing), and draw_text_slot() can draw it twice in a call (icon_clobbered):
+ * that pair was most of the page exit's 28 ms and the overlay retirement's
+ * 23 ms. Same shapes, same colours; the tile paints its own black background
+ * over x..x+11, y..y+11, the icon gutter, which holds nothing else whenever an
+ * icon is wanted (the overlay draws none; line 0's text starts at TEXT_X, and
+ * line 1 starts below the icon in the two-line layout). */
+#define TEXT_ICON_PX 12
+static void icon_run(uint16_t *t, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint16_t col) {
+    for (uint8_t y = y0; y <= y1 && y < TEXT_ICON_PX; y++)
+        for (uint8_t x = x0; x <= x1 && x < TEXT_ICON_PX; x++) t[y * TEXT_ICON_PX + x] = col;
+}
+
 static void draw_text_icon_runs(uint16_t x, uint16_t y, uint8_t icon) {
+    static uint16_t tile[TEXT_ICON_PX * TEXT_ICON_PX];
+    memset(tile, 0, sizeof(tile));                      /* black background */
     switch (icon) {
         case DISPLAY_ICON_PLAY:
-            for (uint16_t i = 0; i < 6; i++)
-                lcd_fill_rect(x + i * 2, y + i, x + i * 2 + 1, y + 11 - i, COL_ICON_PLAY);
+            for (uint8_t i = 0; i < 6; i++)
+                icon_run(tile, (uint8_t)(i * 2), i, (uint8_t)(i * 2 + 1), (uint8_t)(11 - i), COL_ICON_PLAY);
             break;
         case DISPLAY_ICON_PAUSE:
-            lcd_fill_rect(x + 1, y, x + 4,  y + 11, COL_ICON_PAUSE);
-            lcd_fill_rect(x + 7, y, x + 10, y + 11, COL_ICON_PAUSE);
+            icon_run(tile, 1, 0, 4, 11, COL_ICON_PAUSE);
+            icon_run(tile, 7, 0, 10, 11, COL_ICON_PAUSE);
             break;
         case DISPLAY_ICON_STOP:
-            lcd_fill_rect(x + 1, y, x + 10, y + 11, COL_ICON_STOP);
+            icon_run(tile, 1, 0, 10, 11, COL_ICON_STOP);
             break;
         default:
-            break;
+            return;                                     /* no icon: draw nothing, as before */
     }
+    lcd_blit_wait();                                    /* draw_ampm's pattern */
+    lcd_blit_ram(tile, x, y, TEXT_ICON_PX, TEXT_ICON_PX);
 }
 
 /* --- Wireless status overlay ----------------------------------------------
@@ -2444,6 +2462,7 @@ static uint8_t last_icon_drawn = DISPLAY_ICON_NONE;
 static uint16_t last_icon_y    = 0;
 
 #define TEXT_ICON_H 12          /* draw_text_icon paints rows y..y+11 */
+_Static_assert(TEXT_ICON_H == TEXT_ICON_PX && TEXT_ICON_W == TEXT_ICON_PX, "the icon tile is the icon's whole box");
 
 static bool icon_clobbered = false;
 
@@ -2711,9 +2730,12 @@ static void draw_text_slot(bool force) {
     icon_clobbered = false;
 
     if (force) {
-        /* A forced repaint follows a full-screen clear, so nothing on the
-         * panel can be trusted. */
-        lcd_clear_rect(0, TEXT_Y, PANEL_WIDTH, TEXT_H);
+        /* A forced repaint follows a full-screen clear (the Fn+D restore's
+         * clear bands; display_redraw_dashboard's lcd_clear_rect), so the band
+         * is already blank, and nothing the callers draw between lands in it.
+         * The shadows cannot be trusted, though: forget them, and each line's
+         * first paint clears its own row. A band clear here as well was ~8 ms
+         * of the page exit's 28 ms for nothing (flash 2d probe). */
         shadow_invalidate();
     }
 
