@@ -520,6 +520,16 @@ enum {
      * op 2: the display probe, page arg (0 or 1): 14 u16 worst times in
      *       microseconds at [4..31] (display.c, DP_*);
      * op 3: reset the probe.
+     * op 4: set the panel backlight level to arg (0..max, clamped), RAM only:
+     *       display_set_brightness() never persists (the keys' paths do), so
+     *       a reboot restores the saved level and no flash write blinks the
+     *       LEDs. For the bench's per-load current map (docs/test-bench.md).
+     * op 5: panel backlight off (arg 0) or on (arg != 0), as Fn+Home does but
+     *       without its overlay: nothing is drawn and nothing persists.
+     * op 6: read only.
+     * Ops 4-6 reply [level, max, on, effective, saved+1] at [4..8]: effective
+     * is after the power cap (power.c) and 0 when off; saved+1 is the level
+     * the keys last persisted, 0 if none.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -528,6 +538,16 @@ enum {
 #ifdef AK820_DEV_HOOKS
 /* build.sh's flavor check: present exactly when HC_DEVHOOK is compiled in. */
 const volatile uint8_t ak820_dev_hooks = 1;
+
+/* HC_DEVHOOK ops 4-6's reply, at out[0..4]. */
+static void devhook_lcd_state(uint8_t *out) {
+    uint8_t saved;
+    out[0] = display_get_brightness();
+    out[1] = display_get_brightness_max();
+    out[2] = display_get_power() ? 1 : 0;
+    out[3] = display_backlight_effective();
+    out[4] = kb_eeconfig_get_lcd_brightness(&saved) ? (uint8_t)(saved + 1) : 0;
+}
 #endif
 
 #if defined(WDT_TEST_HOOKS) || defined(AK820_RAW_BOOTLOADER)
@@ -837,6 +857,9 @@ static void health_command(uint8_t *data, uint8_t length) {
                 case 1: display_debug_toggle(); break;
                 case 2: { uint8_t pg = data[4]; display_probe_fill(pg, &data[4]); break; }
                 case 3: display_probe_reset(); break;
+                case 4: display_set_brightness(data[4]); devhook_lcd_state(&data[4]); break;
+                case 5: display_set_power(data[4] != 0); devhook_lcd_state(&data[4]); break;
+                case 6: devhook_lcd_state(&data[4]); break;
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;
