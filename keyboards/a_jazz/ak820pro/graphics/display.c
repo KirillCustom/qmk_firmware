@@ -2205,8 +2205,8 @@ void display_set_pair_hint(int16_t pct) {
 
 /* A message appeared in the band: the power ladder's Minimal mode, which keeps
  * the backlight off on battery, lights it for a moment after one, or the
- * message would go unseen and the key that caused it would seem broken (JD,
- * 10-18). Noted when a message APPEARS -- a setting's overlay, an alert, a
+ * message would go unseen and the key that caused it would seem broken.
+ * Noted when a message APPEARS -- a setting's overlay, an alert, a
  * new link state that has words, the pair gesture -- not while one persists:
  * a failed link alternates its two texts forever and would hold the screen
  * lit all night. */

@@ -48,8 +48,8 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
 };
 
 /* Minimal mode's dark screen lights, at the user's level, for this long after
- * a message appears in the band, and while Fn+D's pages are open (JD, 10-18:
- * otherwise a key like Fn+B would seem to do nothing). */
+ * a message appears in the band, and while Fn+D's pages are open: otherwise a
+ * key like Fn+B would seem to do nothing. */
 #define MESSAGE_WAKE_MS 4000u
 
 /* The dim: the lighting's value capped here, so 100% becomes 25% and a colour
