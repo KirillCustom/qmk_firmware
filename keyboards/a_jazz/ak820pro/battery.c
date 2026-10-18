@@ -458,10 +458,12 @@ static uint16_t c5_level(uint16_t e) {
 
 #define LEVEL_UNKNOWN      0xFFFFu
 #define LEVEL_FULL         1000u
-/* Booted at the top clamp: the voltage says only "90..100", so take the level
- * saved before the reboot (every cable <-> BT slider flip is one) if it is in
- * that band. With nothing saved -- only after a flash erased it -- guess the
- * middle. Below the clamp the voltage is the authority and nothing is restored. */
+/* Booted at the top clamp: the voltage says only "at least ~90% at full white"
+ * (less under a light load), so take the level saved before the reboot (every
+ * cable <-> BT slider flip is one): a 90-100% save point, or the below-band
+ * marker, which restores as 89%. With nothing saved -- after a flash erased
+ * it -- guess 95%. Below the clamp the voltage is the starting point and
+ * nothing is restored. */
 #define LEVEL_CLAMP_GUESS  950u
 #define LEVEL_CLAMP_EXIT   900u
 /* On battery the level moves down only after the curve has sat below it for
@@ -503,7 +505,11 @@ static void level_save_tick(void) {   /* 1 Hz */
 
 static uint16_t level_at_clamp_boot(void) {
     uint16_t saved;
-    if (kb_eeconfig_get_batt_level(&saved) && saved >= LEVEL_CLAMP_EXIT) return saved;
+    /* Phase 2: the count runs on through the clamp (a light load stays
+     * clamped below 90% true), so the below-band marker is a real answer --
+     * "under 90%" -- and restores as itself, not as the 95% guess (codex,
+     * verify: a count at 80% came back as 95 after a reboot). */
+    if (kb_eeconfig_get_batt_level(&saved) && saved >= LEVEL_SAVE_BELOW_BAND) return saved;
     return LEVEL_CLAMP_GUESS;
 }
 
@@ -1142,6 +1148,11 @@ static void supply_changed(battery_supply_t was) {
     if (was == BATTERY_SUPPLY_EXTERNAL && supply == BATTERY_SUPPLY_BATTERY) {
         if (modeled) chg_close(CHG_NONE);
         adopt_owed = false;
+        /* Every known level enters battery operation floored, or zeroed by a
+         * latched cut: a level adopted on USB (a boot at 3424 mV adopts 4 pm),
+         * a cut lifted by a brief replug, or a low charging model would
+         * otherwise show 0% above the cut on the pack (codex, verify). */
+        if (level != LEVEL_UNKNOWN) level = battery_floor(level);
         if (session) reseat = true;
         /* Owed from an earlier unplug too: a brief replug in between (no new
          * session, so `session` stays clear) restarts RELAX_S here. */

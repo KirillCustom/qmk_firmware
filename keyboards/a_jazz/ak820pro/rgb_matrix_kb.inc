@@ -31,7 +31,9 @@ static uint8_t rainfall_h[RGB_MATRIX_LED_COUNT];
 static bool RAINFALL(effect_params_t* params) {
     static uint8_t countdown = 0;
 
-    if (params->init) {
+    /* init stays true for every chunk of the first frame: reset once, on the
+     * first, or a drop seeded there is wiped by the next (codex). */
+    if (params->init && params->iter == 0) {
         memset(rainfall_v, 0, sizeof(rainfall_v));
         countdown = 0;
     }
@@ -197,7 +199,7 @@ static bool DRIFT(effect_params_t* params) {
      * 100% is ~7 s across, lively but not frantic. */
     static uint32_t acc_x = 0, acc_y = 0;
 
-    if (params->init) { acc_x = 0; acc_y = 0; drift_pal_valid = false; }
+    if (params->init && params->iter == 0) { acc_x = 0; acc_y = 0; drift_pal_valid = false; }   /* once a frame */
 
     /* Rebuild the palette only on an actual change: 9 HSV conversions when the
      * knob moves, zero on every other frame. */

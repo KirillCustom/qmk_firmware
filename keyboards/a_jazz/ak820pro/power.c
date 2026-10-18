@@ -113,7 +113,10 @@ static void apply(void) {
      * rgb_matrix_mode_noeeprom on the same mode does not set init). No
      * config change, so no EEPROM write and no parameter overlay; an effect's
      * own state restarts (Typing Heatmap's history), at each stage change. */
-    if (repaint && rgb_matrix_is_enabled()) rgb_matrix_reinit_effect();
+    /* Even while disabled: a quick disable, cap change and enable could
+     * otherwise find the effect's trackers unchanged and skip the init (codex,
+     * verify). Harmless while disabled: it renders nothing. */
+    if (repaint) rgb_matrix_reinit_effect();
 }
 
 /* The dim stage's ceiling on every colour the effects convert, QMK's weak hook
