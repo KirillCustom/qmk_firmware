@@ -71,6 +71,7 @@ enum ak820pro_keycodes {
                             * cable position, and BT -> cable brownout-resets the
                             * board, so a wireless session's counters die exactly
                             * when they become readable. */
+    PWR_MODE,              // Fn+B: power mode, Full -> Normal -> Saver (power.c)
     AK820PRO_SAFE_RANGE
 };
 

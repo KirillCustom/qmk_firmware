@@ -19,6 +19,7 @@
 #include "battery.h"                  /* VDD for HC_CONN */
 #include "flash_stats.h"              /* HC_FLASHW */
 #include "loop_acct.h"                /* HC_ACCT */
+#include "power.h"                    /* HC_DEVHOOK op 14 */
 
 // Apply a 7-byte time payload to the RTC:
 //   [0]=year-2000 [1]=month [2]=day [3]=weekday [4]=hour [5]=min [6]=sec
@@ -548,6 +549,12 @@ enum {
      * op 13: zero the receiver's counters and last frame.
      * For the lock-LED channel's tests (plans/BACKLOG.md): what the module
      * passes on from the host's LED report, with no hands and no display.
+     * op 14: the power ladder (power.c), sub-op at [4]: 0 read; 1 set the mode
+     *       to [5] (RAM and the coalesced EEPROM write, no overlay); 2 force
+     *       the stage to [5], 0xFF to release it (RAM only; the battery-only
+     *       rule does not apply to a forced stage). Replies [mode][stage]
+     *       [val cap][forced stage, 0xFF none][on battery] at [4..8]. For the
+     *       bench's load map of the stages (PHASE2-BUILD-PLAN.md).
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -919,6 +926,23 @@ static void health_command(uint8_t *data, uint8_t length) {
                     break;
                 }
                 case 13: ch582_lockchan_clear(); break;
+                case 14: {
+                    uint8_t sub = data[4], arg = data[5];
+                    if (length < 32 || sub > 2 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
+                        (sub == 2 && arg != 0xFF && arg > POWER_STAGE_SCREEN_OFF)) {
+                        data[0] = RTC_UNHANDLED;
+                        break;
+                    }
+                    if (sub == 1) power_set_mode((power_mode_t)arg);
+                    if (sub == 2) power_force_stage(arg);
+                    memset(&data[4], 0, 28);
+                    data[4] = (uint8_t)power_mode();
+                    data[5] = (uint8_t)power_stage();
+                    data[6] = power_val_cap();
+                    data[7] = power_forced_stage();
+                    data[8] = battery_on_battery() ? 1 : 0;
+                    break;
+                }
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;

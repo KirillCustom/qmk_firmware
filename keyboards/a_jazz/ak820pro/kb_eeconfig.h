@@ -9,7 +9,8 @@
  * struct so its layout has exactly one home; everything else goes through
  * accessors. The block is 5 bytes (bt_profile, rtc_period u16,
  * lcd_brightness+1, clock_mode+1 -- the last appended 2026-09-01, growing
- * the block from 4) and its layout is ASSIGN-ONLY: existing on-device bytes
+ * the block from 4; the battery level and the power mode followed) and its
+ * layout is ASSIGN-ONLY: existing on-device bytes
  * must keep their meaning, and 0 means "unset" for every field added after
  * first ship (a fresh block is zeros).
  *
@@ -49,6 +50,11 @@ void kb_eeconfig_set_clock_mode(uint8_t mode);
  * BT slider flip is a reboot. Returns false when unset. */
 bool kb_eeconfig_get_batt_level(uint16_t *permille);
 void kb_eeconfig_set_batt_level(uint16_t permille);
+
+/* The power mode (power_mode_t). Returns false when unset (fresh block, so
+ * after every flash) or garbage -- power.c then takes Normal and says so. */
+bool kb_eeconfig_get_power_mode(uint8_t *mode);
+void kb_eeconfig_set_power_mode(uint8_t mode);
 
 #ifdef WDT_TEST_HOOKS
 /* Force a real, immediate flash program (for the reset-during-write test). */

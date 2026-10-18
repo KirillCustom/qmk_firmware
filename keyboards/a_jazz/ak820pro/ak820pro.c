@@ -75,6 +75,7 @@ void early_hardware_init_post(void) {
     // was read). Details in kb_eeconfig.c / bt_ui.c.
     kb_eeconfig_init();
     bt_ui_resume_saved_profile();
+    power_init();   // the persisted power mode (Normal, and says so, after a flash)
 
     // Bring up the clock: I2C, the SN32 1 Hz counter, and a first PCF8563 seed.
     rtc_init();
@@ -385,6 +386,9 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                 display_set_param_status(clock_mode_names[m]);
 #endif
             }
+            return false;
+        case PWR_MODE:
+            if (record->event.pressed) power_cycle_mode();
             return false;
         case DBG_PAGE:
             /* Tap toggles the page; HOLD resets the counters.

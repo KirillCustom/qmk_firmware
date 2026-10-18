@@ -286,6 +286,11 @@
       "name": "DBG_PAGE",
       "title": "Toggle the on-screen debug page",
       "shortName": "Debug"
+    },
+    {
+      "name": "PWR_MODE",
+      "title": "Power mode: Full / Normal / Saver",
+      "shortName": "Power"
     }
   ]
 }

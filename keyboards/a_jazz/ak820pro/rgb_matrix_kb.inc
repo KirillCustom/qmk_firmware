@@ -88,6 +88,8 @@ RGB_MATRIX_EFFECT(DRIFT)
 
 #ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
 
+#    include "power.h"   /* power_val_cap(): the palette's cache key */
+
 /* 16x16 so indexing is masks only. Authored here, never computed at runtime. */
 static const uint8_t drift_noise[256] = {
      12, 194,  70, 215, 173,  19, 198, 146, 113, 186, 146,  29,  58, 149, 221,  27,
@@ -126,9 +128,11 @@ static const hsv_t drift_ramp_hsv[9] = {
 
 /* Derived palette, rebuilt only when hue or saturation actually changes -- the
  * demoscene trick: keep the field, swap the palette. The per-LED path never
- * does an HSV conversion. */
+ * does an HSV conversion. The power ladder's dim cap (power.c) is applied in
+ * that conversion, so the cap is part of the key too, or a palette built
+ * while dimmed would stay dim after the wake. */
 static rgb_t  drift_ramp[9];
-static uint8_t drift_pal_h = 0, drift_pal_s = 0;
+static uint8_t drift_pal_h = 0, drift_pal_s = 0, drift_pal_cap = 0;
 static bool    drift_pal_valid = false;
 
 static void drift_build_palette(uint8_t h, uint8_t s) {
@@ -142,7 +146,7 @@ static void drift_build_palette(uint8_t h, uint8_t s) {
         c.s = scale8(c.s, s);
         drift_ramp[i] = rgb_matrix_hsv_to_rgb(c);
     }
-    drift_pal_h = h; drift_pal_s = s; drift_pal_valid = true;
+    drift_pal_h = h; drift_pal_s = s; drift_pal_cap = power_val_cap(); drift_pal_valid = true;
 }
 
 /* lerp with an EIGHT-bit fraction. int16_t so (b - a) may go negative.
@@ -198,7 +202,8 @@ static bool DRIFT(effect_params_t* params) {
     /* Rebuild the palette only on an actual change: 9 HSV conversions when the
      * knob moves, zero on every other frame. */
     if (!drift_pal_valid || drift_pal_h != rgb_matrix_config.hsv.h
-                         || drift_pal_s != rgb_matrix_config.hsv.s) {
+                         || drift_pal_s != rgb_matrix_config.hsv.s
+                         || drift_pal_cap != power_val_cap()) {
         drift_build_palette(rgb_matrix_config.hsv.h, rgb_matrix_config.hsv.s);
     }
 

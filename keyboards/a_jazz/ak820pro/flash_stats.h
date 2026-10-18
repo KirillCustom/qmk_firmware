@@ -42,7 +42,8 @@ enum flash_writer { FW_OTHER = 0, FW_KB, FW_RGB, FW_VIA, FW_COUNT };
 #define KBF_LCD   0x04u
 #define KBF_CLOCK 0x08u
 #define KBF_BATT  0x10u
-#define KBF_COUNT 5
+#define KBF_PWR   0x20u
+#define KBF_COUNT 6
 
 /* backing_store_pre_write_hook: a write session starts. */
 void flash_stats_session(void);
@@ -73,9 +74,9 @@ void flash_stats_reset(void);
  *           u16 kb_mixed     -- kb sessions that changed more than one field
  *           u16 kb_unknown   -- kb sessions with no field mask (should be 0)
  *   page 1: u32 programs[FW_COUNT]
- *           u16 kb_field_sessions[KBF_COUNT] (bt, rtc, lcd, clock, batt):
- *               kb sessions that changed that field ALONE
- *           u16 reserved
+ *           u16 kb_field_sessions[KBF_COUNT] (bt, rtc, lcd, clock, batt,
+ *               power mode): kb sessions that changed that field ALONE (the
+ *               power mode took the page's last, reserved, u16 in 2026-10)
  *   page 2: u16 rtc_last_proposed, u8 rtc_last_proposed_path,
  *           u8 rtc_last_stored_path, u16 rtc_last_stored,
  *           u32 rtc_proposals_sof, u32 rtc_proposals_pcf,
