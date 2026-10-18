@@ -538,6 +538,14 @@ enum {
      *       in slot n % ring size. Op 7, the pages, then op 7 again, is a
      *       consistent read only if the count did not move between them.
      * op 9: reset the trace.
+     * op 10: the lock-LED channel's receiver (lockchan.c), at [4..28]:
+     *       [frames u32][preambles u32][busy][last frame: profile, type, seq,
+     *       len][its anchor ms u32][its commit ms u32][the board's ms now u32].
+     * op 11: its abort counts, LOCKCHAN_NABORTS u16s from [4], in
+     *       lockchan_abort_t order.
+     * op 12: the last frame's payload, page arg (0..1): [4] the page again,
+     *       [5] 0, then payload[arg*26 .. arg*26+25] at [6..31].
+     * op 13: zero the receiver's counters and last frame.
      * For the lock-LED channel's tests (plans/BACKLOG.md): what the module
      * passes on from the host's LED report, with no hands and no display.
      * Anything else is unhandled. */
@@ -879,6 +887,38 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_led5a_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 9: ch582_led5a_reset(); break;
+                case 10: {
+                    if (length < 32) { data[0] = RTC_UNHANDLED; break; }
+                    const lockchan_t *lc  = ch582_lockchan();
+                    uint32_t          now = timer_read32();
+                    memset(&data[4], 0, 28);
+                    memcpy(&data[4], &lc->frames, 4);
+                    memcpy(&data[8], &lc->preambles, 4);
+                    data[12] = lockchan_busy(lc) ? 1 : 0;
+                    data[13] = lc->last.profile;
+                    data[14] = lc->last.type;
+                    data[15] = lc->last.seq;
+                    data[16] = lc->last.len;
+                    memcpy(&data[17], &lc->last.anchor_ms, 4);
+                    memcpy(&data[21], &lc->last.commit_ms, 4);
+                    memcpy(&data[25], &now, 4);
+                    break;
+                }
+                case 11:
+                    if (length < 32) { data[0] = RTC_UNHANDLED; break; }
+                    memset(&data[4], 0, 28);
+                    memcpy(&data[4], ch582_lockchan()->aborts, sizeof(ch582_lockchan()->aborts));
+                    break;
+                case 12: {
+                    uint8_t pg = data[4];
+                    if (length < 32 || pg > 1) { data[0] = RTC_UNHANDLED; break; }
+                    const uint8_t *src = ch582_lockchan()->last.payload;
+                    memset(&data[4], 0, 28);
+                    data[4] = pg;
+                    memcpy(&data[6], &src[pg * 26], pg ? LOCKCHAN_MAX_PAYLOAD - 26 : 26);
+                    break;
+                }
+                case 13: ch582_lockchan_clear(); break;
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;

@@ -73,6 +73,13 @@ uint8_t ch582_get_host_leds(void);
 void ch582_led5a_fill(uint8_t *out);
 bool ch582_led5a_page(uint8_t page, uint8_t *out);
 void ch582_led5a_reset(void);
+/* The lock-LED channel's receiver (HC_DEVHOOK ops 10-13). */
+#include "lockchan.h"
+const lockchan_t *ch582_lockchan(void);
+void ch582_lockchan_clear(void);
+bool ch582_lockchan_busy(void);
+#else
+static inline bool ch582_lockchan_busy(void) { return false; }
 #endif
 
 /* Cumulative TX health counters (sent / ACK timeouts / queue-full drops). */

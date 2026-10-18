@@ -303,7 +303,9 @@ void update_leds(void) {
     // Windows Lock: mirrors the GUI-lock flag.
     ind_winlock = keymap_config.no_gui;
 
-    // Scroll Lock for the band, once it has settled (see scr_shown).
+    // Scroll Lock for the band, once it has settled (see scr_shown). A frame
+    // in progress owns the lights: the settle clock starts after it ends.
+    if (ch582_lockchan_busy()) scr_changed_at = timer_read32();
     if (scr_shown != ind_scroll && timer_elapsed32(scr_changed_at) >= SCR_SETTLE_MS) {
         scr_shown = ind_scroll;
     }

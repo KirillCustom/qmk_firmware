@@ -6,6 +6,9 @@
 #include "hal.h"
 #include "health.h"   /* health_note_rx_malformed() -- main-loop context only */
 #include "loop_acct.h" /* D1: this task's share of each main-loop pass */
+#ifdef AK820_DEV_HOOKS
+#include "lockchan.h"  /* the lock-LED channel's receiver, fed from 5A */
+#endif
 
 #ifndef CH582_SERIAL_DRIVER
 #    define CH582_SERIAL_DRIVER SD2
@@ -344,6 +347,17 @@ void ch582_led5a_reset(void) {
     led5a_last    = 0;
     memset(led5a_ring, 0, sizeof(led5a_ring));
 }
+
+/* The lock-LED channel's receiver (lockchan.c; plans/LOCK-LED-CHANNEL-PLAN.md).
+ * Dev builds only while it is an experiment: frames are decoded and counted,
+ * and HC_DEVHOOK ops 10-13 read them; nothing acts on them yet. Fed every 5A
+ * byte while linked, raw (before the d <= 0x1F guard, which it does not need:
+ * it reads bits 0-4 only). Zero-initialised, which is lockchan_init's state. */
+static lockchan_t lockchan;
+
+const lockchan_t *ch582_lockchan(void) { return &lockchan; }
+void ch582_lockchan_clear(void) { lockchan_clear_stats(&lockchan); }
+bool ch582_lockchan_busy(void) { return lockchan_busy(&lockchan); }
 #endif
 
 static const SerialConfig serial_cfg = {
@@ -1175,6 +1189,7 @@ void ch582_task(void) {
                      *     to pass the checksum usually has high bits set. */
 #ifdef AK820_DEV_HOOKS
                     led5a_note(d, is_module_connected && (d & ~0x1F) == 0);
+                    if (is_module_connected) lockchan_feed(&lockchan, d, timer_read32());
 #endif
                     if (is_module_connected && (d & ~0x1F) == 0) {
                         host_leds = d;
@@ -1344,5 +1359,8 @@ void ch582_task(void) {
      * carries no sequence number. */
     uint16_t p2 = prof ? ACCT_NOW() : 0u;
     ch582_tx_pump();
+#ifdef AK820_DEV_HOOKS
+    lockchan_poll(&lockchan, timer_read32(), is_module_connected);
+#endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);
 }
