@@ -682,6 +682,15 @@ static void ch582_tx_pop(void) {
     tx_retries   = 0;
 }
 
+/* A select or pair (any A6 but the battery poll) is where the link may move:
+ * the channel's receiver starts over when one is queued (ch582_send_command)
+ * and again whenever it goes out on the wire, first send or retransmit, since
+ * old-link LED traffic can arrive while it waits behind other frames (codex,
+ * flash 2h verify 2). */
+static inline void tx_link_change_check(const ch582_tx_frame_t *f) {
+    if (f->len >= 3 && f->data[0] == 0xA6 && f->data[1] != CH582_BATTERY_REQ_PARAM) LOCKCHAN_LINK_LOST();
+}
+
 /* Advance the queue: send the head frame, time out and retransmit, or give up.
  * Called every ch582_task() (main-loop cadence, sub-ms), so the 10 ms timeout is
  * honoured with fine granularity. */
@@ -694,11 +703,13 @@ static void ch582_tx_pump(void) {
             ch582_tx_pop();
             return;
         }
+        tx_link_change_check(&tx_q[tx_head]);
         sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len); /* retransmit */
         tx_sent_time = timer_read();
         return;
     }
     if (tx_head == tx_tail) return;                                          /* queue empty */
+    tx_link_change_check(&tx_q[tx_head]);
     sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len);
     tx_sent_time = timer_read();
 #ifdef CONSOLE_ENABLE
@@ -1215,7 +1226,11 @@ void ch582_task(void) {
                          * frame can pass the weak checksum, and lighting Caps off the
                          * very frame that establishes the link is the failure the
                          * guard above exists to prevent. A real host repeats its LED
-                         * state, so the next 5A takes the normal path. */
+                         * state, so the next 5A takes the normal path.
+                         * Pending actions as `5B 32` leaves them: a select retry
+                         * is retired, a bounce survives (codex, flash 2h verify 2:
+                         * a retry left pending could reselect a live link). */
+                        if (pa.kind != PA_BOUNCE) pa.kind = PA_NONE;
                         is_module_connected = true;
                         is_pairing          = false;
                         conn_state          = CH582_CONN_CONNECTED;
