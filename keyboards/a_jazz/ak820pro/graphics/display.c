@@ -2115,20 +2115,31 @@ void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t le
      *
      * text_stamp still advances on EVERY push: it is the liveness heartbeat
      * behind DISPLAY_TEXT_TIMEOUT_MS, and gating it on change would expire the
-     * band mid-track whenever a track ran longer than the timeout. */
-    if (strcmp(text_buf[line], prev) != 0 || new_icon != text_icon) {
-        text_dirty = true;
-        band_gen[BAND_TEXT]++;
-    }
+     * band mid-track whenever a track ran longer than the timeout.
+     *
+     * A push that brings an EXPIRED slot back is a change too, though its
+     * content is not: expiry keeps the buffers, so the same text after a
+     * silence would otherwise leave the band blank (codex, Minimal verify). */
+    bool changed     = strcmp(text_buf[line], prev) != 0 || new_icon != text_icon;
+    bool was_present = text_present;
     text_icon    = new_icon;
     text_stamp   = timer_read32();
     text_present = text_buf[0][0] || text_buf[1][0] || (text_icon != DISPLAY_ICON_NONE);
+    if (changed || (text_present && !was_present)) {
+        text_dirty = true;
+        band_gen[BAND_TEXT]++;
+    }
 }
 
 void display_set_text(uint8_t icon, const char *s, uint8_t len) {
     /* Legacy single-line entry point: line 0, and clear line 1 so a producer
-     * that only knows about one line cannot leave a stale artist behind. */
-    text_buf[1][0] = '\0';
+     * that only knows about one line cannot leave a stale artist behind. The
+     * clear is a change of its own: line 0 alone may be unchanged. */
+    if (text_buf[1][0]) {
+        text_buf[1][0] = '\0';
+        text_dirty     = true;
+        band_gen[BAND_TEXT]++;
+    }
     display_set_text_line(0, icon, s, len);
 }
 
@@ -2292,6 +2303,18 @@ static bool alert_active(void) {
         text_dirty = true;
     }
     return alert_on;
+}
+
+bool display_band_busy(void) {
+    if (display_paused || debug_active || debug_exit_step) return true;   /* the band is not on the panel */
+    if (pair_hint_pct >= 0) return true;
+    if (alert_on && timer_elapsed32(alert_since) < ALERT_HOLD_MS) return true;
+#ifdef PARAM_OVERLAY
+    /* From the post, not the paint: an overlay the band has yet to draw is
+     * one a notice would replace. */
+    if (param_status_on && timer_elapsed32(param_status_since) < PARAM_OVERLAY_HOLD_MS) return true;
+#endif
+    return false;
 }
 
 static const char *conn_status_str   = NULL;   /* NULL = host text owns the band */

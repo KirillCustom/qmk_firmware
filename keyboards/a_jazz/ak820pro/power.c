@@ -64,7 +64,8 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
  * does (codex). */
 #define LOW_CAP_PM        150u
 /* A mode left unset (a flash erased the EEPROM) is announced this long after
- * boot, when the panel is up. */
+ * boot, when the panel is up, or once the band is free (a boot alert holds it
+ * 60 s, and behind it the announcement would expire unseen). */
 #define ANNOUNCE_AFTER_MS 3000u
 
 static power_stage_t stage      = POWER_STAGE_ACTIVE;
@@ -169,7 +170,7 @@ static power_stage_t stage_for(const ladder_t *l, uint32_t idle) {
 }
 
 void power_task(void) {
-    if (announce && timer_read32() >= ANNOUNCE_AFTER_MS) {
+    if (announce && timer_read32() >= ANNOUNCE_AFTER_MS && !display_band_busy()) {
         announce = false;
         kb_eeconfig_set_power_mode((uint8_t)mode);
         display_set_param_status(mode_names[mode]);
@@ -208,10 +209,11 @@ void power_task(void) {
         shown_lit = lit;
         apply();
     }
-    /* Not over a message the band is still showing: the mode Fn+B just
-     * picked, say, would be replaced before it could be read. */
+    /* Only into a free band: over the mode Fn+B just picked it would replace
+     * that before it could be read, and behind an alert it would expire
+     * unseen and be lost. */
     if (low_owed && mode != POWER_MODE_MINIMAL && display_backlight_effective() > 0 &&
-        !display_message_recent(PARAM_OVERLAY_HOLD_MS)) {
+        !display_band_busy()) {
         low_owed = false;
         display_set_param_status("Saving power");
     }

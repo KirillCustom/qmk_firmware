@@ -124,6 +124,11 @@ bool display_debug_active(void);
  * with words, new host text, the pair gesture) within the last `ms`: power.c's
  * Minimal mode lights the backlight for it. */
 bool display_message_recent(uint32_t ms);
+/* The band holds, or is about to show, an overlay, an alert or the pair
+ * gesture, or another page owns the panel: a parameter overlay posted now
+ * would replace one, or expire behind it unseen. power.c's low notice waits
+ * for this to clear. */
+bool display_band_busy(void);
 /* Recompose the page on the next tick without waiting for the second edge, so a
  * counter reset shows its zeros immediately. No-op when the page is closed. */
 void display_debug_refresh(void);
