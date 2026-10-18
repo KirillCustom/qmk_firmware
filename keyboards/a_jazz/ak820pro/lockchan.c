@@ -225,10 +225,14 @@ bool lockchan_feed(lockchan_t *lc, uint8_t leds, uint32_t now) {
     return false;
 }
 
+void lockchan_link_lost(lockchan_t *lc) {
+    if (lc->st != ST_IDLE) abort_frame(lc, LOCKCHAN_ABORT_RESET);
+    lc->have_prev = false;   /* the link-down zeroes the LED state */
+}
+
 void lockchan_poll(lockchan_t *lc, uint32_t now, bool linked) {
     if (!linked) {
-        if (lc->st != ST_IDLE) abort_frame(lc, LOCKCHAN_ABORT_RESET);
-        lc->have_prev = false;   /* the link-down zeroes the LED state */
+        lockchan_link_lost(lc);
         return;
     }
     if (lc->st == ST_IDLE) return;

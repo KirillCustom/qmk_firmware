@@ -185,7 +185,9 @@ bool led_update_kb(led_t led_state) {
     if (led_state.scroll_lock != ind_scroll) {
         ind_scroll     = led_state.scroll_lock;
         scr_changed_at = timer_read32();
-        if (scr_key_armed && timer_elapsed32(scr_key_at) < SCR_OWN_KEY_MS) {
+        /* Not mid-frame: a frame's first edge could pass for the answer to a
+         * press made just before it (codex, flash 2h). */
+        if (scr_key_armed && timer_elapsed32(scr_key_at) < SCR_OWN_KEY_MS && !ch582_lockchan_busy()) {
             scr_shown     = ind_scroll;
             scr_key_armed = false;
         }

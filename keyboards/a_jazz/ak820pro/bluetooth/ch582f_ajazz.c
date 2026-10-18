@@ -357,7 +357,12 @@ static lockchan_t lockchan;
 
 const lockchan_t *ch582_lockchan(void) { return &lockchan; }
 void ch582_lockchan_clear(void) { lockchan_clear_stats(&lockchan); }
-bool ch582_lockchan_busy(void) { return lockchan_busy(&lockchan); }
+/* Only while the radio is the active host: in cable mode the LED state the
+ * band shows is USB's, which a radio frame must not hold (codex, flash 2h). */
+bool ch582_lockchan_busy(void) { return !usb_mode && lockchan_busy(&lockchan); }
+#    define LOCKCHAN_LINK_LOST() lockchan_link_lost(&lockchan)
+#else
+#    define LOCKCHAN_LINK_LOST() ((void)0)
 #endif
 
 static const SerialConfig serial_cfg = {
@@ -833,6 +838,7 @@ void ch582_set_profile(ch582_profile_t profile) {
     connect_requested   = true;
     usb_mode            = false;
     is_module_connected = false;
+    LOCKCHAN_LINK_LOST();
     conn_state          = CH582_CONN_LINKING;   /* attempting until 5B says otherwise */
     linking_since       = timer_read32();
     last_attempt_time   = timer_read();
@@ -883,6 +889,7 @@ void ch582_set_profile(ch582_profile_t profile) {
 void ch582_enter_pairing(void) {
     uint8_t param       = CH582_PAIR_PARAM;
     is_module_connected = false;
+    LOCKCHAN_LINK_LOST();
     is_pairing          = true;
     /* Optimistic: show pairing immediately for feedback, and let the retry below
      * make it true. Waiting for 5B 31 to update the display would leave the band
@@ -908,6 +915,7 @@ void ch582_cancel_connect(void) {
     connect_requested = false;
     usb_mode          = true;
     conn_state        = CH582_CONN_IDLE;
+    LOCKCHAN_LINK_LOST();
 }
 
 bool ch582_is_connected(void) {
@@ -1189,7 +1197,7 @@ void ch582_task(void) {
                      *     to pass the checksum usually has high bits set. */
 #ifdef AK820_DEV_HOOKS
                     led5a_note(d, is_module_connected && (d & ~0x1F) == 0);
-                    if (is_module_connected) lockchan_feed(&lockchan, d, timer_read32());
+                    if (is_module_connected && !usb_mode) lockchan_feed(&lockchan, d, timer_read32());
 #endif
                     if (is_module_connected && (d & ~0x1F) == 0) {
                         host_leds = d;
@@ -1231,6 +1239,7 @@ void ch582_task(void) {
                             conn_state          = CH582_CONN_PAIRING;
                             connected_slot      = 0;
                             host_leds           = 0; /* no link -> drop stale LED state */
+                            LOCKCHAN_LINK_LOST();
                             break;
                         case 0x33: /* connect ATTEMPT - link is down and retrying */
                         case 0x34:
@@ -1246,6 +1255,7 @@ void ch582_task(void) {
                             conn_state          = CH582_CONN_LINKING;
                             connected_slot      = 0;
                             host_leds           = 0; /* no link -> drop stale LED state */
+                            LOCKCHAN_LINK_LOST();
                             break;
                         /* 0x36: connect attempt ABANDONED. Absent from
                          * CH582F_PROTOCOL.md's state table; the disassembly's
@@ -1262,6 +1272,7 @@ void ch582_task(void) {
                             conn_state          = CH582_CONN_REJECTED;
                             connected_slot      = 0;
                             host_leds           = 0;
+                            LOCKCHAN_LINK_LOST();
                             break;
                         default:
                             /* 0x23 idle/finalize: periodic, appears both
@@ -1360,7 +1371,7 @@ void ch582_task(void) {
     uint16_t p2 = prof ? ACCT_NOW() : 0u;
     ch582_tx_pump();
 #ifdef AK820_DEV_HOOKS
-    lockchan_poll(&lockchan, timer_read32(), is_module_connected);
+    lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
 #endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);
 }

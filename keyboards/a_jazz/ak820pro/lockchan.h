@@ -7,13 +7,16 @@
 
 /* The lock-LED channel's receiver (plans/LOCK-LED-CHANNEL-PLAN.md, "The wire
  * format"): frames a host writes through the keyboard-LED output report, which
- * the CH582F forwards as `5A` frames, decoded one LED byte at a time.
+ * the CH582F forwards as `5A` frames, decoded one LED byte at a time. A sender
+ * first makes sure the board has seen its baseline (a change and back, then
+ * the quiet): the first byte after a reset only sets the baseline.
  *
  * Pure logic: no HAL, no QMK, no globals. scripts/lockchan_test.py compiles this
  * file on the host and checks it against the reference encoder
  * (scripts/lockchan.py), including deleted, merged, inserted and corrupted
  * reports. The firmware holds one instance and feeds it from the 5A parser,
- * main-loop context only. Work per report is a few dozen operations. */
+ * main-loop context only. Work per report is a few dozen operations, plus a
+ * CRC-16 over at most 52 bytes when a payload completes. */
 
 #define LOCKCHAN_MAX_PAYLOAD 48
 #define LOCKCHAN_GAP_MS      150u     /* between transitions inside a frame */
@@ -81,6 +84,11 @@ void lockchan_init(lockchan_t *lc);
 bool lockchan_feed(lockchan_t *lc, uint8_t leds, uint32_t now_ms);
 /* Each main-loop pass: times out a stalled frame; resets while unlinked. */
 void lockchan_poll(lockchan_t *lc, uint32_t now_ms, bool linked);
+/* The link went down or changed (a 5B down state, a slot select, pairing):
+ * drop any frame in progress and the LED baseline AT ONCE, before the next byte
+ * of the same UART drain, which may already hold a reconnect and the rest of
+ * the old frame (codex, flash 2h). */
+void lockchan_link_lost(lockchan_t *lc);
 /* Mid-frame: the band's settled Scroll Lock waits while this is true. */
 bool lockchan_busy(const lockchan_t *lc);
 /* Zero the counters and the last frame; a frame in progress carries on. */
