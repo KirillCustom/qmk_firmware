@@ -757,6 +757,12 @@ static void ch582_tx_ack(void) {
 
 void ch582_send_command(uint8_t cmd, const uint8_t *params, uint8_t param_len) {
     if (param_len > TX_MAX_PAYLOAD) return;
+    /* Any select or pair may move the link to another host, so the channel's
+     * receiver starts over: covers the deferred ones too (the bounce's real
+     * select, select retries, the 5B 23 re-issue, the connect retry), which
+     * a reset at the call sites missed (codex, flash 2h verify). The battery
+     * poll (A6 53) is not a link change. */
+    if (cmd == 0xA6 && param_len >= 1 && params[0] != CH582_BATTERY_REQ_PARAM) LOCKCHAN_LINK_LOST();
 
     /* NEWEST-SUPERSEDES for STATE frames (audit BW-6). 0xA1 (keyboard) and
      * 0xA3 (consumer) carry absolute state, not events -- the frame contract
