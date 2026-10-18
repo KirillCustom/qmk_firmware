@@ -20,7 +20,9 @@ void update_leds(void);
 bool lock_state_fn(void);
 bool lock_state_caps(void);
 bool lock_state_gui(void);
-bool lock_state_scroll(void);
+bool lock_state_scroll(void);   /* settled: see scr_shown in indicators.c */
+/* This board's KC_SCRL was pressed: the host's answer may show at once. */
+void lock_note_scroll_key(void);
 bool charge_is_charging(void);
 /* True when there is no battery fitted: on USB power, module reporting 0, and
  * the charger has never held a charge long enough to prove a pack exists. See

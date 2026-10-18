@@ -329,6 +329,7 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
      * from "the report was lost downstream", and it is useless if it only
      * exists in a flavour nobody types on. */
     if (record->event.pressed) health_note_key_press();
+    if (record->event.pressed && keycode == KC_SCRL) lock_note_scroll_key();
 #ifdef CONSOLE_ENABLE
     if (record->event.pressed) key_press_count++;
 #endif

@@ -288,6 +288,64 @@ uint8_t ch582_a6_trace(uint8_t *out, uint16_t *count) {
 }
 #endif
 
+#ifdef AK820_DEV_HOOKS
+/* Inbound 5A trace (dev builds; HC_DEVHOOK ops 7-9): every checksum-valid 5A
+ * frame, accepted or not. This is what the module passes on from the host's LED
+ * report, seen with no display in the path: which of the five bits arrive,
+ * whether a repeated value does, and how close together frames can come
+ * (plans/BACKLOG.md, the lock-LED channel). Main-loop context only, like the
+ * parser that feeds it and the raw-HID handler that reads it.
+ *
+ * Frame n lands in slot n % CH582_5A_RING, so a host that knows the count knows
+ * which frame each slot holds. The gap is the parse time's, which is within one
+ * main-loop pass of the frame's arrival; frames that queue behind a long pass
+ * show gaps near 0. */
+#define CH582_5A_RING 52   /* four 13-entry pages */
+static uint32_t led5a_frames   = 0;
+static uint32_t led5a_accepted = 0;
+static uint32_t led5a_last_at  = 0;
+static uint8_t  led5a_last     = 0;
+static uint8_t  led5a_ring[CH582_5A_RING][2];   /* {byte, ms since the previous frame, 255 = longer or none} */
+
+static void led5a_note(uint8_t d, bool accepted) {
+    uint32_t now = timer_read32();
+    uint32_t gap = led5a_frames ? now - led5a_last_at : UINT32_MAX;
+    uint8_t *e   = led5a_ring[led5a_frames % CH582_5A_RING];
+    e[0]         = d;
+    e[1]         = gap > 254u ? 255u : (uint8_t)gap;
+    led5a_frames++;
+    if (accepted) led5a_accepted++;
+    led5a_last_at = now;
+    led5a_last    = d;
+}
+
+void ch582_led5a_fill(uint8_t *out) {
+    uint32_t age = led5a_frames ? timer_elapsed32(led5a_last_at) : UINT32_MAX;
+    memcpy(&out[0], &led5a_frames, 4);
+    memcpy(&out[4], &led5a_accepted, 4);
+    out[8] = host_leds;
+    out[9] = led5a_last;
+    memcpy(&out[10], &age, 4);
+    out[14] = CH582_5A_RING;
+}
+
+/* The reply echoes its page, so a host can reject a stale one (codex, flash 2g). */
+bool ch582_led5a_page(uint8_t page, uint8_t *out) {
+    if (page >= CH582_5A_RING / 13) return false;
+    out[0] = page;
+    out[1] = 0;
+    memcpy(&out[2], led5a_ring[page * 13], 26);
+    return true;
+}
+
+void ch582_led5a_reset(void) {
+    led5a_frames = led5a_accepted = 0;
+    led5a_last_at = 0;
+    led5a_last    = 0;
+    memset(led5a_ring, 0, sizeof(led5a_ring));
+}
+#endif
+
 static const SerialConfig serial_cfg = {
     .speed               = 115200,
     .UART_WordLength     = 3,  // 8 data bits
@@ -1115,6 +1173,9 @@ void ch582_task(void) {
                      *   - require a plausible HID LED bitmap (low 5 bits only:
                      *     num/caps/scroll/compose/kana). Random garbage that happens
                      *     to pass the checksum usually has high bits set. */
+#ifdef AK820_DEV_HOOKS
+                    led5a_note(d, is_module_connected && (d & ~0x1F) == 0);
+#endif
                     if (is_module_connected && (d & ~0x1F) == 0) {
                         host_leds = d;
                     } else if ((d & ~0x1F) == 0 && conn_state == CH582_CONN_LINKING &&

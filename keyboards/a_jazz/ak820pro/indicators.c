@@ -63,6 +63,27 @@ static volatile uint8_t ind_phase = 0;
 static volatile bool    ind_caps     = false;
 static volatile bool    ind_winlock  = false;
 static volatile bool    ind_scroll   = false;   /* host-reported; no key on this board */
+
+/* Scroll Lock as the LCD band shows it: settled. A host that signals through
+ * the lock lights (plans/BACKLOG.md, the lock-LED channel) toggles Scroll Lock
+ * up to ~33 times a second and puts it back when its frame ends. Shown as sent,
+ * that repaints the band on every 10 Hz tick for nothing (the one pass >= 25 ms
+ * of the 10-17 drain came in the 5 minutes that held the probe's burst, and
+ * two Caps presses). So a change shows once it has held SCR_SETTLE_MS. Only a
+ * Scroll Lock transition restarts that clock, not any LED report, so a frame
+ * stays invisible only if it never leaves Scroll Lock changed for
+ * SCR_SETTLE_MS at a stretch, pauses and retries included: a rule for the
+ * encoding (codex, flash 2g). A real change still shows, that much late.
+ * The exception is this board's own KC_SCRL: a change within SCR_OWN_KEY_MS of
+ * its press is taken for the host answering it (Windows echoes Scroll Lock;
+ * macOS ignores the key), so it shows at once. A timing heuristic: an
+ * unrelated change in that window takes it too. Main-loop context only. */
+#define SCR_SETTLE_MS  1500u
+#define SCR_OWN_KEY_MS 500u
+static bool     scr_shown      = false;
+static uint32_t scr_changed_at = 0;
+static uint32_t scr_key_at     = 0;
+static bool     scr_key_armed  = false;   /* a KC_SCRL press not yet answered */
 static volatile bool    ind_charging = false;
 
 static volatile uint8_t ind_lvl_caps     = INDICATOR_BRIGHTNESS_DEFAULT;
@@ -161,7 +182,14 @@ void pwm_tick_init(void) {
 bool led_update_kb(led_t led_state) {
     if (!led_update_user(led_state)) return false;
     ind_caps   = led_state.caps_lock;
-    ind_scroll = led_state.scroll_lock;
+    if (led_state.scroll_lock != ind_scroll) {
+        ind_scroll     = led_state.scroll_lock;
+        scr_changed_at = timer_read32();
+        if (scr_key_armed && timer_elapsed32(scr_key_at) < SCR_OWN_KEY_MS) {
+            scr_shown     = ind_scroll;
+            scr_key_armed = false;
+        }
+    }
     /* NOTE: led_state comes from whichever host driver is active
      * (host_keyboard_leds -> host_get_active_driver). In cable mode that is the
      * USB LED report and it is reliable. In BT/2.4G it is the CH582F's
@@ -239,7 +267,12 @@ layer_state_t layer_state_set_kb(layer_state_t state) {
 bool lock_state_fn(void)      { return ind_fn; }
 bool lock_state_caps(void)    { return ind_caps; }
 bool lock_state_gui(void)     { return ind_winlock; }
-bool lock_state_scroll(void)  { return ind_scroll; }
+bool lock_state_scroll(void)  { return scr_shown; }
+
+void lock_note_scroll_key(void) {
+    scr_key_at    = timer_read32();
+    scr_key_armed = true;
+}
 
 uint8_t indicator_get_brightness(void) {
     return ind_lvl_caps;
@@ -269,4 +302,14 @@ void update_leds(void) {
 
     // Windows Lock: mirrors the GUI-lock flag.
     ind_winlock = keymap_config.no_gui;
+
+    // Scroll Lock for the band, once it has settled (see scr_shown).
+    if (scr_shown != ind_scroll && timer_elapsed32(scr_changed_at) >= SCR_SETTLE_MS) {
+        scr_shown = ind_scroll;
+    }
+    // An unanswered KC_SCRL press expires, or ~49.7 days on the timer's wrap
+    // would make it look recent again (codex, flash 2g).
+    if (scr_key_armed && timer_elapsed32(scr_key_at) >= SCR_OWN_KEY_MS) {
+        scr_key_armed = false;
+    }
 }

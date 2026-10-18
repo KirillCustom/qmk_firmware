@@ -65,6 +65,15 @@ uint32_t ch582_battery_age_ms(void);
 uint16_t ch582_battery_reports(void);
 /* Host LED bitmap last reported by the module (USB LED bits; bit1 = caps). From 5A frames. */
 uint8_t ch582_get_host_leds(void);
+#ifdef AK820_DEV_HOOKS
+/* The inbound 5A trace (HC_DEVHOOK ops 7-9). fill: [frames u32][accepted u32]
+ * [host_leds][last byte][ms since the last frame u32, UINT32_MAX if none]
+ * [ring size] at out[0..14]. page: [page][0], then slots page*13 .. page*13+12
+ * as {byte, gap ms} pairs, 28 bytes; false past the last page. */
+void ch582_led5a_fill(uint8_t *out);
+bool ch582_led5a_page(uint8_t page, uint8_t *out);
+void ch582_led5a_reset(void);
+#endif
 
 /* Cumulative TX health counters (sent / ACK timeouts / queue-full drops). */
 void ch582_tx_stats(uint32_t *sent, uint32_t *timeouts, uint32_t *drops);

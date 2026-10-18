@@ -530,6 +530,16 @@ enum {
      * Ops 4-6 reply [level, max, on, effective, saved+1] at [4..8]: effective
      * is after the power cap (power.c) and 0 when off; saved+1 is the level
      * the keys last persisted, 0 if none.
+     * op 7: the inbound 5A trace's header (ch582f_ajazz.c), at [4..18]:
+     *       [frames u32][accepted u32][host_leds][last byte][ms since the
+     *       last frame u32, UINT32_MAX if none][ring size]. LE, like the rest.
+     * op 8: its ring, page arg (0..3): [4] the page again, [5] 0, then slots
+     *       arg*13 .. arg*13+12 as {byte, gap ms} pairs at [6..31]; frame n is
+     *       in slot n % ring size. Op 7, the pages, then op 7 again, is a
+     *       consistent read only if the count did not move between them.
+     * op 9: reset the trace.
+     * For the lock-LED channel's tests (plans/BACKLOG.md): what the module
+     * passes on from the host's LED report, with no hands and no display.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -860,6 +870,15 @@ static void health_command(uint8_t *data, uint8_t length) {
                 case 4: display_set_brightness(data[4]); devhook_lcd_state(&data[4]); break;
                 case 5: display_set_power(data[4] != 0); devhook_lcd_state(&data[4]); break;
                 case 6: devhook_lcd_state(&data[4]); break;
+                case 7:
+                    if (length < 32) { data[0] = RTC_UNHANDLED; break; }
+                    memset(&data[4], 0, 28);
+                    ch582_led5a_fill(&data[4]);
+                    break;
+                case 8:
+                    if (length < 32 || !ch582_led5a_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
+                    break;
+                case 9: ch582_led5a_reset(); break;
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;
