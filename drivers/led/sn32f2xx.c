@@ -844,6 +844,25 @@ void sn32f2xx_blank(void) {
     }
 }
 
+/* The committed frame's drive, time-weighted (sn32f2xx_led_drive_take). The
+ * sum is taken after the masked copy, not inside it: only this function
+ * writes led_state[], and the ISR only reads it. */
+static uint32_t drive_now   = 0;   /* the committed frame's channel sum */
+static uint32_t drive_since = 0;   /* when it was committed, ms */
+static uint64_t drive_acc   = 0;   /* sum x ms since the last take */
+
+static void drive_close(uint32_t now) {
+    drive_acc += (uint64_t)drive_now * (uint32_t)(now - drive_since);
+    drive_since = now;
+}
+
+uint64_t sn32f2xx_led_drive_take(uint32_t now_ms) {
+    drive_close(now_ms);
+    uint64_t r = drive_acc;
+    drive_acc  = 0;
+    return r;
+}
+
 void sn32f2xx_flush(void) {
     if (led_state_buf_update_required) {
         /* The row ISR reads led_state[] to set each channel's duty, and this
@@ -861,6 +880,12 @@ void sn32f2xx_flush(void) {
         memcpy(led_state, led_state_buf, sizeof(RGB) * SN32F2XX_LED_COUNT);
         led_state_buf_update_required = false;
         chSysUnlock();
+        uint32_t sum = 0;
+        for (int i = 0; i < SN32F2XX_LED_COUNT; i++) {
+            sum += (uint32_t)led_state[i].r + led_state[i].g + led_state[i].b;
+        }
+        drive_close(timer_read32());
+        drive_now = sum;
     }
 }
 

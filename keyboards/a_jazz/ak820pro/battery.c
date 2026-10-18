@@ -465,13 +465,6 @@ static uint16_t c5_level(uint16_t e) {
  * middle. Below the clamp the voltage is the authority and nothing is restored. */
 #define LEVEL_CLAMP_GUESS  950u
 #define LEVEL_CLAMP_EXIT   900u
-/* The clamp's span at full white, from the two drain tests: run 1 left the
- * clamp at 89.6% after 5.36 equivalent hours (5.36 h * 3600 / 104 pm = 185.5
- * s/pm), run 2 at 90.3% after 4.90 h (4.90 * 3600 / 97.2 = 181.5); the mean,
- * 183.5, rounded. From FULL the countdown reaches its 905 floor in 95 * 184 s
- * = 4.86 h, about when the voltage takes over. It matters little: the clamp
- * is only ~10 points wide. (It was 190, from the 09-25 run's 5.3 h.) */
-#define COUNTDOWN_S_PER_PM 184u
 /* On battery the level moves down only after the curve has sat below it for
  * this many fresh estimates in a row (~15 s: the 09-29 post-flash walk stepped
  * 1% about every 15 s), then to the HIGHEST of them. Every move
@@ -483,7 +476,6 @@ static uint16_t c5_level(uint16_t e) {
 static uint16_t level      = LEVEL_UNKNOWN;
 static uint8_t  below_run  = 0;
 static uint16_t below_best = 0;
-static uint16_t clamp_s    = 0;
 static bool     full       = false;
 
 /* What is saved, and when. ⚠️ Every internal-flash write blanks the whole LED
@@ -522,6 +514,220 @@ static void level_toward(uint16_t target) {
     } else if (target < level) {
         level = (level - target > STEP_MAX_PM) ? (uint16_t)(level - STEP_MAX_PM) : target;
     }
+}
+
+/* LED drive, per mille of the maximum, over the last second: the committed
+ * frames' time-weighted mean (sn32f2xx_led_drive_take), which is after the
+ * power cap -- the real drive. */
+#define LED_LOAD_MAX ((uint32_t)RGB_MATRIX_LED_COUNT * 3u * 255u)
+static uint16_t led_pm = 0;
+uint16_t battery_led_pm(void) { return led_pm; }
+
+/* --- The energy count (Phase 2; plans/PHASE2-BUILD-PLAN.md, section 1) ---------
+ * On the flat stretches of the curve a few mV are ~10 points (R3, 10-18: the
+ * level read up to 13.8 low at 70-80% against the logged energy), so on
+ * battery the level is COUNTED: the board's draw, modelled from what it knows
+ * it is doing, integrated over elapsed time and taken off the level, 1 pm per
+ * E_PM_NJ. The voltage only bounds it, by a band: the curve at both ends of
+ * `5C`'s allowance (BAND_MV_UP, BAND_MV_DOWN), widened by BAND_PM. Above the band the ratchet
+ * pulls the level down to its top; below it the level holds and the count's
+ * pending energy is dropped (no debt to drain later). It never rises on
+ * battery but at the re-seat. Where the curve is steep the band is narrow and
+ * the voltage leads; on the flat stretches it is wide and the count leads.
+ *
+ * THE MODEL (R1's per-load map, 10-15, at ~4.17 V; the board is a
+ * constant-power load, 305-311 mW over R3's whole drain): calibrated for JD's
+ * unit as it runs (the MCU awake, BT linked, the panel drawing), USB data
+ * attached or not. Not measured: the radio's other states, 2.4G, temperature,
+ * another unit. All in uW.
+ *   base     the floor with every light out, less USB data (R2's 7.1 mW)
+ *   USB      while USB is configured on battery: only the bench does that
+ *   backlight linear in its duty: 39.1 mW at duty 48/48
+ *   RGB      the committed frames' drive, time-weighted
+ *            (sn32f2xx_led_drive_take): A while any LED is lit, plus B per
+ *            unit of the channel sum. Linear in drive (QMK's CIE curve made it
+ *            look otherwise in values: 64 and 128 are drives of 12 and 48).
+ *            White: 17.9 mW at 12, 43.0 at 48, 188.7 at 255. */
+#define P_BASE_UW        106900u
+#define P_USB_UW           7100u
+#define P_BKL_FULL_UW     39100u
+#define P_RGB_A_UW         9500u
+#define P_RGB_B_NW         2857u   /* nW per unit of the channel sum (246 channels) */
+#define BKL_DUTY_FULL        48u
+/* The capacity: R3's 15,579 mWh from FULL to the RGB cut, at JD's settings
+ * (history/battery-2026-10-15-drain-2f/, "A1/A2"). One pm is a thousandth:
+ * 15,579 mWh * 3.6e9 nJ/mWh / 1000. */
+#ifndef E_CAP_MWH   /* overridable so scripts/battery_sim can replay a wrong capacity */
+#    define E_CAP_MWH    15579u
+#endif
+#define E_PM_NJ          ((uint64_t)E_CAP_MWH * 3600000u)   /* uW.ms per pm */
+#define NJ_PER_MWH_X10   360000000u                          /* 0.1 mWh in uW.ms */
+/* The band, asymmetric. The upper edge (the ratchet) is the curve BAND_MV_UP
+ * above the estimate: `5C`'s own ~10 mV, plus how far the pack's plateau
+ * moved between cycles -- on R3 `5C` read 10-25 mV below the curve's voltage
+ * for the logged energy, so 12 mV ratcheted a right count down by 11 points
+ * (the firmware replay, scripts/battery_sim c_replay_r3). The lower edge (the
+ * hold) is wider still: the pack's voltage RISES when the load falls (R1:
+ * +10 mV from 73 to 28 mA), so with the ladder an idle board reads high, and
+ * a tight lower edge would pause the count through every idle night -- the
+ * level then high, the dangerous direction. It is a guard against a grossly
+ * over-counting model, not a correction. BAND_PM absorbs the estimate's
+ * noise. */
+#define BAND_MV_UP        BATTERY_BAND_MV_UP
+#define BAND_MV_DOWN      BATTERY_BAND_MV_DOWN
+#define BAND_PM           BATTERY_BAND_PM
+/* The count alone never takes the level below 1%: 0% is the protection's cut
+ * (protection_tick sets it when the cut latches). */
+#define COUNT_FLOOR_PM    10u
+
+static uint64_t e_used_nj   = 0;   /* modelled energy from the pack since FULL; never held */
+static uint64_t e_period_nj = 0;   /* the same, this log period's */
+static uint64_t e_minute_nj = 0;   /* this minute's, for the average */
+static uint64_t count_nj    = 0;   /* not yet taken off the level */
+static uint32_t e_last_ms   = 0;
+static bool     e_started   = false;
+static bool     band_hold   = false;   /* below the band: the level waits */
+static uint32_t p_now_uw    = 0;       /* the last second's mean draw */
+static uint8_t  count_state = 0;       /* BATTERY_COUNT_* for HC_POWER */
+
+/* The average draw, for time left: each minute's mean on battery, into a mean
+ * over the minutes so far, which becomes an exponential average with a 12 h
+ * time constant once there are 720 of them (an early minute cannot bias a
+ * whole drain, codex). Frozen on USB. */
+#define AVG_MAX_MINUTES  720u
+static int32_t  p_avg_uw     = 0;
+static uint16_t avg_minutes  = 0;
+static uint32_t minute_ms    = 0;
+static uint16_t left_min     = 0xFFFFu;   /* to the cut, minutes; 0xFFFF none */
+
+static int32_t band_lower(uint16_t mv) {
+    int32_t lo = (int32_t)curve((uint16_t)(mv - BAND_MV_DOWN)) - BAND_PM;
+    return lo < 0 ? 0 : lo;
+}
+static int32_t band_upper(uint16_t mv) {
+    int32_t hi = (int32_t)curve((uint16_t)(mv + BAND_MV_UP)) + BAND_PM;
+    return hi > (int32_t)LEVEL_FULL ? (int32_t)LEVEL_FULL : hi;
+}
+
+/* The re-seat's and the handover's rule for a known level against a relaxed
+ * estimate below the clamp: kept inside the band, else to its nearer edge. */
+static uint16_t band_clamp(uint16_t lv, uint16_t mv) {
+    int32_t lo = band_lower(mv), hi = band_upper(mv);
+    if ((int32_t)lv < lo) return (uint16_t)lo;
+    if ((int32_t)lv > hi) return (uint16_t)hi;
+    return lv;
+}
+
+static void count_rebase(void) {
+    count_nj = 0;
+}
+
+/* FULL: the count starts over. */
+static void energy_full(void) {
+    e_used_nj = 0;
+    count_nj  = 0;
+    band_hold = false;
+}
+
+/* The model's energy over `dt` ms, given the LED drive's sum x ms over it. */
+static uint64_t model_nj(uint32_t dt, uint64_t drive_ms) {
+    uint64_t uw = P_BASE_UW + (uint64_t)P_BKL_FULL_UW * display_backlight_duty() / BKL_DUTY_FULL;
+    if (battery_usb_configured()) uw += P_USB_UW;
+    uint64_t e = uw * dt;
+    if (drive_ms) e += (uint64_t)P_RGB_A_UW * dt + (drive_ms * P_RGB_B_NW) / 1000u;
+    return e;
+}
+
+/* Once a second, on the elapsed time: the count, the period's energy, the
+ * average. The LED drive is taken every call, on USB too, so a battery
+ * second never inherits a USB stretch's frames. */
+static void energy_tick(void) {
+    uint32_t now      = timer_read32();
+    uint64_t drive_ms = sn32f2xx_led_drive_take(now);
+    if (!e_started) {
+        e_started = true;
+        e_last_ms = now;
+        return;
+    }
+    uint32_t dt = now - e_last_ms;
+    e_last_ms   = now;
+    if (dt) led_pm = (uint16_t)((drive_ms * 1000u) / ((uint64_t)LED_LOAD_MAX * dt));
+    if (supply != BATTERY_SUPPLY_BATTERY || dt == 0) {
+        count_state = BATTERY_COUNT_OFF;
+        left_min    = 0xFFFFu;
+        minute_ms   = 0;
+        e_minute_nj = 0;
+        return;
+    }
+    uint64_t e = model_nj(dt, drive_ms);
+    p_now_uw   = (uint32_t)(e / dt);
+    e_used_nj += e;
+    e_period_nj += e;
+    e_minute_nj += e;
+
+    if (level != LEVEL_UNKNOWN && !reseat) {
+        bool clamp = c5_top(battery_5c_x100());
+        uint16_t floor = clamp ? LEVEL_CLAMP_FLOOR : COUNT_FLOOR_PM;
+        if (level == 0) {
+            count_state = BATTERY_COUNT_CUT;
+            count_nj    = 0;
+        } else if (band_hold && !clamp) {
+            count_state = BATTERY_COUNT_HELD;
+            count_nj    = 0;   /* dropped, not banked */
+        } else {
+            count_state = clamp ? BATTERY_COUNT_CLAMP : BATTERY_COUNT_RUN;
+            count_nj += e;
+            while (count_nj >= E_PM_NJ && level > floor) {
+                count_nj -= E_PM_NJ;
+                level--;
+            }
+            if (level <= floor) count_nj = 0;
+        }
+    } else if (reseat && level != LEVEL_UNKNOWN) {
+        /* Relaxing after an unplug: the level is the charging model's, and it
+         * still pays for what the board draws meanwhile (codex: ~1 point at
+         * 306 mW over RELAX_S). The re-seat bounds the result. */
+        count_state = BATTERY_COUNT_RELAX;
+        count_nj += e;
+        while (count_nj >= E_PM_NJ && level > COUNT_FLOOR_PM) {
+            count_nj -= E_PM_NJ;
+            level--;
+        }
+    }
+
+    minute_ms += dt;
+    if (minute_ms >= 60000u) {
+        int32_t p = (int32_t)(e_minute_nj / minute_ms);
+        if (avg_minutes < AVG_MAX_MINUTES) avg_minutes++;
+        p_avg_uw += (p - p_avg_uw) / (int32_t)avg_minutes;
+        minute_ms   = 0;
+        e_minute_nj = 0;
+        if (level != LEVEL_UNKNOWN && level > 0 && p_avg_uw > 0) {
+            uint64_t ms = ((uint64_t)level * E_PM_NJ) / (uint32_t)p_avg_uw;
+            uint64_t mn = ms / 60000u;
+            left_min    = mn > 0xFFFEu ? 0xFFFEu : (uint16_t)mn;
+        } else {
+            left_min = 0xFFFFu;
+        }
+    }
+}
+
+uint32_t battery_power_uw(void)     { return p_now_uw; }
+uint32_t battery_power_avg_uw(void) { return p_avg_uw > 0 ? (uint32_t)p_avg_uw : 0u; }
+uint16_t battery_avg_minutes(void)  { return avg_minutes; }
+uint16_t battery_time_left_min(void) {
+    if (supply != BATTERY_SUPPLY_BATTERY || level == LEVEL_UNKNOWN || level == 0) return 0xFFFFu;
+    return left_min;
+}
+uint32_t battery_energy_used_mwh_x10(void) { return (uint32_t)(e_used_nj / NJ_PER_MWH_X10); }
+uint8_t  battery_count_state(void) { return count_state; }
+int16_t  battery_band_lower(void) {
+    uint16_t m = battery_5c_x100();
+    return (m == C5_EST_NONE || c5_top(m)) ? -1 : (int16_t)band_lower(c5_to_mv(m));
+}
+int16_t  battery_band_upper(void) {
+    uint16_t m = battery_5c_x100();
+    return (m == C5_EST_NONE || c5_top(m)) ? -1 : (int16_t)band_upper(c5_to_mv(m));
 }
 
 /* --- Charging: the model (Phase 1b, B; plans/BATTERY-GAUGE-REFINE-PLAN.md) ------
@@ -791,9 +997,16 @@ static void chg_tick_1hz(void) {
 static void adopt_relaxed(uint16_t m) {
     if (c5_top(m)) {
         level = (level == LEVEL_UNKNOWN) ? LEVEL_CLAMP_GUESS : (level > LEVEL_CLAMP_FLOOR ? level : LEVEL_CLAMP_FLOOR);
-    } else {
+    } else if (level == LEVEL_UNKNOWN || c5_bottom(m)) {
         level = c5_level(m);
+    } else {
+        /* Phase 2: a known level -- the charging model's, counted down since
+         * the unplug -- is kept inside the band, else moved to its nearer
+         * edge. Adopting the curve outright put the plateau's error back. */
+        level = band_clamp(level, c5_to_mv(m));
     }
+    count_rebase();
+    band_hold = false;
     relax_done = false;
     level_held = false;
 }
@@ -804,8 +1017,10 @@ static uint8_t chg_state_now(void) {
 }
 
 static void full_tick(void) {
+    bool was = full;
     full = supply == BATTERY_SUPPLY_EXTERNAL && chrg_off_run >= FULL_SETTLE_TICKS &&
            c5_top(battery_5c_x100());
+    if (full && !was) energy_full();
 }
 
 /* One new fresh estimate, in hundredths of a count. */
@@ -824,25 +1039,33 @@ static void level_report(uint16_t m) {
             return;
         }
         if (c5_top(m)) {
-            /* The top clamp: the countdown (level_tick_1hz) owns it, from
-             * wherever charging left the level. */
+            /* The top clamp: the count (energy_tick) owns it, from wherever
+             * charging left the level, floored at LEVEL_CLAMP_FLOOR. */
             if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
             below_run = 0;
+            band_hold = false;
             return;
         }
-        uint16_t target = c5_level(m);
         if (level == LEVEL_UNKNOWN) {   /* the first reading on the pack */
-            level = target;
+            level = c5_level(m);
+            count_rebase();
             return;
         }
-        if (target >= level) {     /* the ratchet: never rises on battery */
+        if (level == 0) return;   /* the cut's: only a charge lifts it */
+        uint16_t mv     = c5_to_mv(m);
+        int32_t  upper  = band_upper(mv);
+        band_hold       = (int32_t)level < band_lower(mv);
+        if ((int32_t)level <= upper) {   /* inside, or below and waiting */
             below_run = 0;
             return;
         }
+        /* Above the band: the ratchet, down to its top. */
+        uint16_t target = upper < (int32_t)COUNT_FLOOR_PM ? COUNT_FLOOR_PM : (uint16_t)upper;
         if (below_run == 0 || target > below_best) below_best = target;
         if (++below_run < STEP_DOWN_MEDIANS) return;
         below_run = 0;
         level_toward(below_best);
+        count_rebase();
         return;
     }
     below_run = 0;
@@ -894,20 +1117,6 @@ static void supply_changed(battery_supply_t was) {
     } else if (supply == BATTERY_SUPPLY_EXTERNAL) {
         relax_cancel();
     }
-}
-
-static void level_tick_1hz(void) {
-    uint16_t m = battery_5c_x100();
-    if (c5_top(m) && level != LEVEL_UNKNOWN) {
-        if (supply == BATTERY_SUPPLY_BATTERY) {
-            if (level > LEVEL_CLAMP_FLOOR && ++clamp_s >= COUNTDOWN_S_PER_PM) {
-                clamp_s = 0;
-                level--;
-            }
-            return;
-        }
-    }
-    clamp_s = 0;
 }
 
 uint16_t battery_level_permille(void) { return level; }
@@ -978,6 +1187,8 @@ static void cut_lights(void) {
     if (power_lights_cut()) return;
     power_set_lights_cut(true);
     display_set_alert("Low: RGB off");
+    /* 0% is the cut (Phase 2): the count stops at 1%, and this sets 0. */
+    if (supply == BATTERY_SUPPLY_BATTERY) level = 0;
 }
 
 static void protection_tick(void) {
@@ -1034,15 +1245,11 @@ uint8_t battery_flags(void) {
     return f;
 }
 
-/* LED drive, per mille of the maximum, over the last second. sn32f2xx_led_load()
- * sums the driver's buffer, which is after the power cap: the real drive. */
-#define LED_LOAD_MAX ((uint32_t)RGB_MATRIX_LED_COUNT * 3u * 255u)
-static uint16_t led_pm = 0;
-uint16_t battery_led_pm(void) { return led_pm; }
 
 /* --- The log ---------------------------------------------------------------------
- * 720 ten-minute entries: 120 hours in RAM, oldest overwritten. Long enough for
- * a whole discharge at full white (~52-63 h) with room to spare. It records
+ * 720 fifteen-minute entries: 180 hours in RAM, oldest overwritten. Long enough
+ * for a whole discharge with the ladder (Normal, ~4-5 days by the model); it
+ * was ten minutes (120 h) through v5, and RAM has no room for more entries. It records
  * what a curve fit and a load comparison need: every `5C` report in the period
  * (sum, count, min, max -- not the last value, which threw away 119 of 120),
  * flags at the end AND over the period, so a transition cannot fall between
@@ -1050,11 +1257,14 @@ uint16_t battery_led_pm(void) { return led_pm; }
  * ⚠️ RAM, so it dies with the board: dump before the pack runs out, and plug in
  * with the slider on BT -- a BT -> cable flip resets the board. HC_BATTLOG. */
 #define LOG_LEN       720u
-#define LOG_PERIOD_MS 600000u
+#define LOG_PERIOD_MS 900000u
 
 typedef struct __attribute__((packed)) {
     uint16_t vdd_avg;      /* mean raw VDD over the period, mV */
-    uint16_t vdd_min;      /* lowest raw VDD, mV */
+    uint16_t e_x10;        /* v6: the period's modelled battery energy, 0.1 mWh
+                            * (energy_tick; 0 for time on USB). It took v5's
+                            * vdd_min, the lowest raw VDD, which the supply
+                            * flags superseded as evidence. */
     uint16_t c5_sum;       /* sum of every fresh `5C` report in the period */
     uint8_t  c5_n_lo;      /* how many, low byte (0: none arrived) */
     uint8_t  c5_min;       /* 0xFF when none */
@@ -1080,14 +1290,13 @@ static uint32_t    log_written = 0;   /* entries ever written */
 static uint32_t    log_last_at = 0;   /* the newest entry's period end */
 static bool        log_started = false;
 static uint32_t    acc_sum = 0, acc_start = 0, acc_led = 0;
-static uint16_t    acc_n = 0, acc_min = 0, acc_led_n = 0;
+static uint16_t    acc_n = 0, acc_led_n = 0;
 static uint8_t     acc_flags = 0;
 
 static void log_task(uint16_t sample_mv) {
     if (sample_mv) {
         acc_sum += sample_mv;
         acc_n++;
-        if (acc_min == 0 || sample_mv < acc_min) acc_min = sample_mv;
     }
     acc_flags |= battery_flags();
     if (!log_started) {
@@ -1102,7 +1311,9 @@ static void log_task(uint16_t sample_mv) {
 
     log_entry_t *e = &log_buf[log_head];
     e->vdd_avg   = acc_n ? (uint16_t)(acc_sum / acc_n) : 0u;   /* 0: no conversion in the period */
-    e->vdd_min   = acc_min;
+    uint64_t ex  = e_period_nj / NJ_PER_MWH_X10;
+    e->e_x10     = ex > 0xFFFFu ? 0xFFFFu : (uint16_t)ex;
+    e_period_nj -= ex * NJ_PER_MWH_X10;   /* the remainder carries: no energy lost to rounding */
     e->c5_sum    = lg_c5_sum;
     e->c5_n_lo   = (uint8_t)(lg_c5_n & 0xFFu);
     e->c5_n_hi   = (uint8_t)(lg_c5_n >> 8);
@@ -1121,7 +1332,7 @@ static void log_task(uint16_t sample_mv) {
     log_written++;
     acc_start  += LOG_PERIOD_MS;   /* a fixed cadence: no drift from loop jitter */
     log_last_at = acc_start;
-    acc_sum = 0; acc_n = 0; acc_min = 0; acc_led = 0; acc_led_n = 0; acc_flags = 0;
+    acc_sum = 0; acc_n = 0; acc_led = 0; acc_led_n = 0; acc_flags = 0;
     lg_c5_sum = 0; lg_c5_n = 0; lg_c5_min = C5_NONE; lg_c5_max = 0;
     lg_c5_saturated = false; chg_latch = 0;
 }
@@ -1220,12 +1431,11 @@ void battery_task(void) {
     protection_tick();
 
     if (++tick >= 10u) {
-        tick   = 0;
-        led_pm = (uint16_t)((sn32f2xx_led_load() * 1000u) / LED_LOAD_MAX);
-        acc_led += led_pm;
+        tick = 0;
+        acc_led += led_pm;   /* the previous second's, from the committed frames */
         acc_led_n++;
         chg_tick_1hz();
-        level_tick_1hz();
+        energy_tick();
         level_save_tick();
     }
     log_task(mv);

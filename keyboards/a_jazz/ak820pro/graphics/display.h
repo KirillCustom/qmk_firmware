@@ -43,6 +43,9 @@ void    display_set_backlight_cap(uint8_t cap);
 /* The level the panel is actually lit at: the user's, under any cap; 0 while
  * the display is powered down. For the battery log. */
 uint8_t display_backlight_effective(void);
+/* That level's PWM duty, 0..48 of 48: the backlight's draw is linear in it
+ * (R1, 10-15). For battery.c's model. */
+uint8_t display_backlight_duty(void);
 void    display_brightness_up(void);
 void    display_brightness_down(void);
 

@@ -29,7 +29,7 @@ typedef enum {
 } battery_state_t;
 
 /* HC_BATTLOG reply format, and HC_CONN byte 31 (the battery fields' layout). */
-#define BATTERY_LOG_VERSION    5
+#define BATTERY_LOG_VERSION    6
 #define BATTERY_LOG_ENTRY_SIZE 18
 #define BATTERY_PROTO_VERSION  5
 
@@ -55,6 +55,17 @@ typedef enum {
  * <= 3248 mV UNDER CHARGE, >= 150 mV below the 3400 mV cut (itself a loaded
  * voltage), with room for the voltmeter's +-11 mV. */
 #define BATTERY_FLAT_X100     1000u
+
+/* Phase 2's voltage band (battery.c, "The energy count", has why): the curve
+ * this many mV above and below the estimate, widened BATTERY_BAND_PM.
+ * Overridable for the simulator's sensitivity runs. */
+#ifndef BATTERY_BAND_MV_UP
+#    define BATTERY_BAND_MV_UP   25
+#endif
+#ifndef BATTERY_BAND_MV_DOWN
+#    define BATTERY_BAND_MV_DOWN 40
+#endif
+#define BATTERY_BAND_PM          15
 
 /* Enable the ADC. Call once from post-init. Blocks ~100 us (ADC warm-up). */
 void battery_init(void);
@@ -100,6 +111,32 @@ uint16_t battery_pack_mv(void);
 
 /* LED drive over the last second, per mille of the maximum (after the power cap). */
 uint16_t battery_led_pm(void);
+
+/* Phase 2's energy count (plans/PHASE2-BUILD-PLAN.md). The modelled draw over
+ * the last second and its average (uW; the average over the minutes on
+ * battery so far, an exponential one with a 12 h constant from 720 of them),
+ * how many minutes it has, the time left to the cut at that average (minutes,
+ * 0xFFFF none: on USB, the level unknown or cut, before the first minute),
+ * the modelled energy since FULL (0.1 mWh), the count's state, and the
+ * voltage band's edges in pm (-1 with no estimate below the clamp). */
+enum {
+    BATTERY_COUNT_OFF = 0,   /* not on battery */
+    BATTERY_COUNT_RUN,       /* counting, inside or above the band */
+    BATTERY_COUNT_CLAMP,     /* counting at the top clamp, floored at 90.5% */
+    BATTERY_COUNT_HELD,      /* below the band: waiting for the voltage */
+    BATTERY_COUNT_RELAX,     /* after an unplug, until the re-seat */
+    BATTERY_COUNT_CUT,       /* 0%: the protection's cut */
+};
+uint32_t battery_power_uw(void);
+uint32_t battery_power_avg_uw(void);
+uint16_t battery_avg_minutes(void);
+uint16_t battery_time_left_min(void);
+uint32_t battery_energy_used_mwh_x10(void);
+uint8_t  battery_count_state(void);
+int16_t  battery_band_lower(void);
+int16_t  battery_band_upper(void);
+/* Provided by the board (ak820pro.c): USB configured by a host. */
+bool     battery_usb_configured(void);
 
 /* Status bits for HC_CONN and the log: see BATT_F_* in battery.c. */
 uint8_t battery_flags(void);

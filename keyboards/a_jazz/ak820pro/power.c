@@ -53,8 +53,10 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
 #define BACKLIGHT_NO_CAP 0xFFu
 /* Below this level on battery, the lighting follows Power Saver's stages
  * whatever the mode (BATTERY-GAUGE-PLAN.md, "Low battery"). Lighting only:
- * the radio is never the gauge's to touch. */
+ * the radio is never the gauge's to touch. Its notice re-arms only once the
+ * level is back above LOW_REARM_PM, which on battery only a charge does. */
 #define LOW_CAP_PM        150u
+#define LOW_REARM_PM      200u
 /* A mode left unset (a flash erased the EEPROM) is announced this long after
  * boot, when the panel is up. */
 #define ANNOUNCE_AFTER_MS 3000u
@@ -62,18 +64,22 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
 static power_stage_t stage      = POWER_STAGE_ACTIVE;
 static power_mode_t  mode       = POWER_MODE_NORMAL;
 static bool          lights_cut = false;
-static bool          low_cap    = false;
+static bool          low_noted  = false;   /* the low cap's notice given (or owed) */
+static bool          low_owed   = false;   /* ... and waiting for a lit screen */
 static bool          announce   = false;
 static uint8_t       val_cap    = 255;
 #ifdef AK820_DEV_HOOKS
 static uint8_t forced = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF none */
 #endif
 
+/* The overlay holds 12 characters (display.c, CONN_STATUS_MAX). */
 static const char *const mode_names[POWER_MODE_COUNT] = {
-    [POWER_MODE_FULL]   = "Power: Full",
-    [POWER_MODE_NORMAL] = "Power: Normal",
-    [POWER_MODE_SAVER]  = "Power: Saver",
+    [POWER_MODE_FULL]   = "Full power",
+    [POWER_MODE_NORMAL] = "Normal power",
+    [POWER_MODE_SAVER]  = "Power saver",
 };
+
+static uint8_t applied_scale = 255;
 
 static void apply(void) {
     uint8_t scale = 255, cap = BACKLIGHT_NO_CAP, vcap = 255;
@@ -93,9 +99,18 @@ static void apply(void) {
             break;
     }
     if (lights_cut) scale = 0;
-    val_cap = vcap;
+    bool repaint = (vcap != val_cap) || (scale != applied_scale);
+    val_cap       = vcap;
+    applied_scale = scale;
     sn32f2xx_set_power_scale(scale);
     display_set_backlight_cap(cap);
+    /* Every LED through the new caps at once: the driver's scale applies only
+     * as an LED is set, and the value cap only as a colour is converted, and
+     * an effect that rewrites a few LEDs a frame (Jellybean Raindrops) would
+     * leave the rest as they were (codex). Restarting the effect makes it
+     * paint them all. No EEPROM write (_noeeprom), the same mode, so the
+     * parameter overlay, which polls the config, sees nothing. */
+    if (repaint && rgb_matrix_is_enabled()) rgb_matrix_mode_noeeprom(rgb_matrix_get_mode());
 }
 
 /* The dim stage's ceiling on every colour the effects convert, QMK's weak hook
@@ -145,26 +160,35 @@ void power_task(void) {
         kb_eeconfig_set_power_mode((uint8_t)mode);
         display_set_param_status(mode_names[mode]);
     }
-    power_stage_t want = POWER_STAGE_ACTIVE;
-    bool          low  = false;
+    power_stage_t want  = POWER_STAGE_ACTIVE;
+    bool          low   = false;
+    uint16_t      level = battery_level_permille();
     if (battery_on_battery()) {
-        uint32_t idle  = last_input_activity_elapsed();
-        uint16_t level = battery_level_permille();
-        low            = level <= LOW_CAP_PM;   /* LEVEL_UNKNOWN (0xFFFF) is not low */
-        want           = stage_for(&ladders[mode], idle);
+        uint32_t idle = last_input_activity_elapsed();
+        low           = level <= LOW_CAP_PM;   /* LEVEL_UNKNOWN (0xFFFF) is not low */
+        want          = stage_for(&ladders[mode], idle);
         if (low) {
             power_stage_t saver = stage_for(&ladders[POWER_MODE_SAVER], idle);
             if (saver > want) want = saver;
         }
     }
-    if (low && !low_cap) display_set_param_status("Low: saving power");
-    low_cap = low;
+    /* The low cap's notice: once a discharge, and only where it can be read --
+     * with the backlight off it waits for the keypress that lights it. */
+    if (low && !low_noted) {
+        low_noted = true;
+        low_owed  = true;
+    }
+    if (level != 0xFFFFu && level > LOW_REARM_PM) low_noted = false;
 #ifdef AK820_DEV_HOOKS
     if (forced != 0xFF) want = (power_stage_t)forced;
 #endif
     if (want != stage) {
         stage = want;
         apply();
+    }
+    if (low_owed && stage != POWER_STAGE_SCREEN_OFF) {
+        low_owed = false;
+        display_set_param_status("Saving power");
     }
 }
 

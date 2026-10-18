@@ -399,7 +399,8 @@ enum {
     HC_GET5        = 0x08, /* retained watchdog operation; watchdog_record.h */
     HC_GET6        = 0x09, /* crash-hunt vitals, protocol >= 7; health.h */
     HC_CONN        = 0x02,
-    /* Battery log (battery.c), one entry per period (10 min): [.., ..,
+    /* Battery log (battery.c), one entry per period (15 min from v6, 10
+     * before): [.., ..,
      * HC_BATTLOG, idx_lo, idx_hi] -> [.., .., HC_BATTLOG, version, count u16,
      * idx u16, ms since the newest entry u32, entries ever written u16, the
      * entry at idx (0 = oldest)]. battery_log_read() and battery.h have the
@@ -407,7 +408,8 @@ enum {
      * charging state), and the period no longer in the reply -- the host
      * reads it from HC_BATTCFG -- so 3 + 11 + 18 fills the 32-byte report.
      * v4: the period u16 before the written count, a 16-byte entry. Version
-     * 1 (b35d8672b3) had no version byte and two 8-byte entries. */
+     * 1 (b35d8672b3) had no version byte and two 8-byte entries. v6 (Phase
+     * 2): the period's modelled energy in vdd_min's place, 15-min periods. */
     HC_BATTLOG     = 0x0A,
     /* Low-battery thresholds, RAM only: [.., .., HC_BATTCFG, op, warn u16,
      * cut u16] with op 0 = read, 1 = set (0 mV disables either) ->
@@ -434,6 +436,14 @@ enum {
     HC_FLASHW      = 0x0C,
     HC_ACCT        = 0x0D,
     HC_LINK        = 0x0E,
+    /* Phase 2's power figures (battery.c's energy count, power.c's ladder;
+     * plans/PHASE2-BUILD-PLAN.md): [.., .., HC_POWER] -> [.., .., HC_POWER,
+     * version (1), mode, stage, count state (BATTERY_COUNT_*), level pm u16
+     * (0xFFFF unknown), the draw now u32 uW, its average u32 uW, the
+     * average's minutes u16, time left u16 min (0xFFFF none), energy since
+     * FULL u32 0.1 mWh, the band's lower and upper edges i16 pm (-1 none),
+     * on battery u8] at [3..29]. HC_CONN is full, hence its own command. */
+    HC_POWER       = 0x0F,
     /* Clock-sync status (PLAN.md 3.7): [.., .., HC_RTC, page] ->
      *   [.., .., HC_RTC, page, block...]
      * page 1 = the 21-byte RTC_GET_TIME[11..31] tail at [4..24];
@@ -749,6 +759,29 @@ static void health_command(uint8_t *data, uint8_t length) {
             break;
         case HC_BATTLOG:
             if (length >= 32) battery_log_read((uint16_t)(data[3] | (data[4] << 8)), &data[3]);
+            break;
+        case HC_POWER:
+            if (length >= 32) {
+                memset(&data[3], 0, 29);
+                uint8_t *p = &data[3];
+#define PUT16(x) do { uint16_t v_ = (uint16_t)(x); *p++ = (uint8_t)(v_ & 0xFF); *p++ = (uint8_t)(v_ >> 8); } while (0)
+#define PUT32(x) do { uint32_t v_ = (uint32_t)(x); for (uint8_t k_ = 0; k_ < 4; k_++) *p++ = (uint8_t)(v_ >> (8 * k_)); } while (0)
+                *p++ = 1;   /* the reply's version */
+                *p++ = (uint8_t)power_mode();
+                *p++ = (uint8_t)power_stage();
+                *p++ = battery_count_state();
+                PUT16(battery_level_permille());
+                PUT32(battery_power_uw());
+                PUT32(battery_power_avg_uw());
+                PUT16(battery_avg_minutes());
+                PUT16(battery_time_left_min());
+                PUT32(battery_energy_used_mwh_x10());
+                PUT16((uint16_t)battery_band_lower());
+                PUT16((uint16_t)battery_band_upper());
+                *p++ = battery_on_battery() ? 1 : 0;
+#undef PUT16
+#undef PUT32
+            }
             break;
         case HC_BATTCFG:
             if (length >= 32) {

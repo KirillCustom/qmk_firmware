@@ -84,6 +84,13 @@ void sn32f2xx_set_color_all(uint8_t r, uint8_t g, uint8_t b);
  * current draw from it. Main-thread only, like sn32f2xx_set_color(). */
 uint32_t sn32f2xx_led_load(void);
 
+/* The drive actually shown, time-weighted: the sum of every channel's value in
+ * the COMMITTED frame (what the row ISR drives), times the ms it was shown,
+ * accumulated since the last call, which closes the interval at `now_ms` and
+ * starts the next. Divided by the elapsed ms it is the mean drive over the
+ * interval, whatever the effect's frame pattern. Main-thread only. */
+uint64_t sn32f2xx_led_drive_take(uint32_t now_ms);
+
 /* Scale every LED's output by scale/256 (255 = unscaled) below the rgb_matrix
  * config: dim or darken the matrix without touching the user's brightness.
  * Takes effect as the next frame renders. Main-thread only. */

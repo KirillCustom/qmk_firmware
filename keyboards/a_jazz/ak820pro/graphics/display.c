@@ -270,6 +270,10 @@ uint8_t display_backlight_effective(void) {
     return display_powered ? level : 0;
 }
 
+uint8_t display_backlight_duty(void) {
+    return bkl_duty[display_backlight_effective()];
+}
+
 void display_brightness_up(void) {
     if (bkl_level < BKL_MAX_LEVEL) display_set_brightness(bkl_level + 1);
     kb_eeconfig_set_lcd_brightness(bkl_level);
@@ -817,7 +821,11 @@ static bool debug_pump_glyph(void) {
  *
  *   line 1  the pack, "3.712V"; ">4.036V" / "<3.161V" at the top and bottom
  *           clamps (bounds, never numbers, as on the Batt row); "-.---V" none
- *   line 2  the level, "58%"; "--%" unknown
+ *   line 2  the level and, on battery, the time left to the cut at the
+ *           recent draw (battery.c's energy count, Phase 2): "58% 31h",
+ *           "100% 4d" from 100 h, "9% <1h" under one, "~" in place of the
+ *           space while the average has under an hour; the level alone on USB,
+ *           at the cut or before the first minute; "--%" unknown
  *   line 3  the board's clock, "14:03:27", for time-lapse video: every frame
  *           dates itself from the clock the timekeeper keeps right
  *   line 4  the raw 5C and its age in s, "5C 62@3" (the 10x23 status face)
@@ -826,7 +834,9 @@ static bool debug_pump_glyph(void) {
  * own cell (a glyph tile paints its background too, so a space clears one).
  * Text is centred by padding within the grid; each grid's width is chosen so
  * the usual length sits exactly centred (6 chars of volts, 3 of percent, 8 of
- * clock, 7 of 5C) and the rest are off by at most half a cell. */
+ * clock, 7 of 5C) and the rest are off by at most half a cell. Line 2 is 8
+ * cells since Phase 2: "100% 51h" is eight (codex), and 8 x 15 px fits the
+ * 128 px panel. */
 #define CAM_BIG_ADV   15   /* FONT_CLOCK's advance (draw_clock's 8 * 15) */
 #define CAM_LINES     4
 #define CAM_MAX_COLS  11
@@ -836,7 +846,7 @@ typedef struct {
 } cam_line_t;
 static const cam_line_t cam_lines[CAM_LINES] = {
     {FONT_CLOCK,  CAM_BIG_ADV,     8,  4},
-    {FONT_CLOCK,  CAM_BIG_ADV,     7,  32},
+    {FONT_CLOCK,  CAM_BIG_ADV,     8,  32},
     {FONT_CLOCK,  CAM_BIG_ADV,     8,  64},
     {FONT_STATUS, FONT_STATUS_ADV, 11, 98},
 };
@@ -894,7 +904,20 @@ static void cam_compose(void) {
     if (lv > 100u) {
         cam_set(1, "--%");
     } else {
-        dbg_append(dbg_u32(t, lv), "%");
+        p = dbg_append(dbg_u32(t, lv), "%");
+        uint16_t left = battery_time_left_min();
+        if (left != 0xFFFFu) {
+            /* "~" for the space while the average is young: "100%~51h" stays
+             * eight cells. */
+            *p++ = battery_avg_minutes() < 60u ? '~' : ' ';
+            if (left < 60u) {
+                dbg_append(p, "<1h");
+            } else if (left < 100u * 60u) {
+                dbg_append(dbg_u32(p, left / 60u), "h");
+            } else {
+                dbg_append(dbg_u32(p, (left + 720u) / 1440u), "d");
+            }
+        }
         cam_set(1, t);
     }
 

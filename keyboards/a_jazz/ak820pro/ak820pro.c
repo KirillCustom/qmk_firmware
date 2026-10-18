@@ -141,6 +141,13 @@ void early_hardware_init_post(void) {
                                        * define is private to chibios.c */
 #define USB_WAKEUP_RETRY_MS      500
 
+/* battery.c's model counts the bench's USB data (R2: 7.1 mW) only while the
+ * host has configured the device; on battery that is the bench, never real
+ * use, where USB means USB power. */
+bool battery_usb_configured(void) {
+    return USB_DRIVER.state == USB_ACTIVE;
+}
+
 static void usb_wakeup_try(void) {
     if (USB_DRIVER.state != USB_SUSPENDED) return;
     if (!(USB_DRIVER.status & USB_STATUS_REMOTE_WAKEUP)) return;
