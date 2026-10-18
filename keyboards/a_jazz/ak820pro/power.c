@@ -188,9 +188,11 @@ void power_task(void) {
     }
     /* The low cap's notice: once a discharge, and only where it can be read --
      * with the screen dark it waits for it to light, and it lapses if the cap
-     * does (USB). A real charge re-arms it. */
+     * does (USB). A real charge re-arms it. Never in Minimal, which has
+     * nothing left to cap; one owed from another mode waits there, and is
+     * given after the next mode's own overlay. */
     if (low_noted && battery_session_count() != low_sessions) low_noted = false;
-    if (low && !low_noted && mode != POWER_MODE_MINIMAL) {   /* Minimal has nothing left to cap */
+    if (low && !low_noted && mode != POWER_MODE_MINIMAL) {
         low_noted    = true;
         low_owed     = true;
         low_sessions = battery_session_count();
@@ -206,7 +208,10 @@ void power_task(void) {
         shown_lit = lit;
         apply();
     }
-    if (low_owed && display_backlight_effective() > 0) {
+    /* Not over a message the band is still showing: the mode Fn+B just
+     * picked, say, would be replaced before it could be read. */
+    if (low_owed && mode != POWER_MODE_MINIMAL && display_backlight_effective() > 0 &&
+        !display_message_recent(PARAM_OVERLAY_HOLD_MS)) {
         low_owed = false;
         display_set_param_status("Saving power");
     }

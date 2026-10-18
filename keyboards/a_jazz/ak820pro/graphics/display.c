@@ -1177,6 +1177,10 @@ void display_bootloader_splash(void) {
      * readable. */
     display_set_power(true);
     display_set_brightness(display_get_brightness_max());
+    /* And lift the power ladder's cap, which a dark stage (or Minimal) left at
+     * 0: the PWM tick would drive the pin low again on its next pass, and
+     * nothing between here and the reset runs power_task() to lift it. */
+    bkl_cap = BKL_NO_CAP;
     gpio_write_pin(PANEL_BKL, 1);   // and bypass the software PWM entirely
 
     display_queue_discard();
@@ -2050,6 +2054,44 @@ static uint32_t text_stamp   = 0;
 static bool     text_present = false;
 static bool     text_dirty   = false;
 
+/* A message appeared in the band: the power ladder's Minimal mode, which keeps
+ * the backlight off on battery, lights it for a moment after one, or the
+ * message would go unseen and the key that caused it would seem broken.
+ *
+ * Noted when a message is first PAINTED, not when it is posted: a link state
+ * that changes under an alert, or an alert posted while the boot animation
+ * owns the panel, is first seen when the band shows it, and a wake started
+ * at the post could be over by then. Each source bumps its generation when
+ * its content is new -- a setting's overlay, an alert, a link state or slot,
+ * host text that differs -- and draw_text_slot() notes a generation the first
+ * time it paints one. A message the band returns to (a failed link's two
+ * texts alternating, the host text after an overlay expires) is a generation
+ * already painted, so a persistent one cannot hold the screen lit all night;
+ * nor can a host keepalive, which changes nothing. The pair gesture is noted
+ * continuously by conn_status_update() instead, for as long as it shows. */
+enum { BAND_NONE, BAND_ALERT, BAND_PARAM, BAND_PAIR, BAND_LINK, BAND_TEXT, BAND_KINDS };
+static uint16_t band_gen[BAND_KINDS];       /* bumped when a source's content is new */
+static uint16_t band_painted[BAND_KINDS];   /* the generation last painted, per source */
+static uint32_t message_at   = 0;
+static bool     message_seen = false;
+
+static void note_message(void) {
+    message_at   = timer_read32();
+    message_seen = true;
+}
+
+bool display_message_recent(uint32_t ms) {
+    return message_seen && timer_elapsed32(message_at) < ms;
+}
+
+static void band_mark_painted(uint8_t kind) {
+    if (kind == BAND_NONE || kind == BAND_PAIR) return;
+    if (band_painted[kind] != band_gen[kind]) {
+        band_painted[kind] = band_gen[kind];
+        note_message();
+    }
+}
+
 void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t len) {
     if (line >= TEXT_LINES) return;
     /* Per-line budget: line 0 loses the icon gutter, line 1 does not. */
@@ -2074,7 +2116,10 @@ void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t le
      * text_stamp still advances on EVERY push: it is the liveness heartbeat
      * behind DISPLAY_TEXT_TIMEOUT_MS, and gating it on change would expire the
      * band mid-track whenever a track ran longer than the timeout. */
-    if (strcmp(text_buf[line], prev) != 0 || new_icon != text_icon) text_dirty = true;
+    if (strcmp(text_buf[line], prev) != 0 || new_icon != text_icon) {
+        text_dirty = true;
+        band_gen[BAND_TEXT]++;
+    }
     text_icon    = new_icon;
     text_stamp   = timer_read32();
     text_present = text_buf[0][0] || text_buf[1][0] || (text_icon != DISPLAY_ICON_NONE);
@@ -2107,6 +2152,7 @@ void display_toggle_play_icon(void) {
         return;                 /* nothing playing -> nothing to guess about */
     }
     text_dirty = true;
+    band_gen[BAND_TEXT]++;
 }
 
 void display_clear_text(void) {
@@ -2203,25 +2249,6 @@ void display_set_pair_hint(int16_t pct) {
     pair_hint_pct = pct;
 }
 
-/* A message appeared in the band: the power ladder's Minimal mode, which keeps
- * the backlight off on battery, lights it for a moment after one, or the
- * message would go unseen and the key that caused it would seem broken.
- * Noted when a message APPEARS -- a setting's overlay, an alert, a
- * new link state that has words, the pair gesture -- not while one persists:
- * a failed link alternates its two texts forever and would hold the screen
- * lit all night. */
-static uint32_t message_at   = 0;
-static bool     message_seen = false;
-
-static void note_message(void) {
-    message_at   = timer_read32();
-    message_seen = true;
-}
-
-bool display_message_recent(uint32_t ms) {
-    return message_seen && timer_elapsed32(message_at) < ms;
-}
-
 #ifdef PARAM_OVERLAY
 static char     param_status_buf[CONN_STATUS_MAX + 1] = {0};
 static uint32_t param_status_since                    = 0;
@@ -2237,7 +2264,7 @@ void display_set_param_status(const char *s) {
     param_status_since = timer_read32();
     param_status_on    = true;
     text_dirty       = true;
-    note_message();
+    band_gen[BAND_PARAM]++;
 }
 #endif
 /* --- Boot alert -------------------------------------------------------------
@@ -2256,7 +2283,7 @@ void display_set_alert(const char *msg) {
     alert_since = timer_read32();
     alert_on    = true;
     text_dirty  = true;
-    note_message();
+    band_gen[BAND_ALERT]++;
 }
 
 static bool alert_active(void) {
@@ -2268,6 +2295,7 @@ static bool alert_active(void) {
 }
 
 static const char *conn_status_str   = NULL;   /* NULL = host text owns the band */
+static uint8_t     conn_status_kind  = BAND_NONE;   /* conn_status_str's source */
 static uint32_t    conn_status_since = 0;
 
 static void conn_status_update(void) {
@@ -2297,6 +2325,7 @@ static void conn_status_update(void) {
         last_slot = slot;
         changed   = true;
     }
+    if (changed) band_gen[BAND_LINK]++;   /* even while hidden: first painted later */
 
     const char *want = NULL;
 
@@ -2308,6 +2337,7 @@ static void conn_status_update(void) {
             conn_status_str = alert_buf;
             text_dirty      = true;
         }
+        conn_status_kind = BAND_ALERT;
         return;
     }
 
@@ -2324,6 +2354,7 @@ static void conn_status_update(void) {
                 conn_status_str = param_status_buf;
                 text_dirty      = true;
             }
+            conn_status_kind = BAND_PARAM;
             return;
         }
     }
@@ -2355,6 +2386,7 @@ static void conn_status_update(void) {
             conn_status_str = conn_status_buf;
             text_dirty      = true;
         }
+        conn_status_kind = BAND_PAIR;
         return;
     }
 
@@ -2439,7 +2471,7 @@ static void conn_status_update(void) {
         conn_status_str = want;
         text_dirty      = true;   /* overlay appeared, changed, or was released */
     }
-    if (changed && want) note_message();   /* a new link state with words, not its alternation */
+    conn_status_kind = want ? BAND_LINK : BAND_NONE;
 }
 
 /* ---- Text band: draw a BOUNDED number of glyphs per pass -------------------
@@ -2813,6 +2845,7 @@ static void draw_text_slot(bool force) {
     }
 
     /* --- text ------------------------------------------------------------- */
+    band_mark_painted(conn_status_str ? conn_status_kind : text_present ? BAND_TEXT : BAND_NONE);
     if (conn_status_str) {
         queue_line(0, FONT_STATUS, CONN_STATUS_X, TEXT_Y + TEXT_BIG_DY, conn_status_str);
         retire_line(1);
