@@ -485,11 +485,15 @@ static bool     full       = false;
  * (the vector table and the row ISR live in flash, and the M0 has no VTOR) and
  * a row left lit across one shows at ~18x (docs/leds.md). JD sees the blink;
  * 2026-09-29. Saving every whole-percent change was ~100
- * writes a discharge. The restore only uses a value in the clamp's 90..100
- * band, so save only there, in 2.5% steps, rounded DOWN so a restore never
+ * writes a discharge. The restore is only used at a clamped boot, so save in
+ * the 90..100 band, in 2.5% steps, rounded DOWN so a restore never
  * overstates: FULL (on USB), then 97.5, 95, 92.5, 90 on battery, and one marker
- * below the band so a stale 9x is not restored after a pack swap. Six writes a
- * charge cycle; nothing while charging. */
+ * below the band, which a clamped boot restores as itself, 89% (Phase 2: the
+ * count runs below 90% while a light load keeps the pack clamped). Lossy: a
+ * stale marker after a partial charge or a pack swap reads up to ~9 low until
+ * the count and the voltage meet (codex, Phase 2 verify 2; reboots are outside
+ * the gauge's accuracy target). Six writes a charge cycle; nothing while
+ * charging. */
 #define LEVEL_SAVE_BELOW_BAND 890u
 
 static uint16_t level_save_point(void) {
