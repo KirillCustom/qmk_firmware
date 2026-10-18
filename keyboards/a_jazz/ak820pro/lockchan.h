@@ -19,15 +19,20 @@
  * CRC-16 over at most 52 bytes when a payload completes. */
 
 #define LOCKCHAN_MAX_PAYLOAD 48
-#define LOCKCHAN_GAP_MS      150u     /* between transitions inside a frame */
-#define LOCKCHAN_QUIET_MS    100u     /* before a preamble's first transition */
+#define LOCKCHAN_GAP_MS      500u     /* between transitions once synced (366 ms seen, 10-18) */
+/* Before a preamble's first transition, and the most between its three: a
+ * transition this long after the last starts a preamble, a sooner one
+ * continues it, so a stray light change just before a frame cannot pass for
+ * its first transition. */
+#define LOCKCHAN_QUIET_MS    150u
 #define LOCKCHAN_LIFETIME_MS 12000u   /* a whole frame; P0's longest is ~8.7 s */
 
 /* Profiles: which LED bits carry data. Caps (0x02) never does. */
 enum {
     LOCKCHAN_P0 = 0,   /* Num + Scroll, base 3 (two lights; Windows' toggles) */
-    LOCKCHAN_P1 = 1,   /* Num + bits 3-4, base 7 (the default; Scroll untouched) */
+    LOCKCHAN_P1 = 1,   /* Num + bits 3-4, base 7 (Scroll untouched) */
     LOCKCHAN_P2 = 2,   /* Num + Scroll + bits 3-4, base 15 */
+    LOCKCHAN_P3 = 3,   /* bits 3-7, base 31: no light of the three ever moves */
     LOCKCHAN_NPROFILES
 };
 

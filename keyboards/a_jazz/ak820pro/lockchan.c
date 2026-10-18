@@ -7,15 +7,16 @@
 #include <string.h>
 
 #define CAPS_BIT   0x02u
-#define DATA_BITS  0x1Du   /* every bit any profile uses: Num, Scroll, 3, 4 */
+#define DATA_BITS  0xFDu   /* every bit any profile uses: all but Caps */
 #define PRE_HIGH   0x18u   /* the P1/P2 preamble flips bits 3-4 together */
+#define PRE_PAD    0xE0u   /* the P3 preamble flips the padding bits 5-7 together */
 #define PRE_LOW    0x05u   /* the P0 preamble flips Num and Scroll together */
 
 enum { ST_IDLE, ST_PRE, ST_HDR, ST_PAY, ST_TRL };
 
 typedef struct {
     uint8_t mask;          /* the data bits, OR'd */
-    uint8_t bits[4];       /* the data bits, digit-subset order */
+    uint8_t bits[5];       /* the data bits, digit-subset order */
     uint8_t nbits;         /* how many */
     uint8_t base;          /* 2^nbits - 1: a transition is a non-empty subset */
     uint8_t block_bits;    /* bits per full block, */
@@ -23,11 +24,12 @@ typedef struct {
     uint8_t trl_a, trl_b;  /* the trailer's middle step flips one of these */
 } profile_t;
 
-/* base^block_digits >= 2^block_bits, and fits a uint32_t (15^8 < 2^32). */
+/* base^block_digits >= 2^block_bits, and fits a uint32_t (15^8 and 31^6 < 2^32). */
 static const profile_t profiles[LOCKCHAN_NPROFILES] = {
     [LOCKCHAN_P0] = {0x05, {0x01, 0x04}, 2, 3, 19, 12, 0x01, 0x04},
     [LOCKCHAN_P1] = {0x19, {0x01, 0x08, 0x10}, 3, 7, 14, 5, 0x08, 0x10},
     [LOCKCHAN_P2] = {0x1D, {0x01, 0x04, 0x08, 0x10}, 4, 15, 31, 8, 0x08, 0x10},
+    [LOCKCHAN_P3] = {0xF8, {0x08, 0x10, 0x20, 0x40, 0x80}, 5, 31, 29, 6, 0x08, 0x10},
 };
 
 /* Digits that carry r bits: the least n with base^n >= 2^r (r <= block_bits). */
@@ -105,11 +107,11 @@ static bool section_digit(lockchan_t *lc, uint8_t *dst, uint8_t d) {
 static void end_header(lockchan_t *lc) {
     uint8_t ver = lc->hdr[0] >> 6, prof = (lc->hdr[0] >> 4) & 3u, len = lc->hdr[2];
     if (crc8(lc->hdr, 3) != lc->hdr[3]) { abort_frame(lc, LOCKCHAN_ABORT_HEADER_CRC); return; }
-    /* A bits 3-4 preamble (header in P1) may announce P1 or P2; a Num + Scroll
-     * one (header in P0), only P0. */
+    /* A bits 3-4 preamble (header in P1) may announce P1 or P2; a padding-bits
+     * one (header in P3), only P3; a Num + Scroll one (header in P0), only P0. */
     bool ok = ver == 0 && len <= LOCKCHAN_MAX_PAYLOAD &&
               (lc->sec_profile == LOCKCHAN_P1 ? (prof == LOCKCHAN_P1 || prof == LOCKCHAN_P2)
-                                              : prof == LOCKCHAN_P0);
+                                              : prof == lc->sec_profile);
     if (!ok) { abort_frame(lc, LOCKCHAN_ABORT_HEADER); return; }
     lc->pay_profile = prof;
     memset(lc->buf, 0, sizeof(lc->buf));
@@ -147,7 +149,7 @@ static bool commit(lockchan_t *lc, uint32_t now) {
 /* IDLE: is this transition a preamble's first? */
 static void idle_transition(lockchan_t *lc, uint8_t prev, uint8_t x, uint32_t quiet, uint32_t now) {
     if (quiet < LOCKCHAN_QUIET_MS) return;
-    if (x == PRE_HIGH && (prev & PRE_HIGH) == 0) lc->pre_mask = PRE_HIGH;
+    if ((x == PRE_HIGH || x == PRE_PAD) && (prev & x) == 0) lc->pre_mask = x;
     else if (x == PRE_LOW) lc->pre_mask = PRE_LOW;
     else return;
     lc->st             = ST_PRE;
@@ -175,13 +177,15 @@ bool lockchan_feed(lockchan_t *lc, uint8_t leds, uint32_t now) {
         uint32_t quiet     = now - lc->last_change_ms;
         lc->last_change_ms = now;
         if (lc->st == ST_PRE) {
-            if (quiet <= LOCKCHAN_GAP_MS && x == lc->pre_mask) {
+            if (quiet < LOCKCHAN_QUIET_MS && x == lc->pre_mask) {
                 if (++lc->pre_n == 3) {
                     lc->preambles++;
                     lc->anchor_ms = now;
                     lc->st        = ST_HDR;
                     memset(lc->hdr, 0, sizeof(lc->hdr));
-                    start_section(lc, lc->pre_mask == PRE_HIGH ? LOCKCHAN_P1 : LOCKCHAN_P0, 32);
+                    start_section(lc, lc->pre_mask == PRE_HIGH  ? LOCKCHAN_P1
+                                      : lc->pre_mask == PRE_PAD ? LOCKCHAN_P3
+                                                                : LOCKCHAN_P0, 32);
                 }
                 return false;
             }
@@ -204,7 +208,7 @@ bool lockchan_feed(lockchan_t *lc, uint8_t leds, uint32_t now) {
         return false;
     }
     uint8_t x = xd & p->mask;
-    if (!x) return false;   /* bits this section does not use: Scroll, under P1 */
+    if (!x) return false;   /* bits this section does not use: Scroll under P1, Num and Scroll under P3 */
     lc->last_change_ms = now;
     if (now - lc->frame_start_ms > LOCKCHAN_LIFETIME_MS) { abort_frame(lc, LOCKCHAN_ABORT_LIFETIME); return false; }
     switch (lc->st) {
@@ -236,9 +240,12 @@ void lockchan_poll(lockchan_t *lc, uint32_t now, bool linked) {
         return;
     }
     if (lc->st == ST_IDLE) return;
+    if (lc->st == ST_PRE) {   /* the next transition would start a new one */
+        if (now - lc->last_change_ms >= LOCKCHAN_QUIET_MS) lc->st = ST_IDLE;
+        return;
+    }
     if (now - lc->last_change_ms > LOCKCHAN_GAP_MS) {
-        if (lc->st == ST_PRE) lc->st = ST_IDLE;
-        else abort_frame(lc, LOCKCHAN_ABORT_GAP);
+        abort_frame(lc, LOCKCHAN_ABORT_GAP);
     } else if (now - lc->frame_start_ms > LOCKCHAN_LIFETIME_MS) {
         abort_frame(lc, LOCKCHAN_ABORT_LIFETIME);
     }

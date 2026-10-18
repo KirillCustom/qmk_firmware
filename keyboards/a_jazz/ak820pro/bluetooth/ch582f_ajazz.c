@@ -351,8 +351,9 @@ void ch582_led5a_reset(void) {
 /* The lock-LED channel's receiver (lockchan.c; plans/LOCK-LED-CHANNEL-PLAN.md).
  * Dev builds only while it is an experiment: frames are decoded and counted,
  * and HC_DEVHOOK ops 10-13 read them; nothing acts on them yet. Fed every 5A
- * byte while linked, raw (before the d <= 0x1F guard, which it does not need:
- * it reads bits 0-4 only). Zero-initialised, which is lockchan_init's state. */
+ * byte while linked, raw (before the d <= 0x1F guard: P3 carries data in the
+ * padding bits 5-7, which the module passes and the guard keeps from QMK).
+ * Zero-initialised, which is lockchan_init's state. */
 static lockchan_t lockchan;
 
 const lockchan_t *ch582_lockchan(void) { return &lockchan; }
