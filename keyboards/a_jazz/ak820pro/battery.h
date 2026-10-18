@@ -122,7 +122,7 @@ uint16_t battery_led_pm(void);
 enum {
     BATTERY_COUNT_OFF = 0,   /* not on battery */
     BATTERY_COUNT_RUN,       /* counting, inside or above the band */
-    BATTERY_COUNT_CLAMP,     /* counting at the top clamp, floored at 90.5% */
+    BATTERY_COUNT_CLAMP,     /* counting at the top clamp, which bounds nothing */
     BATTERY_COUNT_HELD,      /* below the band: waiting for the voltage */
     BATTERY_COUNT_RELAX,     /* after an unplug, until the re-seat */
     BATTERY_COUNT_CUT,       /* 0%: the protection's cut */
@@ -135,6 +135,9 @@ uint32_t battery_energy_used_mwh_x10(void);
 uint8_t  battery_count_state(void);
 int16_t  battery_band_lower(void);
 int16_t  battery_band_upper(void);
+/* Real charging sessions (CHRG low 60 s) since boot, wrapping: power.c re-arms
+ * its low-battery notice on a change, as the warning re-arms on a session. */
+uint16_t battery_session_count(void);
 /* Provided by the board (ak820pro.c): USB configured by a host. */
 bool     battery_usb_configured(void);
 

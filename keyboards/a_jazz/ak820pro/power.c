@@ -53,10 +53,10 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
 #define BACKLIGHT_NO_CAP 0xFFu
 /* Below this level on battery, the lighting follows Power Saver's stages
  * whatever the mode (BATTERY-GAUGE-PLAN.md, "Low battery"). Lighting only:
- * the radio is never the gauge's to touch. Its notice re-arms only once the
- * level is back above LOW_REARM_PM, which on battery only a charge does. */
+ * the radio is never the gauge's to touch. Its notice is given once a
+ * discharge and re-arms on a real charging session, as the battery warning
+ * does (codex). */
 #define LOW_CAP_PM        150u
-#define LOW_REARM_PM      200u
 /* A mode left unset (a flash erased the EEPROM) is announced this long after
  * boot, when the panel is up. */
 #define ANNOUNCE_AFTER_MS 3000u
@@ -66,6 +66,7 @@ static power_mode_t  mode       = POWER_MODE_NORMAL;
 static bool          lights_cut = false;
 static bool          low_noted  = false;   /* the low cap's notice given (or owed) */
 static bool          low_owed   = false;   /* ... and waiting for a lit screen */
+static uint16_t      low_sessions = 0;     /* battery_session_count() when it was noted */
 static bool          announce   = false;
 static uint8_t       val_cap    = 255;
 #ifdef AK820_DEV_HOOKS
@@ -107,10 +108,12 @@ static void apply(void) {
     /* Every LED through the new caps at once: the driver's scale applies only
      * as an LED is set, and the value cap only as a colour is converted, and
      * an effect that rewrites a few LEDs a frame (Jellybean Raindrops) would
-     * leave the rest as they were (codex). Restarting the effect makes it
-     * paint them all. No EEPROM write (_noeeprom), the same mode, so the
-     * parameter overlay, which polls the config, sees nothing. */
-    if (repaint && rgb_matrix_is_enabled()) rgb_matrix_mode_noeeprom(rgb_matrix_get_mode());
+     * leave the rest as they were (codex). Re-running the effect's init pass
+     * makes it paint them all (rgb_matrix_reinit_effect, a local core hook:
+     * rgb_matrix_mode_noeeprom on the same mode does not set init). No
+     * config change, so no EEPROM write and no parameter overlay; an effect's
+     * own state restarts (Typing Heatmap's history), at each stage change. */
+    if (repaint && rgb_matrix_is_enabled()) rgb_matrix_reinit_effect();
 }
 
 /* The dim stage's ceiling on every colour the effects convert, QMK's weak hook
@@ -173,12 +176,15 @@ void power_task(void) {
         }
     }
     /* The low cap's notice: once a discharge, and only where it can be read --
-     * with the backlight off it waits for the keypress that lights it. */
+     * with the screen dark it waits for it to light, and it lapses if the cap
+     * does (USB). A real charge re-arms it. */
+    if (low_noted && battery_session_count() != low_sessions) low_noted = false;
     if (low && !low_noted) {
-        low_noted = true;
-        low_owed  = true;
+        low_noted    = true;
+        low_owed     = true;
+        low_sessions = battery_session_count();
     }
-    if (level != 0xFFFFu && level > LOW_REARM_PM) low_noted = false;
+    if (!low) low_owed = false;
 #ifdef AK820_DEV_HOOKS
     if (forced != 0xFF) want = (power_stage_t)forced;
 #endif
@@ -186,7 +192,7 @@ void power_task(void) {
         stage = want;
         apply();
     }
-    if (low_owed && stage != POWER_STAGE_SCREEN_OFF) {
+    if (low_owed && display_backlight_effective() > 0) {
         low_owed = false;
         display_set_param_status("Saving power");
     }

@@ -171,6 +171,7 @@ static uint8_t          adc_fail_run  = 0;   /* consecutive failed conversions *
 static uint16_t         ext_evidence_ticks = 0;
 static bool             chg_was       = false;   /* charging_now() last tick */
 static bool             session       = false;
+static uint16_t         session_count = 0;   /* real charging sessions this boot (power.c's re-arm) */
 static bool             ran_from_pack = false;
 /* Set when the board goes onto the pack after a real charging session: the
  * level re-seats once, from the first post-unplug estimate (see level_report).
@@ -240,9 +241,13 @@ static void supply_tick(uint16_t raw_mv) {
         ran_from_pack = true;
         session       = false;
     }
-    if (chrg_run >= SESSION_TICKS) session = true;
+    if (chrg_run >= SESSION_TICKS && !session) {
+        session = true;
+        session_count++;
+    }
 }
 
+uint16_t battery_session_count(void) { return session_count; }
 battery_supply_t battery_supply(void) { return supply; }
 bool battery_on_battery(void)         { return supply == BATTERY_SUPPLY_BATTERY; }
 bool battery_ran_from_pack(void)      { return ran_from_pack; }
@@ -453,12 +458,6 @@ static uint16_t c5_level(uint16_t e) {
 
 #define LEVEL_UNKNOWN      0xFFFFu
 #define LEVEL_FULL         1000u
-/* The countdown in the top clamp never goes below this: the clamp's exit is
- * 90%, and it is the voltage's job to say when the pack has got there. Just
- * above the exit, so with a whole-percent (or tenths) panel the countdown runs
- * into the voltage's 90 without a step. (It was 925 while the panel showed 5%
- * steps, the lowest level that still rounded to 95.) */
-#define LEVEL_CLAMP_FLOOR  905u
 /* Booted at the top clamp: the voltage says only "90..100", so take the level
  * saved before the reboot (every cable <-> BT slider flip is one) if it is in
  * that band. With nothing saved -- only after a flash erased it -- guess the
@@ -605,8 +604,20 @@ static int32_t band_lower(uint16_t mv) {
     return lo < 0 ? 0 : lo;
 }
 static int32_t band_upper(uint16_t mv) {
+    /* An allowance reaching past the curve's top knot reaches the clamp, where
+     * the curve says only "at least 90%": no bound (codex: 900 + 15 there
+     * ratcheted a right count down from 4011 mV up). */
+    if ((uint32_t)mv + BAND_MV_UP >= curve_mv[CURVE_N - 1]) return (int32_t)LEVEL_FULL;
     int32_t hi = (int32_t)curve((uint16_t)(mv + BAND_MV_UP)) + BAND_PM;
     return hi > (int32_t)LEVEL_FULL ? (int32_t)LEVEL_FULL : hi;
+}
+
+/* A level on battery: 0 only from the protection's cut, which is authoritative;
+ * otherwise never under the count's 1% floor (codex: a boot at 3424 mV read
+ * 0% above the cut). */
+static uint16_t battery_floor(uint16_t lv) {
+    if (power_lights_cut()) return 0;
+    return lv < COUNT_FLOOR_PM ? COUNT_FLOOR_PM : lv;
 }
 
 /* The re-seat's and the handover's rule for a known level against a relaxed
@@ -629,12 +640,13 @@ static void energy_full(void) {
     band_hold = false;
 }
 
-/* The model's energy over `dt` ms, given the LED drive's sum x ms over it. */
-static uint64_t model_nj(uint32_t dt, uint64_t drive_ms) {
+/* The model's energy over `dt` ms, given the LED drive's sum x ms over it and
+ * the ms any LED was lit: the RGB's intercept only for the lit time (codex). */
+static uint64_t model_nj(uint32_t dt, uint64_t drive_ms, uint32_t lit_ms) {
     uint64_t uw = P_BASE_UW + (uint64_t)P_BKL_FULL_UW * display_backlight_duty() / BKL_DUTY_FULL;
     if (battery_usb_configured()) uw += P_USB_UW;
     uint64_t e = uw * dt;
-    if (drive_ms) e += (uint64_t)P_RGB_A_UW * dt + (drive_ms * P_RGB_B_NW) / 1000u;
+    e += (uint64_t)P_RGB_A_UW * (lit_ms < dt ? lit_ms : dt) + (drive_ms * P_RGB_B_NW) / 1000u;
     return e;
 }
 
@@ -643,7 +655,8 @@ static uint64_t model_nj(uint32_t dt, uint64_t drive_ms) {
  * second never inherits a USB stretch's frames. */
 static void energy_tick(void) {
     uint32_t now      = timer_read32();
-    uint64_t drive_ms = sn32f2xx_led_drive_take(now);
+    uint32_t lit_ms   = 0;
+    uint64_t drive_ms = sn32f2xx_led_drive_take(now, &lit_ms);
     if (!e_started) {
         e_started = true;
         e_last_ms = now;
@@ -659,29 +672,37 @@ static void energy_tick(void) {
         e_minute_nj = 0;
         return;
     }
-    uint64_t e = model_nj(dt, drive_ms);
+    uint64_t e = model_nj(dt, drive_ms, lit_ms);
     p_now_uw   = (uint32_t)(e / dt);
     e_used_nj += e;
     e_period_nj += e;
     e_minute_nj += e;
 
-    if (level != LEVEL_UNKNOWN && !reseat) {
-        bool clamp = c5_top(battery_5c_x100());
-        uint16_t floor = clamp ? LEVEL_CLAMP_FLOOR : COUNT_FLOOR_PM;
-        if (level == 0) {
-            count_state = BATTERY_COUNT_CUT;
-            count_nj    = 0;
-        } else if (band_hold && !clamp) {
+    uint16_t est = battery_5c_x100();
+    if (est == C5_EST_NONE) band_hold = false;   /* no fresh evidence, no hold (codex) */
+    if (power_lights_cut()) {
+        /* The cut's latch is authoritative: 0, whatever is owed. */
+        level       = 0;
+        reseat      = false;
+        count_state = BATTERY_COUNT_CUT;
+        count_nj    = 0;
+    } else if (level != LEVEL_UNKNOWN && !reseat) {
+        /* At the top clamp nothing bounds the count: the clamp's 90% holds
+         * only at full white, and lighter loads (the ladder) stay clamped
+         * lower, so the old countdown's 90.5% floor would hold a level up and
+         * drop its energy (codex). */
+        bool clamp = c5_top(est);
+        if (band_hold && !clamp) {
             count_state = BATTERY_COUNT_HELD;
             count_nj    = 0;   /* dropped, not banked */
         } else {
             count_state = clamp ? BATTERY_COUNT_CLAMP : BATTERY_COUNT_RUN;
             count_nj += e;
-            while (count_nj >= E_PM_NJ && level > floor) {
+            while (count_nj >= E_PM_NJ && level > COUNT_FLOOR_PM) {
                 count_nj -= E_PM_NJ;
                 level--;
             }
-            if (level <= floor) count_nj = 0;
+            if (level <= COUNT_FLOOR_PM) count_nj = 0;
         }
     } else if (reseat && level != LEVEL_UNKNOWN) {
         /* Relaxing after an unplug: the level is the charging model's, and it
@@ -716,7 +737,8 @@ uint32_t battery_power_uw(void)     { return p_now_uw; }
 uint32_t battery_power_avg_uw(void) { return p_avg_uw > 0 ? (uint32_t)p_avg_uw : 0u; }
 uint16_t battery_avg_minutes(void)  { return avg_minutes; }
 uint16_t battery_time_left_min(void) {
-    if (supply != BATTERY_SUPPLY_BATTERY || level == LEVEL_UNKNOWN || level == 0) return 0xFFFFu;
+    if (supply != BATTERY_SUPPLY_BATTERY || level == LEVEL_UNKNOWN || level == 0 || power_lights_cut())
+        return 0xFFFFu;
     return left_min;
 }
 uint32_t battery_energy_used_mwh_x10(void) { return (uint32_t)(e_used_nj / NJ_PER_MWH_X10); }
@@ -991,12 +1013,14 @@ static void chg_tick_1hz(void) {
 }
 
 /* The re-seat at unplug and the handover's adoption share one rule, for a
- * relaxed estimate: below the clamp the curve, up or down, once; at the clamp
- * (the pack is >= 4.036 V, so >= 90%) a known level is lifted to the floor and
- * an unknown one takes the clamp's guess. */
+ * relaxed estimate. An unknown level takes the curve (or, at the clamp, the
+ * clamp's guess). A known one -- the charging model's, counted down since the
+ * unplug -- is kept inside the band, else moved to its nearer edge; at the
+ * clamp it is kept (Phase 2: the clamp is no bound under a light load). On
+ * battery the result keeps the 1% floor, and the cut's 0 wins. */
 static void adopt_relaxed(uint16_t m) {
     if (c5_top(m)) {
-        level = (level == LEVEL_UNKNOWN) ? LEVEL_CLAMP_GUESS : (level > LEVEL_CLAMP_FLOOR ? level : LEVEL_CLAMP_FLOOR);
+        if (level == LEVEL_UNKNOWN) level = LEVEL_CLAMP_GUESS;
     } else if (level == LEVEL_UNKNOWN || c5_bottom(m)) {
         level = c5_level(m);
     } else {
@@ -1005,6 +1029,7 @@ static void adopt_relaxed(uint16_t m) {
          * edge. Adopting the curve outright put the plateau's error back. */
         level = band_clamp(level, c5_to_mv(m));
     }
+    if (supply == BATTERY_SUPPLY_BATTERY) level = battery_floor(level);
     count_rebase();
     band_hold = false;
     relax_done = false;
@@ -1026,6 +1051,12 @@ static void full_tick(void) {
 /* One new fresh estimate, in hundredths of a count. */
 static void level_report(uint16_t m) {
     if (supply == BATTERY_SUPPLY_BATTERY) {
+        if (power_lights_cut()) {   /* the cut's 0 is authoritative (codex) */
+            level     = 0;
+            reseat    = false;
+            below_run = 0;
+            return;
+        }
         if (reseat) {
             /* The re-seat after a real charge: owed from the unplug, resolved
              * by the first estimate built only from reports received RELAX_S
@@ -1040,18 +1071,17 @@ static void level_report(uint16_t m) {
         }
         if (c5_top(m)) {
             /* The top clamp: the count (energy_tick) owns it, from wherever
-             * charging left the level, floored at LEVEL_CLAMP_FLOOR. */
+             * charging left the level, with no bound from the voltage. */
             if (level == LEVEL_UNKNOWN) level = level_at_clamp_boot();
             below_run = 0;
             band_hold = false;
             return;
         }
         if (level == LEVEL_UNKNOWN) {   /* the first reading on the pack */
-            level = c5_level(m);
+            level = battery_floor(c5_level(m));
             count_rebase();
             return;
         }
-        if (level == 0) return;   /* the cut's: only a charge lifts it */
         uint16_t mv     = c5_to_mv(m);
         int32_t  upper  = band_upper(mv);
         band_hold       = (int32_t)level < band_lower(mv);
@@ -1098,8 +1128,10 @@ static void level_report(uint16_t m) {
         level = target;
         return;
     }
-    /* Below the clamp: follow the estimate. */
-    level_toward(target);
+    /* Below the clamp, the charger idle: the pack is neither charging nor
+     * discharging, so a known level stays, bounded by the band. Walking it to
+     * the curve put the plateau's error back after every handover (codex). */
+    level_toward(band_clamp(level, c5_to_mv(m)));
 }
 
 /* Supply changes (supply_tick). An unplug closes the model; after a real

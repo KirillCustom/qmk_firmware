@@ -410,6 +410,17 @@ static void rgb_task_render(uint8_t effect) {
     }
 }
 
+/* Run the current effect's init pass again, from the start of a frame, so it
+ * repaints every LED. A board that caps the output below the effect (the AK820
+ * Pro's power ladder, keyboards/a_jazz/ak820pro/power.c) calls it when a cap
+ * moves: an effect that rewrites only some LEDs a frame would otherwise leave
+ * the rest as they were. Re-initialising resets the effect's own state
+ * (Typing Heatmap's history, for one). Unused by other boards. */
+void rgb_matrix_reinit_effect(void) {
+    rgb_last_effect = UINT8_MAX;
+    rgb_task_state  = STARTING;
+}
+
 static void rgb_task_flush(uint8_t effect) {
     // update last trackers after the first full render so we can init over several frames
     rgb_last_effect = effect;

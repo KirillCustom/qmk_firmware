@@ -193,6 +193,9 @@ void        rgb_matrix_disable_noeeprom(void);
 uint8_t     rgb_matrix_is_enabled(void);
 void        rgb_matrix_mode(uint8_t mode);
 void        rgb_matrix_mode_noeeprom(uint8_t mode);
+/* Re-run the current effect's init pass so it repaints every LED (a board's
+ * power caps moved below it). */
+void rgb_matrix_reinit_effect(void);
 uint8_t     rgb_matrix_get_mode(void);
 void        rgb_matrix_step(void);
 void        rgb_matrix_step_noeeprom(void);

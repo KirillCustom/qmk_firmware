@@ -850,16 +850,21 @@ void sn32f2xx_blank(void) {
 static uint32_t drive_now   = 0;   /* the committed frame's channel sum */
 static uint32_t drive_since = 0;   /* when it was committed, ms */
 static uint64_t drive_acc   = 0;   /* sum x ms since the last take */
+static uint32_t drive_lit   = 0;   /* ms with any channel lit, since the last take */
 
 static void drive_close(uint32_t now) {
-    drive_acc += (uint64_t)drive_now * (uint32_t)(now - drive_since);
+    uint32_t dt = now - drive_since;
+    drive_acc += (uint64_t)drive_now * dt;
+    if (drive_now) drive_lit += dt;
     drive_since = now;
 }
 
-uint64_t sn32f2xx_led_drive_take(uint32_t now_ms) {
+uint64_t sn32f2xx_led_drive_take(uint32_t now_ms, uint32_t *lit_ms) {
     drive_close(now_ms);
     uint64_t r = drive_acc;
     drive_acc  = 0;
+    if (lit_ms) *lit_ms = drive_lit;
+    drive_lit = 0;
     return r;
 }
 
