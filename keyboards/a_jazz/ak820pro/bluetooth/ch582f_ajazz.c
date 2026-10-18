@@ -1251,6 +1251,11 @@ void ch582_task(void) {
                             is_pairing          = false;
                             conn_state          = CH582_CONN_CONNECTED;
                             connected_slot      = profile_to_slot(requested_profile);
+                            /* A link-up is a new link even if its down state was
+                             * lost: the channel starts over. Sent once at link-up
+                             * (docs/wireless.md), so it never cuts a live frame
+                             * short (codex, flash 2h verify 3). */
+                            LOCKCHAN_LINK_LOST();
                             break;
                         case 0x31: /* advertising / pairing, waiting for a device */
                             /* PA_BOUNCE survives here too, same reason as 32. */
