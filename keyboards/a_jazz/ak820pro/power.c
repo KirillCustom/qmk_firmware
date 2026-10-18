@@ -147,6 +147,10 @@ void power_set_lights_cut(bool cut) {
     apply();
 }
 
+bool power_rgb_dark(void) {
+    return applied_scale == 0;
+}
+
 bool power_lights_cut(void) {
     return lights_cut;
 }

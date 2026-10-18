@@ -129,6 +129,11 @@ bool display_message_recent(uint32_t ms);
  * would replace one, or expire behind it unseen. power.c's low notice waits
  * for this to clear. */
 bool display_band_busy(void);
+/* Nothing queued for the panel and no transfer in flight (a sleep's
+ * precondition); and the backlight pin driven low (a stopped 20 kHz tick
+ * leaves it where it was). */
+bool display_bus_idle(void);
+void display_backlight_pin_off(void);
 /* Recompose the page on the next tick without waiting for the second edge, so a
  * counter reset shows its zeros immediately. No-op when the page is closed. */
 void display_debug_refresh(void);

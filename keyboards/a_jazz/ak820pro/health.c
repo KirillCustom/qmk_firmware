@@ -173,6 +173,7 @@ uint8_t health_last_mark(void) { return last_mark; }
 
 void health_note_flash_write(void) { flash_writes++; }
 void health_note_key_press(void)   { key_presses++; }
+uint16_t health_key_presses(void)  { return key_presses; }
 
 void health_reset(void) {
     /* Watchdog counters are boot facts and are NOT cleared -- see health.h. */

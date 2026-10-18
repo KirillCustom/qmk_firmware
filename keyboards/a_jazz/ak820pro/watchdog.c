@@ -116,6 +116,7 @@ void watchdog_stop(void) {
 uint8_t watchdog_reset_count(void)   { return consec_resets; }
 bool    watchdog_fired_last_boot(void) { return fired_last; }
 bool    watchdog_degraded(void)      { return degraded_mode; }
+bool    watchdog_running(void)       { return wdg_running && !degraded_mode; }
 
 /* Stop the watchdog before entering the bootloader. The weak default in
  * platforms/chibios/bootloaders/sn32_dfu.c writes the RAM magic and calls
@@ -140,5 +141,6 @@ uint8_t watchdog_boot_rstst(void) { return 0; }
 uint8_t watchdog_reset_count(void) { return 0; }
 bool    watchdog_fired_last_boot(void) { return false; }
 bool    watchdog_degraded(void) { return false; }
+bool    watchdog_running(void) { return false; }
 
 #endif

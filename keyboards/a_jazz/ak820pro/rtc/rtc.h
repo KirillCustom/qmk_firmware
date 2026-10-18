@@ -47,6 +47,10 @@ uint32_t rtc_get_period(void);
  * auto-calibration pass when one is due. Cheap no-op otherwise. Call every
  * housekeeping pass from thread context. */
 void rtc_task(void);
+/* Deep sleep: nothing in flight that a skipped second handler would break;
+ * and the seconds slept, handed back with interrupts locked (I-class). */
+bool rtc_sleep_ok(void);
+void rtc_account_sleepI(uint32_t seconds);
 
 /* How many PCF8563 transactions would have collided with a live flash->LCD DMA.
  * See the bus-guard note in rtc.c: the bit-banged I2C shares port A with the

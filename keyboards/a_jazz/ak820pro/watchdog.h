@@ -26,3 +26,5 @@ bool watchdog_fired_last_boot(void);
 /* Too many consecutive WDT resets: the watchdog stays unarmed this boot so
  * a deterministic boot-time failure cannot become an endless reset loop. */
 bool watchdog_degraded(void);
+/* Armed and counting: what a deep sleep's recovery relies on. */
+bool watchdog_running(void);

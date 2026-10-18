@@ -56,6 +56,8 @@ void kb_eeconfig_set_batt_level(uint16_t permille);
 bool kb_eeconfig_get_power_mode(uint8_t *mode);
 void kb_eeconfig_set_power_mode(uint8_t mode);
 
+/* A change is waiting for its deferred flash write (a sleep's precondition). */
+bool kb_eeconfig_write_pending(void);
 #ifdef WDT_TEST_HOOKS
 /* Force a real, immediate flash program (for the reset-during-write test). */
 void kb_eeconfig_test_write(void);

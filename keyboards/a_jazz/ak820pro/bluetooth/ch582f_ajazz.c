@@ -720,6 +720,10 @@ static void ch582_tx_pump(void) {
     tx_stat_sent++;
 }
 
+bool ch582_tx_idle(void) {
+    return !tx_in_flight && tx_head == tx_tail;
+}
+
 bool ch582_tx_drain(uint16_t timeout_ms) {
     /* A reset that beats the main loop's pump strands whatever is queued: for
      * the jump, the key releases just queued, which would leave a key down at

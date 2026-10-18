@@ -38,6 +38,8 @@ void ch582_send_keyboard_report(report_keyboard_t *report);
  * timeout, or if any frame was given up rather than ACKed meanwhile. For the
  * raw-HID bootloader jump (hid_protocol.c). */
 bool ch582_tx_drain(uint16_t timeout_ms);
+/* Nothing queued and nothing awaiting an ACK (a sleep's precondition). */
+bool ch582_tx_idle(void);
 /* Queue fresh all-released keyboard (A1) and consumer (A3) frames, whatever
  * QMK last sent. False if a full queue dropped either. For the same jump. */
 bool ch582_send_releases(void);

@@ -41,6 +41,7 @@ SRC += power.c       # power caps: the low-battery lights cut; the idle ladder o
 SRC += hid_protocol.c # raw-HID channels 0x10-0x13 + VIA/non-VIA dispatch
 SRC += flash_stats.c  # C1: which writer each internal-flash write session belongs to
 SRC += loop_acct.c    # D1: per-task accounting of every main-loop pass
+SRC += sleep.c        # sleep experiments: light sleep's sizing bits, a deep-sleep test (dev builds only)
 SRC += rtc/rtc_persist.c  # C2: when the RTC period is saved (<= 4 a day)
 VPATH += bluetooth
 VPATH += graphics

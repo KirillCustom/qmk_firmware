@@ -94,6 +94,8 @@ static volatile uint8_t ind_lvl_charging = CHARGING_LED_BRIGHTNESS;
  * is never true (always off) and duty == IND_PWM_TICKS is always true (full on).
  * Writes are suppressed unless an output actually changes, so a steady indicator
  * costs two pin writes per PWM period rather than one per tick. */
+static uint8_t ind_last_out = 0xFFu;   /* 0xFF: write the pins on the next tick */
+
 static void indicators_tick(void) {
     uint8_t phase = ind_phase + 1;
     if (phase >= IND_PWM_TICKS) phase = 0;
@@ -104,9 +106,8 @@ static void indicators_tick(void) {
     if (ind_winlock  && phase < ind_duty[ind_lvl_winlock])  out |= 2u;
     if (ind_charging && phase < ind_duty[ind_lvl_charging]) out |= 4u;
 
-    static uint8_t last_out = 0xFFu;
-    if (out == last_out) return;
-    last_out = out;
+    if (out == ind_last_out) return;
+    ind_last_out = out;
 
     gpio_write_pin(LED_CAPS_LOCK_PIN, (out & 1u) != 0u);
     gpio_write_pin(LED_WINLOCK_PIN, (out & 2u) != 0u);
@@ -172,6 +173,45 @@ void pwm_tick_init(void) {
      * Belongs upstream in hal_gpt_lld.c; kept here to avoid another ChibiOS
      * working-tree patch to reapply after every submodule update. */
     SN_CT16B3->MCTRL = CT16_PWM_UNLOCK(SN_CT16B3->MCTRL | mskCT16_MRnRST_EN(0));
+}
+
+/* Stopping the tick (sleep.c: light sleep's bit 3, and the deep-sleep
+ * experiment): every pin it drives low first, since a stopped tick leaves them
+ * where they were; then the timer. The restart redoes the MR0RST fix and
+ * forgets the last output, so the next tick writes every pin. Thread
+ * (_run) and locked (I) forms. */
+static bool pwm_tick_stopped = false;
+
+static void pwm_tick_pins_offI(void) {
+    display_backlight_pin_off();
+    gpio_write_pin_low(LED_CAPS_LOCK_PIN);
+    gpio_write_pin_low(LED_WINLOCK_PIN);
+    gpio_write_pin_low(LED_CHARGING_PIN);
+}
+
+void pwm_tick_stopI(void) {
+    if (pwm_tick_stopped) return;
+    gptStopTimerI(&GPTD4);
+    pwm_tick_pins_offI();
+    pwm_tick_stopped = true;
+}
+
+void pwm_tick_startI(void) {
+    if (!pwm_tick_stopped) return;
+    ind_last_out = 0xFFu;
+    gptStartContinuousI(&GPTD4, PWM_TICK_TIMEBASE / PWM_TICK_HZ);
+    SN_CT16B3->MCTRL = CT16_PWM_UNLOCK(SN_CT16B3->MCTRL | mskCT16_MRnRST_EN(0));
+    pwm_tick_stopped = false;
+}
+
+void pwm_tick_run(bool on) {
+    chSysLock();
+    if (on) pwm_tick_startI(); else pwm_tick_stopI();
+    chSysUnlock();
+}
+
+bool indicators_any_lit(void) {
+    return ind_caps || ind_winlock || ind_charging;
 }
 
 /* The row-scan hook is now unused; leave the weak no-op in the driver. */

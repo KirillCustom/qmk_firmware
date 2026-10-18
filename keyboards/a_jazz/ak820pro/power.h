@@ -47,6 +47,8 @@ uint8_t power_val_cap(void);
 /* RGB off as a cap, whatever the ladder or the user's toggle says. */
 void power_set_lights_cut(bool cut);
 bool power_lights_cut(void);
+/* The RGB is dark: a dark stage or the lights cut (the driver's scale 0). */
+bool power_rgb_dark(void);
 
 #ifdef AK820_DEV_HOOKS
 /* The bench's (HC_DEVHOOK op 14): a mode without the key or the overlay, and

@@ -270,6 +270,10 @@ uint8_t display_backlight_effective(void) {
     return display_powered ? level : 0;
 }
 
+void display_backlight_pin_off(void) {
+    gpio_write_pin_low(PANEL_BKL);
+}
+
 uint8_t display_backlight_duty(void) {
     return bkl_duty[display_backlight_effective()];
 }
@@ -2611,6 +2615,10 @@ static void band_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 
 static void gq_reset(void) { gq_n = gq_i = 0; }
 static bool gq_pending(void) { return gq_i < gq_n; }
+
+bool display_bus_idle(void) {
+    return !gq_pending() && !debug_exit_step && !lcd_blit_busy();
+}
 
 static void shadow_invalidate(void) {
     for (uint8_t i = 0; i < GQ_RUNS; i++) shadow[i].valid = false;

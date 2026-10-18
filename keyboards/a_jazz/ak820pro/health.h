@@ -42,6 +42,7 @@ void health_note_flash_write(void);
  * answer: firmware count == characters received means the matrix never saw
  * the press; firmware count > received means the report was lost downstream. */
 void health_note_key_press(void);
+uint16_t health_key_presses(void);
 
 /* The stall mark captured for the CURRENT pass. health_loop_tick() is the sole
  * owner of loop_stall_mark: it reads and clears it once per pass, so anything

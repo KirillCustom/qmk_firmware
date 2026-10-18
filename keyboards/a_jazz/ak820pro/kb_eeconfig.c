@@ -54,6 +54,10 @@ void kb_eeconfig_task(void) {
     eeconfig_update_kb_datablock(&kb_config, 0, sizeof(kb_config));
 }
 
+bool kb_eeconfig_write_pending(void) {
+    return kb_dirty;
+}
+
 static void kb_mark_dirty(void) {
     kb_dirty       = true;
     kb_dirty_since = timer_read32();

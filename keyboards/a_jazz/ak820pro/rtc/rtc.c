@@ -451,6 +451,27 @@ static bool     rtc_cal_valid;      /* the two above are meaningful */
 // once-per-second edge source (no localtime()) for pacing the display refresh.
 // (rtc_seconds_count itself is declared above, with the Phase 0 instruments.)
 
+/* A deep sleep stops the CPU while the RTC counts on: its second interrupts
+ * are cleared, not served, so the sleeper hands the count back here, to both
+ * clocks the handler advances (ours and the LLD's calendar time, which
+ * rtcGetTime() reads; codex, the sleep plan's review), with interrupts still
+ * locked so no served second lands between. Only while nothing is in flight
+ * that a skipped handler would break (a slew or a reload): rtc_sleep_ok(). */
+bool rtc_sleep_ok(void) {
+    return slew_state == SLEW_IDLE && !reload_pending;
+}
+
+void rtc_account_sleepI(uint32_t seconds) {
+    if (seconds == 0) return;
+    rtc_seconds_count += seconds;
+    rtc_lld_add_secondsI(&RTCD1, seconds);
+    win_valid = false;   /* the estimator's window spans time it did not see */
+    fn_valid  = 0;       /* and the SOF count's continuity (USB was down) */
+#ifdef RTC_AUTO_CALIBRATION
+    rtc_check_seconds = MIN(rtc_check_seconds + seconds, RTC_CHECK_INTERVAL_S);
+#endif
+}
+
 static void rtc_second_cb(RTCDriver *rtcp, rtcevent_t event)
 {
     (void)rtcp;

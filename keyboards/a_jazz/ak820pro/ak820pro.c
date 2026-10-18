@@ -26,6 +26,7 @@
 #include "indicators.h"
 #include "battery.h"
 #include "power.h"
+#include "sleep.h"         /* the sleep experiments (dev builds) */
 #include "loop_acct.h"     /* D1: ACCT() around each board task */
 #include "flash_stats.h"   /* C1: flash write sessions by writer */
 
@@ -623,6 +624,10 @@ void housekeeping_task_kb(void) {
     // kick certifies a COMPLETED pass. A kick at entry would hand a freshly
     // wedged pass another full timeout and prove nothing about what follows.
     watchdog_kick();
+
+    /* The sleep experiments (dev builds; a no-op otherwise): after the kick,
+     * so a yield or a deep sleep starts from a fresh timeout. */
+    sleep_task();
 }
 
 /*

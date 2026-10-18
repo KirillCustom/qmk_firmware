@@ -658,6 +658,26 @@ static void update_pwm_channels(PWMDriver *pwmp) {
 __attribute__((weak)) void sn32f2xx_isr_enter_hook(void) {}
 __attribute__((weak)) void sn32f2xx_isr_exit_hook(void) {}
 
+/* Scan-only (a board's light sleep, sn32f2xx_set_scan_only): no LED work, one
+ * key row per ISR at a longer period, on its own row counter so the LED field's
+ * row pairing is untouched and resumes where it was. ISR-owned but for the
+ * request flag. */
+#ifndef SN32F2XX_SCAN_ONLY_TICKS
+#    define SN32F2XX_SCAN_ONLY_TICKS 3000u   /* 0.625 ms at 4.8 MHz, plus the body: each key every ~3.9 ms,
+                                               * under sym_defer_pk's 5 ms so debounce sees a fresh sample */
+#endif
+static volatile bool scan_only_req = false;
+static bool          scan_only     = false;
+static uint8_t       scan_only_row = 0;
+
+void sn32f2xx_set_scan_only(bool on) {
+    scan_only_req = on;
+}
+
+bool sn32f2xx_scan_only_active(void) {
+    return scan_only;
+}
+
 static void rgb_callback(PWMDriver *pwmp) {
     sn32f2xx_isr_enter_hook();
     // Disable the interrupt
@@ -697,6 +717,24 @@ static void rgb_callback(PWMDriver *pwmp) {
 #    endif // SN32F2XX_PWM_OUTPUT_ACTIVE_LEVEL
         }
     }
+#endif
+#if defined(SHARED_MATRIX) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    /* Scan-only: the switch is applied here, between periods. Entering blanks
+     * every output once (the columns stay released from PWM, so they read as
+     * the inputs every scan needs) and lengthens the period; leaving restores
+     * the field's period, and the next update_pwm_channels() drives it again. */
+    if (scan_only_req != scan_only) {
+        scan_only = scan_only_req;
+        pwmChangePeriodI(pwmp, scan_only ? SN32F2XX_SCAN_ONLY_TICKS : periodticks);
+        if (scan_only) shared_matrix_rgb_disable_output();
+    }
+    if (scan_only) {
+        if (EFLD1.state != FLASH_PGM) {   /* as below: no scan inside a flash program */
+            uint8_t last = scan_only_row;
+            if (++scan_only_row >= ROWS_PER_HAND) scan_only_row = 0;
+            shared_matrix_scan_keys(shared_matrix, scan_only_row, last);
+        }
+    } else
 #endif
     // Scan the rgb and key matrix
     if (EFLD1.state != FLASH_PGM) {
@@ -748,6 +786,36 @@ static void rgb_callback(PWMDriver *pwmp) {
     pwmEnablePeriodicNotificationI(pwmp);
     chSysUnlockFromISR();
 }
+
+#if (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+/* Deep sleep (a board's experiment): every output off and the row ISR's
+ * notification off, the columns left released from PWM (inputs with their
+ * pull-ups, as for a scan); then put back, the counters re-armed on one
+ * boundary as the ISR's end does. I-class: called with interrupts locked, so
+ * no lock call (pwmDisableChannel would unlock on its way out). */
+void sn32f2xx_sleep_enterI(void) {
+    pwmDisablePeriodicNotificationI(&PWMD1);
+    for (uint8_t y = 0; y < SN32F2XX_RGB_MATRIX_COLS; y++) {
+        pwmDisableChannelI(COL_PWM_DRV(y), COL_PWM_CH(y));
+    }
+    for (uint8_t x = 0; x < SN32F2XX_RGB_MATRIX_ROWS_HW; x++) {
+#    if (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_HIGH)
+        gpio_write_pin_low(led_row_pins[x]);
+#    else
+        gpio_write_pin_high(led_row_pins[x]);
+#    endif
+    }
+}
+
+void sn32f2xx_sleep_exitI(void) {
+    pwm_lld_change_counter(&PWMD1, UINT16_MAX);
+#    if defined(SN32F2XX_PWM_MULTI_TIMER)
+    pwm_lld_change_counter(&PWMD0, UINT16_MAX);
+    pwm_lld_change_counter(&PWMD2, UINT16_MAX);
+#    endif
+    pwmEnablePeriodicNotificationI(&PWMD1);
+}
+#endif
 
 void sn32f2xx_init(void) {
     for (uint8_t x = 0; x < SN32F2XX_RGB_MATRIX_ROWS_HW; x++) {

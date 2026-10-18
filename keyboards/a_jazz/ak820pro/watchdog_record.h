@@ -20,6 +20,7 @@ enum watchdog_site {
      * operation that was running. */
     WDT_SITE_HARD_FAULT = 23, WDT_SITE_UNHANDLED_EXCEPTION = 24, WDT_SITE_HALT = 25,
     WDT_SITE_TEST_FAULT = 26,
+    WDT_SITE_DEEP_SLEEP = 27,   /* sleep.c's experiment: the reset happened asleep */
     /* 32 + enum loop_site in ak820pro.h; keep that enum append-only too. */
     WDT_SITE_LOOP_BASE = 32
 };

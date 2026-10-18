@@ -20,6 +20,8 @@
 #include "flash_stats.h"              /* HC_FLASHW */
 #include "loop_acct.h"                /* HC_ACCT */
 #include "power.h"                    /* HC_DEVHOOK op 14 */
+#include "sleep.h"                    /* HC_DEVHOOK op 14, subs 3 and 4 */
+#include "drivers/led/sn32f2xx.h"     /* scan-only, in sub 3's reply */
 
 // Apply a 7-byte time payload to the RTC:
 //   [0]=year-2000 [1]=month [2]=day [3]=weekday [4]=hour [5]=min [6]=sec
@@ -961,9 +963,38 @@ static void health_command(uint8_t *data, uint8_t length) {
                 case 13: ch582_lockchan_clear(); break;
                 case 14: {
                     uint8_t sub = data[4], arg = data[5];
-                    if (length < 32 || sub > 2 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
-                        (sub == 2 && arg != 0xFF && arg > POWER_STAGE_SCREEN_OFF)) {
+                    if (length < 32 || sub > 4 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
+                        (sub == 2 && arg != 0xFF && arg > POWER_STAGE_SCREEN_OFF) ||
+                        (sub == 3 && (arg & ~SLEEP_LS_ALL)) || (sub == 4 && arg > 1)) {
                         data[0] = RTC_UNHANDLED;
+                        break;
+                    }
+                    if (sub == 3) {
+                        /* Light sleep's sizing bits (sleep.h): arg the mask, [6]
+                         * the yield in ms, [7] PMU Sleep's window in s. Reply:
+                         * 3, the mask, the bits in force, the WFI count (u32),
+                         * scan-only in force, the yield. */
+                        sleep_light_set(arg, data[6], data[7]);
+                        uint32_t w = ak820_wfi_count;
+                        memset(&data[4], 0, 28);
+                        data[4]  = 3;
+                        data[5]  = sleep_light_mask();
+                        data[6]  = sleep_light_applied();
+                        data[7]  = (uint8_t)w;
+                        data[8]  = (uint8_t)(w >> 8);
+                        data[9]  = (uint8_t)(w >> 16);
+                        data[10] = (uint8_t)(w >> 24);
+                        data[11] = sn32f2xx_scan_only_active() ? 1 : 0;
+                        break;
+                    }
+                    if (sub == 4) {
+                        /* The deep-sleep experiment: arg 1 arms it ([6] the
+                         * delay s, [7..8] the cap s, [9] 1 = leave the watchdog
+                         * unfed), 0 only reads. Reply: 4, then the record. */
+                        if (arg == 1) sleep_deep_arm(data[6], (uint16_t)(data[7] | (data[8] << 8)), data[9] != 0);
+                        memset(&data[4], 0, 28);
+                        data[4] = 4;
+                        sleep_deep_record(&data[5]);
                         break;
                     }
                     if (sub == 1) power_set_mode((power_mode_t)arg);

@@ -31,3 +31,12 @@ bool battery_is_absent(void);
 
 uint8_t indicator_get_brightness(void);
 void    indicator_set_brightness(uint8_t level);
+
+/* The 20 kHz tick (the backlight's and the indicators' software PWM), for
+ * sleep.c: stop it with every pin it drives low, and restart it. _run from a
+ * thread, I-class with interrupts locked. */
+void pwm_tick_run(bool on);
+void pwm_tick_stopI(void);
+void pwm_tick_startI(void);
+/* Any indicator wants its LED lit (Caps, Win lock, charging). */
+bool indicators_any_lit(void);
