@@ -25,6 +25,8 @@ typedef enum {
     POWER_MODE_FULL = 0,      /* the ladder never runs */
     POWER_MODE_NORMAL,        /* dim 1 min, RGB off 5, screen off 15 */
     POWER_MODE_SAVER,         /* dim 30 s, RGB off 2 min, screen off 5 */
+    POWER_MODE_MINIMAL,       /* RGB and backlight off on battery, typing or not;
+                               * the backlight lights a moment for a message */
     POWER_MODE_COUNT
 } power_mode_t;
 

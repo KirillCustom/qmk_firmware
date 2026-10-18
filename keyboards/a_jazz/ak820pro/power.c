@@ -44,7 +44,13 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
     [POWER_MODE_FULL]   = {NEVER, NEVER, NEVER},
     [POWER_MODE_NORMAL] = {60000u, 300000u, 900000u},    /* 1, 5, 15 min */
     [POWER_MODE_SAVER]  = {30000u, 120000u, 300000u},    /* 30 s, 2, 5 min */
+    [POWER_MODE_MINIMAL] = {0u, 0u, 0u},                 /* dark at once, even typing */
 };
+
+/* Minimal mode's dark screen lights, at the user's level, for this long after
+ * a message appears in the band, and while Fn+D's pages are open (JD, 10-18:
+ * otherwise a key like Fn+B would seem to do nothing). */
+#define MESSAGE_WAKE_MS 4000u
 
 /* The dim: the lighting's value capped here, so 100% becomes 25% and a colour
  * keeps its hue (the driver's per-channel scale turned a dim purple red). */
@@ -78,9 +84,11 @@ static const char *const mode_names[POWER_MODE_COUNT] = {
     [POWER_MODE_FULL]   = "Full power",
     [POWER_MODE_NORMAL] = "Normal power",
     [POWER_MODE_SAVER]  = "Power saver",
+    [POWER_MODE_MINIMAL] = "Minimal mode",
 };
 
 static uint8_t applied_scale = 255;
+static bool    shown_lit     = false;   /* Minimal's backlight lifted for a message */
 
 static void apply(void) {
     uint8_t scale = 255, cap = BACKLIGHT_NO_CAP, vcap = 255;
@@ -96,7 +104,7 @@ static void apply(void) {
             break;
         case POWER_STAGE_SCREEN_OFF:
             scale = 0;
-            cap   = 0;
+            cap   = shown_lit ? BACKLIGHT_NO_CAP : 0;
             break;
     }
     if (lights_cut) scale = 0;
@@ -182,7 +190,7 @@ void power_task(void) {
      * with the screen dark it waits for it to light, and it lapses if the cap
      * does (USB). A real charge re-arms it. */
     if (low_noted && battery_session_count() != low_sessions) low_noted = false;
-    if (low && !low_noted) {
+    if (low && !low_noted && mode != POWER_MODE_MINIMAL) {   /* Minimal has nothing left to cap */
         low_noted    = true;
         low_owed     = true;
         low_sessions = battery_session_count();
@@ -191,8 +199,11 @@ void power_task(void) {
 #ifdef AK820_DEV_HOOKS
     if (forced != 0xFF) want = (power_stage_t)forced;
 #endif
-    if (want != stage) {
-        stage = want;
+    bool lit = mode == POWER_MODE_MINIMAL &&
+               (display_message_recent(MESSAGE_WAKE_MS) || display_debug_active());
+    if (want != stage || lit != shown_lit) {
+        stage     = want;
+        shown_lit = lit;
         apply();
     }
     if (low_owed && display_backlight_effective() > 0) {

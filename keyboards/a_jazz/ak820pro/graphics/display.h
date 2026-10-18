@@ -120,6 +120,10 @@ void display_bootloader_splash(void);
  * player owns the bus. */
 void display_debug_toggle(void);
 bool display_debug_active(void);
+/* A message appeared in the band (an overlay, an alert, a link state with
+ * words, the pair gesture) within the last `ms`: power.c's Minimal mode lights
+ * the backlight for it. */
+bool display_message_recent(uint32_t ms);
 /* Recompose the page on the next tick without waiting for the second edge, so a
  * counter reset shows its zeros immediately. No-op when the page is closed. */
 void display_debug_refresh(void);

@@ -2203,6 +2203,25 @@ void display_set_pair_hint(int16_t pct) {
     pair_hint_pct = pct;
 }
 
+/* A message appeared in the band: the power ladder's Minimal mode, which keeps
+ * the backlight off on battery, lights it for a moment after one, or the
+ * message would go unseen and the key that caused it would seem broken (JD,
+ * 10-18). Noted when a message APPEARS -- a setting's overlay, an alert, a
+ * new link state that has words, the pair gesture -- not while one persists:
+ * a failed link alternates its two texts forever and would hold the screen
+ * lit all night. */
+static uint32_t message_at   = 0;
+static bool     message_seen = false;
+
+static void note_message(void) {
+    message_at   = timer_read32();
+    message_seen = true;
+}
+
+bool display_message_recent(uint32_t ms) {
+    return message_seen && timer_elapsed32(message_at) < ms;
+}
+
 #ifdef PARAM_OVERLAY
 static char     param_status_buf[CONN_STATUS_MAX + 1] = {0};
 static uint32_t param_status_since                    = 0;
@@ -2218,6 +2237,7 @@ void display_set_param_status(const char *s) {
     param_status_since = timer_read32();
     param_status_on    = true;
     text_dirty       = true;
+    note_message();
 }
 #endif
 /* --- Boot alert -------------------------------------------------------------
@@ -2236,6 +2256,7 @@ void display_set_alert(const char *msg) {
     alert_since = timer_read32();
     alert_on    = true;
     text_dirty  = true;
+    note_message();
 }
 
 static bool alert_active(void) {
@@ -2313,6 +2334,7 @@ static void conn_status_update(void) {
      * showing "Link failed" while the user is mid-gesture is both wrong and
      * discouraging. The hold is what matters until it resolves. */
     if (pair_hint_pct >= 0) {
+        note_message();   /* the gesture is in progress: keep the screen lit */
         /* A filling bar, not a static label: at 2 s a motionless message reads as
          * "nothing is happening" and invites letting go early, which is the exact
          * frustration a longer hold would otherwise cost. Progress makes the wait
@@ -2417,6 +2439,7 @@ static void conn_status_update(void) {
         conn_status_str = want;
         text_dirty      = true;   /* overlay appeared, changed, or was released */
     }
+    if (changed && want) note_message();   /* a new link state with words, not its alternation */
 }
 
 /* ---- Text band: draw a BOUNDED number of glyphs per pass -------------------
