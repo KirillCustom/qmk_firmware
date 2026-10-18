@@ -589,13 +589,16 @@ void housekeeping_task_kb(void) {
 
         LOOP_SITE(LOOP_SITE_LEDS,     ACCT(ACCT_LEDS, update_leds()));
         LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, battery_task()));   // one ~11 us VDD conversion
-        LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, power_task()));     // idle ladder, battery only
         LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, bt_pair_hold_task()));   // hold-to-pair fires under the finger, not on release
         LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, dbg_hold_task()));       // hold-Fn+D resets the health counters
         LOOP_SITE(LOOP_SITE_CONSUMER, ACCT(ACCT_HK_OTHER, modified_consumer_task()));  // drop held mods once a knob spin stops
 #ifdef PARAM_OVERLAY
         LOOP_SITE(LOOP_SITE_PARAM,    ACCT(ACCT_HK_OTHER, param_status_task()));   // surface setting changes in the info band
 #endif
+        /* The idle ladder, battery only. After param_status_task(): a setting's
+         * readout posted this tick makes the band busy, so power.c's notices
+         * wait for it rather than be replaced by it before they paint. */
+        LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, power_task()));
 #ifdef CONSOLE_ENABLE
         key_stat_task();       // dropped-keystroke localisation; see key_press_count
 #endif
