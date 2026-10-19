@@ -29,8 +29,12 @@ typedef enum {
 } battery_state_t;
 
 /* HC_BATTLOG reply format, and HC_CONN byte 31 (the battery fields' layout). */
-#define BATTERY_LOG_VERSION    6
+#define BATTERY_LOG_VERSION    7
 #define BATTERY_LOG_ENTRY_SIZE 18
+/* HC_BATTLOG's version byte while a deep sleep's entries are not yet laid in:
+ * the reply's age would date the old entries hours too recently, so the host
+ * retries. */
+#define BATTERY_LOG_PENDING    0xFFu
 #define BATTERY_PROTO_VERSION  5
 
 /* The charging model's constants (Phase 1b, B; battery.c has the design).
@@ -135,6 +139,28 @@ uint32_t battery_energy_used_mwh_x10(void);
 uint8_t  battery_count_state(void);
 int16_t  battery_band_lower(void);
 int16_t  battery_band_upper(void);
+/* Deep sleep (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, sections 4 and 6).
+ * QMK's timer stands still asleep, so the sleep is handed over explicitly:
+ *  - battery_sleep_enter(): just before the lock. The awake energy is
+ *    integrated up to the sleep, and the state the log's entries need is
+ *    noted (the flags, the level, the charging state);
+ *  - battery_sleep_wake(): at the wake, before any other battery work. The
+ *    log's open period is frozen and the live intake reset (the radio's `5C`
+ *    reports and the samples after the wake land in it), the `5C` estimate
+ *    forgotten, HC_BATTLOG pending, and no period closes;
+ *  - battery_sleep_account(): once the slept time is known (the PCF's, or the
+ *    counted seconds). The sleep's energy at BATTERY_P_SLEEP_UW goes into
+ *    the count and the log, never into the awake average; the relaxation is
+ *    aged; the log's entries are laid in on its own time base; time left is
+ *    recomputed.
+ * The asleep draw: 3.24 mA at 4.12 V on the logger over the hour asleep
+ * (history/deep-sleep-20261019-1h/), assumed constant power. */
+#define BATTERY_P_SLEEP_UW 13350u
+void battery_sleep_enter(void);
+void battery_sleep_wake(void);
+void battery_sleep_account(uint32_t slept_ms);
+bool battery_sleep_pending(void);   /* woken, the sleep not yet accounted */
+
 /* Real charging sessions (CHRG low 60 s) since boot, wrapping: power.c re-arms
  * its low-battery notice on a change, as the warning re-arms on a session. */
 uint16_t battery_session_count(void);
@@ -144,7 +170,8 @@ bool     battery_usb_configured(void);
 /* Status bits for HC_CONN and the log: see BATT_F_* in battery.c. */
 uint8_t battery_flags(void);
 
-/* Raw-HID readouts. battery_log_read fills `out` (29 bytes): version u8 (BATTERY_LOG_VERSION),
+/* Raw-HID readouts. battery_log_read fills `out` (29 bytes): version u8 (BATTERY_LOG_VERSION,
+ * or BATTERY_LOG_PENDING while a sleep is being laid in),
  * stored count u16, the requested index u16, ms since the newest entry u32,
  * entries ever written (low 16 bits) u16, then the 18-byte entry at `idx`
  * (0 = oldest). v5 dropped the period from the reply to fit the entry: the

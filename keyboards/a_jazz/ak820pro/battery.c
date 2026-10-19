@@ -660,36 +660,10 @@ static uint64_t model_nj(uint32_t dt, uint64_t drive_ms, uint32_t lit_ms) {
     return e;
 }
 
-/* Once a second, on the elapsed time: the count, the period's energy, the
- * average. The LED drive is taken every call, on USB too, so a battery
- * second never inherits a USB stretch's frames. */
-static void energy_tick(void) {
-    uint32_t now      = timer_read32();
-    uint32_t lit_ms   = 0;
-    uint64_t drive_ms = sn32f2xx_led_drive_take(now, &lit_ms);
-    if (!e_started) {
-        e_started = true;
-        e_last_ms = now;
-        return;
-    }
-    uint32_t dt = now - e_last_ms;
-    e_last_ms   = now;
-    if (dt) led_pm = (uint16_t)((drive_ms * 1000u) / ((uint64_t)LED_LOAD_MAX * dt));
-    if (supply != BATTERY_SUPPLY_BATTERY || dt == 0) {
-        count_state = BATTERY_COUNT_OFF;
-        left_min    = 0xFFFFu;
-        minute_ms   = 0;
-        e_minute_nj = 0;
-        return;
-    }
-    uint64_t e = model_nj(dt, drive_ms, lit_ms);
-    p_now_uw   = (uint32_t)(e / dt);
-    e_used_nj += e;
-    e_period_nj += e;
-    e_minute_nj += e;
-
-    uint16_t est = battery_5c_x100();
-    if (est == C5_EST_NONE) band_hold = false;   /* no fresh evidence, no hold (codex) */
+/* Energy `e` off the level's count, on battery, given the estimate `est` (its
+ * clamp state). The awake count and the sleep's term (battery_sleep_account)
+ * both take theirs here. */
+static void count_take(uint64_t e, uint16_t est) {
     if (power_lights_cut()) {
         /* The cut's latch is authoritative: 0, whatever is owed. */
         level       = 0;
@@ -725,6 +699,52 @@ static void energy_tick(void) {
             level--;
         }
     }
+}
+
+/* Time left from the level and the awake average: hours of USE, since the
+ * average never sees slept time (QMK's timer stands still asleep, and the
+ * sleep's energy goes to the count alone). */
+static void time_left_update(void) {
+    if (level != LEVEL_UNKNOWN && level > 0 && p_avg_uw > 0) {
+        uint64_t ms = ((uint64_t)level * E_PM_NJ) / (uint32_t)p_avg_uw;
+        uint64_t mn = ms / 60000u;
+        left_min    = mn > 0xFFFEu ? 0xFFFEu : (uint16_t)mn;
+    } else {
+        left_min = 0xFFFFu;
+    }
+}
+
+/* Once a second, on the elapsed time: the count, the period's energy, the
+ * average. The LED drive is taken every call, on USB too, so a battery
+ * second never inherits a USB stretch's frames. */
+static void energy_tick(void) {
+    uint32_t now      = timer_read32();
+    uint32_t lit_ms   = 0;
+    uint64_t drive_ms = sn32f2xx_led_drive_take(now, &lit_ms);
+    if (!e_started) {
+        e_started = true;
+        e_last_ms = now;
+        return;
+    }
+    uint32_t dt = now - e_last_ms;
+    e_last_ms   = now;
+    if (dt) led_pm = (uint16_t)((drive_ms * 1000u) / ((uint64_t)LED_LOAD_MAX * dt));
+    if (supply != BATTERY_SUPPLY_BATTERY || dt == 0) {
+        count_state = BATTERY_COUNT_OFF;
+        left_min    = 0xFFFFu;
+        minute_ms   = 0;
+        e_minute_nj = 0;
+        return;
+    }
+    uint64_t e = model_nj(dt, drive_ms, lit_ms);
+    p_now_uw   = (uint32_t)(e / dt);
+    e_used_nj += e;
+    e_period_nj += e;
+    e_minute_nj += e;
+
+    uint16_t est = battery_5c_x100();
+    if (est == C5_EST_NONE) band_hold = false;   /* no fresh evidence, no hold (codex) */
+    count_take(e, est);
 
     minute_ms += dt;
     if (minute_ms >= 60000u) {
@@ -733,13 +753,7 @@ static void energy_tick(void) {
         p_avg_uw += (p - p_avg_uw) / (int32_t)avg_minutes;
         minute_ms   = 0;
         e_minute_nj = 0;
-        if (level != LEVEL_UNKNOWN && level > 0 && p_avg_uw > 0) {
-            uint64_t ms = ((uint64_t)level * E_PM_NJ) / (uint32_t)p_avg_uw;
-            uint64_t mn = ms / 60000u;
-            left_min    = mn > 0xFFFEu ? 0xFFFEu : (uint16_t)mn;
-        } else {
-            left_min = 0xFFFFu;
-        }
+        time_left_update();
     }
 }
 
@@ -1302,16 +1316,27 @@ uint8_t battery_flags(void) {
  * flags at the end AND over the period, so a transition cannot fall between
  * samples, and the effective LED drive and backlight, which see the caps.
  * ⚠️ RAM, so it dies with the board: dump before the pack runs out, and plug in
- * with the slider on BT -- a BT -> cable flip resets the board. HC_BATTLOG. */
+ * with the slider on BT -- a BT -> cable flip resets the board. HC_BATTLOG.
+ *
+ * v7 (deep sleep, plans/DEEP-SLEEP-BUILD-PLAN.md, section 6): each entry
+ * carries the seconds slept in its period, in vdd_avg's place (on battery the
+ * buck-boost's 3.90 V, and the supply is in the flags). QMK's timer stands
+ * still asleep, so the log keeps its own time base, LOG TIME: the timer plus
+ * the slept ms accounted so far (modular, as the timer). The cadence, the
+ * newest entry's end and the reply's age are all in log time, so the host's
+ * dating (newest - k x period) holds across sleeps. Never the calendar: a host
+ * sync would move the boundaries. */
 #define LOG_LEN       720u
 #define LOG_PERIOD_MS 900000u
 
 typedef struct __attribute__((packed)) {
-    uint16_t vdd_avg;      /* mean raw VDD over the period, mV */
+    uint16_t slept_s;      /* v7: seconds slept in the period (deep sleep). Through
+                            * v6 this was vdd_avg, the mean raw VDD (mV). */
     uint16_t e_x10;        /* v6: the period's modelled battery energy, 0.1 mWh
-                            * (energy_tick; 0 for time on USB). It took v5's
-                            * vdd_min, the lowest raw VDD, which the supply
-                            * flags superseded as evidence. */
+                            * (energy_tick; 0 for time on USB), the sleep's
+                            * included (v7). It took v5's vdd_min, the lowest
+                            * raw VDD, which the supply flags superseded as
+                            * evidence. */
     uint16_t c5_sum;       /* sum of every fresh `5C` report in the period */
     uint8_t  c5_n_lo;      /* how many, low byte (0: none arrived) */
     uint8_t  c5_min;       /* 0xFF when none */
@@ -1334,54 +1359,239 @@ static log_entry_t log_buf[LOG_LEN];
 static uint16_t    log_head    = 0;   /* next slot to write */
 static uint16_t    log_count   = 0;
 static uint32_t    log_written = 0;   /* entries ever written */
-static uint32_t    log_last_at = 0;   /* the newest entry's period end */
+static uint32_t    log_last_at = 0;   /* the newest entry's period end, log time */
 static bool        log_started = false;
-static uint32_t    acc_sum = 0, acc_start = 0, acc_led = 0;
-static uint16_t    acc_n = 0, acc_led_n = 0;
-static uint8_t     acc_flags = 0;
+static uint32_t    acc_start = 0;     /* the open period's start, log time */
+static uint32_t    log_slept_ms = 0;  /* slept ms accounted so far: log time's offset */
 
-static void log_task(uint16_t sample_mv) {
-    if (sample_mv) {
-        acc_sum += sample_mv;
-        acc_n++;
+/* The open period's accumulators. The live ones are globals the intake writes
+ * (battery_5c_report, energy_tick, the charging model's latch, log_task); a
+ * deep sleep's wake moves them into `frz`, so what arrives after it starts
+ * clean (codex, deep-sleep verify 1: the radio's `5C` reports reach
+ * battery_5c_report directly, so pausing the 10 Hz task froze nothing). */
+static uint32_t acc_led = 0;
+static uint16_t acc_led_n = 0;
+static uint8_t  acc_flags = 0;
+static uint32_t acc_slept_ms = 0;
+
+typedef struct {
+    uint64_t e_nj;
+    uint32_t led_sum, slept_ms;
+    uint16_t led_n, c5_sum, c5_n;
+    uint8_t  flags_any, c5_min, c5_max, chg_latch;
+    bool     c5_saturated;
+} log_acc_t;
+
+static uint32_t log_now(void) {
+    return timer_read32() + log_slept_ms;
+}
+
+/* The live accumulators moved into `a` (the live ones reset). */
+static void acc_take(log_acc_t *a) {
+    a->e_nj = e_period_nj;        e_period_nj = 0;
+    a->led_sum = acc_led;         acc_led = 0;
+    a->led_n = acc_led_n;         acc_led_n = 0;
+    a->slept_ms = acc_slept_ms;   acc_slept_ms = 0;
+    a->flags_any = acc_flags;     acc_flags = 0;
+    a->c5_sum = lg_c5_sum;        lg_c5_sum = 0;
+    a->c5_n = lg_c5_n;            lg_c5_n = 0;
+    a->c5_min = lg_c5_min;        lg_c5_min = C5_NONE;
+    a->c5_max = lg_c5_max;        lg_c5_max = 0;
+    a->c5_saturated = lg_c5_saturated; lg_c5_saturated = false;
+    a->chg_latch = chg_latch;     chg_latch = 0;
+}
+
+/* `a`, which came first, merged back into the live accumulators. The `5C`
+ * sum keeps its prefix rule: if the two do not fit, only `a`'s (the earlier)
+ * reports are counted, and the period says saturated. */
+static void acc_merge(const log_acc_t *a) {
+    e_period_nj  += a->e_nj;
+    acc_led      += a->led_sum;
+    acc_led_n    += a->led_n;
+    acc_slept_ms += a->slept_ms;
+    acc_flags    |= a->flags_any;
+    if (a->c5_saturated || lg_c5_n > (uint16_t)(UINT16_MAX - a->c5_n) ||
+        lg_c5_sum > (uint16_t)(UINT16_MAX - a->c5_sum)) {
+        if (a->c5_saturated || lg_c5_n || lg_c5_sum) lg_c5_saturated = true;
+        lg_c5_sum = a->c5_sum;
+        lg_c5_n   = a->c5_n;
+    } else {
+        lg_c5_sum += a->c5_sum;
+        lg_c5_n   += a->c5_n;
     }
+    if (a->c5_min < lg_c5_min) lg_c5_min = a->c5_min;
+    if (a->c5_max > lg_c5_max) lg_c5_max = a->c5_max;
+    chg_latch |= a->chg_latch;
+}
+
+/* One period's entry from `a`; with `store` false only counted (a sleep longer
+ * than the log writes its last LOG_LEN). Returns the energy's remainder below
+ * 0.1 mWh, which carries into the next period: none is lost to rounding. */
+static uint64_t log_put(const log_acc_t *a, uint8_t flags, uint16_t lv, uint8_t bkl, uint8_t m, uint8_t chg_st,
+                        uint16_t led_default, bool store) {
+    uint64_t ex = a->e_nj / NJ_PER_MWH_X10;
+    if (store) {
+        log_entry_t *e = &log_buf[log_head];
+        uint32_t     s = (a->slept_ms + 500u) / 1000u;
+        e->slept_s   = s > 0xFFFFu ? 0xFFFFu : (uint16_t)s;
+        e->e_x10     = ex > 0xFFFFu ? 0xFFFFu : (uint16_t)ex;
+        e->c5_sum    = a->c5_sum;
+        e->c5_n_lo   = (uint8_t)(a->c5_n & 0xFFu);
+        e->c5_n_hi   = (uint8_t)(a->c5_n >> 8);
+        e->c5_min    = a->c5_min;
+        e->c5_max    = a->c5_max;
+        e->flags     = flags;
+        e->flags_any = (uint8_t)(a->flags_any | flags);
+        e->level     = (lv == LEVEL_UNKNOWN) ? 0xFFu : (uint8_t)(lv / 5u);
+        e->led_pm    = a->led_n ? (uint16_t)(a->led_sum / a->led_n) : led_default;
+        e->bkl       = bkl;
+        e->m         = m;
+        e->chg       = (uint8_t)(chg_st | a->chg_latch | (a->c5_saturated ? CHG_F_SATURATED : 0u));
+        log_head     = (uint16_t)((log_head + 1u) % LOG_LEN);
+        if (log_count < LOG_LEN) log_count++;
+    }
+    log_written++;
+    return a->e_nj - ex * NJ_PER_MWH_X10;
+}
+
+static uint8_t log_m_now(void) {
+    return modeled && (chg_st == CHG_MODEL || chg_st == CHG_FROM_FLAT) ? (uint8_t)(m_pm / 5u) : 0xFFu;
+}
+
+/* --- Deep sleep's hand-over (battery.h; the plan, sections 4 and 6) --------- */
+static bool     sleep_pending = false;   /* woken, the sleep not yet accounted */
+static log_acc_t frz;                    /* the open period as it stood at the sleep */
+static uint32_t frz_at;                  /* log time at the sleep */
+static uint16_t frz_level;
+static uint8_t  frz_flags, frz_chg, frz_m;
+static bool     frz_on_battery;
+
+void battery_sleep_enter(void) {
+    energy_tick();   /* the awake energy up to the sleep: none left pending across it */
+    frz_at         = log_now();
+    frz_level      = level;
+    frz_flags      = battery_flags();
+    frz_chg        = chg_state_now();
+    frz_m          = log_m_now();
+    frz_on_battery = supply == BATTERY_SUPPLY_BATTERY;
+}
+
+void battery_sleep_wake(void) {
+    acc_take(&frz);
+    c5_forget();          /* reports from before the sleep never pass for fresh */
+    band_hold     = false;
+    sleep_pending = true; /* HC_BATTLOG pending; no period closes */
+}
+
+bool battery_sleep_pending(void) {
+    return sleep_pending;
+}
+
+/* ms of [a0, a1) inside [b0, b1), all in log time (modular, spans < 2^31). */
+static uint32_t overlap_ms(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) {
+    uint32_t lo = (int32_t)(b0 - a0) > 0 ? b0 : a0;
+    uint32_t hi = (int32_t)(b1 - a1) < 0 ? b1 : a1;
+    return (int32_t)(hi - lo) > 0 ? hi - lo : 0u;
+}
+
+/* The level at log time `t` across the sleep [s0, s1): from the entry's to the
+ * debited one, linearly in the slept time. */
+static uint16_t sleep_level_at(uint32_t t, uint32_t s0, uint32_t s1, uint16_t l0, uint16_t l1) {
+    if (l0 == LEVEL_UNKNOWN || l1 == LEVEL_UNKNOWN) return l1;
+    uint32_t span = s1 - s0, in = overlap_ms(s0, t, s0, s1);
+    if (span == 0) return l1;
+    return (uint16_t)((int32_t)l0 + (((int32_t)l1 - (int32_t)l0) * (int64_t)in) / (int64_t)span);
+}
+
+/* The sleep laid onto the log's periods (codex, deep-sleep verifies 2-3). The
+ * boundaries count from the sleep's start THROUGH NOW (the accounting comes a
+ * few passes after the wake, and one can fall in between):
+ *  - none: the frozen period and the live one merge back into one, with the
+ *    sleep's seconds and energy;
+ *  - otherwise the first period to close keeps its frozen contents, plus the
+ *    sleep's share inside it; each later one holds only the sleep's share
+ *    inside it (no `5C`, a dark load), with the level stepped down across
+ *    the sleep; the period open now keeps the live intake (everything since
+ *    the wake: a few seconds of it may land one period late, as aggregates
+ *    cannot be split) and any of the sleep's share inside it. */
+static void log_reconcile(uint32_t slept_ms, uint32_t p_uw) {
+    uint32_t s0 = frz_at, s1 = frz_at + slept_ms;
+    uint32_t now = log_now();              /* log_slept_ms already includes this sleep */
+    uint32_t end = acc_start + LOG_PERIOD_MS;
+    if (!log_started || (int32_t)(now - end) < 0) {
+        frz.slept_ms += slept_ms;
+        frz.e_nj += (uint64_t)p_uw * slept_ms;
+        acc_merge(&frz);
+        return;
+    }
+    uint32_t n_close = 1u + (uint32_t)(now - end) / LOG_PERIOD_MS;   /* boundaries through now */
+    uint32_t skip    = n_close > LOG_LEN ? n_close - LOG_LEN : 0u;   /* older ones would be overwritten */
+    uint64_t carry   = 0;
+    uint32_t p0      = acc_start;
+    for (uint32_t k = 0; k < n_close; k++, p0 += LOG_PERIOD_MS) {
+        uint32_t  p1 = p0 + LOG_PERIOD_MS;
+        uint32_t  in = overlap_ms(p0, p1, s0, s1);
+        log_acc_t a;
+        if (k == 0) {
+            a = frz;
+        } else {
+            memset(&a, 0, sizeof(a));
+            a.c5_min = C5_NONE;
+        }
+        a.slept_ms += in;
+        a.e_nj += carry + (uint64_t)p_uw * in;
+        uint16_t lv = sleep_level_at(p1, s0, s1, frz_level, level);
+        carry = log_put(&a, frz_flags, lv, 0, k == 0 ? frz_m : 0xFFu, frz_chg, 0, k >= skip);
+    }
+    /* The open period now: [p0, p0 + LOG_PERIOD_MS), the live intake in it. */
+    uint32_t in = overlap_ms(p0, p0 + LOG_PERIOD_MS, s0, s1);
+    acc_slept_ms += in;
+    e_period_nj  += carry + (uint64_t)p_uw * in;
+    acc_start   = p0;
+    log_last_at = p0;
+}
+
+void battery_sleep_account(uint32_t slept_ms) {
+    if (!sleep_pending) return;
+    uint32_t p_uw = frz_on_battery ? BATTERY_P_SLEEP_UW : 0u;   /* none for a sleep on USB power */
+    uint64_t e    = (uint64_t)p_uw * slept_ms;                   /* uW x ms = nJ */
+    if (frz_on_battery) {
+        e_used_nj += e;
+        band_hold = false;
+        count_take(e, C5_EST_NONE);   /* the estimate was forgotten at the wake */
+    }
+    /* The relaxation after an unplug is physical: the pack relaxed while the
+     * board slept (codex, deep-sleep review 2). The next estimate is still
+     * built from reports after the wake: the ring was forgotten. */
+    if (relax_pending) relax_from -= slept_ms < RELAX_S * 1000u ? slept_ms : RELAX_S * 1000u;
+    log_slept_ms += slept_ms;
+    log_reconcile(slept_ms, p_uw);
+    sleep_pending = false;
+    time_left_update();   /* now, not at the next minute: the wake's message reads it */
+}
+
+static void log_task(void) {
     acc_flags |= battery_flags();
     if (!log_started) {
-        acc_start   = timer_read32();
+        acc_start   = log_now();
         log_started = true;
         return;
     }
+    /* No period closes between a deep sleep's wake and its accounting: the
+     * open one would close on its awake time alone, before the sleep is laid
+     * in (codex, deep-sleep verify 2). The intake carries on meanwhile. */
+    if (sleep_pending) return;
     /* Every period closes on schedule, sample or not: the host dates entry n
      * as newest - (count-1-n) * period, so a period that stretched to cover an
      * ADC outage would misdate everything before it. */
-    if (timer_elapsed32(acc_start) < LOG_PERIOD_MS) return;
+    if ((uint32_t)(log_now() - acc_start) < LOG_PERIOD_MS) return;
 
-    log_entry_t *e = &log_buf[log_head];
-    e->vdd_avg   = acc_n ? (uint16_t)(acc_sum / acc_n) : 0u;   /* 0: no conversion in the period */
-    uint64_t ex  = e_period_nj / NJ_PER_MWH_X10;
-    e->e_x10     = ex > 0xFFFFu ? 0xFFFFu : (uint16_t)ex;
-    e_period_nj -= ex * NJ_PER_MWH_X10;   /* the remainder carries: no energy lost to rounding */
-    e->c5_sum    = lg_c5_sum;
-    e->c5_n_lo   = (uint8_t)(lg_c5_n & 0xFFu);
-    e->c5_n_hi   = (uint8_t)(lg_c5_n >> 8);
-    e->c5_min    = lg_c5_min;
-    e->c5_max    = lg_c5_max;
-    e->flags     = battery_flags();
-    e->flags_any = acc_flags;
-    e->level     = (level == LEVEL_UNKNOWN) ? 0xFFu : (uint8_t)(level / 5u);
-    e->led_pm    = acc_led_n ? (uint16_t)(acc_led / acc_led_n) : led_pm;
-    e->bkl       = display_backlight_effective();
-    e->m         = modeled && (chg_st == CHG_MODEL || chg_st == CHG_FROM_FLAT) ? (uint8_t)(m_pm / 5u) : 0xFFu;
-    e->chg       = (uint8_t)(chg_state_now() | chg_latch | (lg_c5_saturated ? CHG_F_SATURATED : 0u));
-
-    log_head = (uint16_t)((log_head + 1u) % LOG_LEN);
-    if (log_count < LOG_LEN) log_count++;
-    log_written++;
-    acc_start  += LOG_PERIOD_MS;   /* a fixed cadence: no drift from loop jitter */
+    log_acc_t a;
+    acc_take(&a);
+    e_period_nj = log_put(&a, battery_flags(), level, display_backlight_effective(), log_m_now(), chg_state_now(),
+                          led_pm, true);   /* the remainder carries: no energy lost to rounding */
+    acc_start  += LOG_PERIOD_MS;           /* a fixed cadence: no drift from loop jitter */
     log_last_at = acc_start;
-    acc_sum = 0; acc_n = 0; acc_led = 0; acc_led_n = 0; acc_flags = 0;
-    lg_c5_sum = 0; lg_c5_n = 0; lg_c5_min = C5_NONE; lg_c5_max = 0;
-    lg_c5_saturated = false; chg_latch = 0;
 }
 
 /* The reply answers in place at &data[3] of a 32-byte report. v5's entry is
@@ -1391,14 +1601,14 @@ static void log_task(uint16_t sample_mv) {
 _Static_assert(3u + BATTERY_LOG_HEADER + BATTERY_LOG_ENTRY_SIZE <= 32u, "HC_BATTLOG must fit the 32-byte report");
 
 void battery_log_read(uint16_t idx, uint8_t *out) {
-    uint32_t since  = log_count ? timer_elapsed32(log_last_at) : 0;
-    out[0] = BATTERY_LOG_VERSION;
+    uint32_t since  = log_count ? log_now() - log_last_at : 0;
+    out[0] = sleep_pending ? BATTERY_LOG_PENDING : BATTERY_LOG_VERSION;
     out[1] = (uint8_t)(log_count & 0xFF); out[2] = (uint8_t)(log_count >> 8);
     out[3] = (uint8_t)(idx & 0xFF);       out[4] = (uint8_t)(idx >> 8);
     for (uint8_t i = 0; i < 4; i++) out[5 + i] = (uint8_t)(since >> (8 * i));
     out[9]  = (uint8_t)(log_written & 0xFF); out[10] = (uint8_t)((log_written >> 8) & 0xFF);
     uint8_t *dst = &out[BATTERY_LOG_HEADER];
-    if (idx >= log_count) {
+    if (idx >= log_count || sleep_pending) {
         memset(dst, 0, BATTERY_LOG_ENTRY_SIZE);
         return;
     }
@@ -1485,5 +1695,5 @@ void battery_task(void) {
         energy_tick();
         level_save_tick();
     }
-    log_task(mv);
+    log_task();
 }
