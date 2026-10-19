@@ -17,7 +17,10 @@
                                 * the USB transceiver turns off, so it ends by itself */
 #define SLEEP_LS_ALL   0x1Fu
 
-void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s);
+/* The mask ends by itself after `ttl_s` (0: 240 s), PMU Sleep after `pmu_s`
+ * (0: 60 s): a probe that cuts USB must end with nothing sent to end it. */
+void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s);
+uint8_t sleep_light_yield(void);
 uint8_t sleep_light_mask(void);
 uint8_t sleep_light_applied(void);   /* the bits in force now */
 extern volatile uint32_t ak820_wfi_count;   /* WFIs the idle thread executed */
@@ -27,14 +30,16 @@ extern volatile uint32_t ak820_wfi_count;   /* WFIs the idle thread executed */
  * seconds asleep. `no_feed`: leave the watchdog unfed while asleep (does it
  * count in Deep-sleep?). */
 void sleep_deep_arm(uint8_t delay_s, uint16_t cap_s, bool no_feed);
+void sleep_deep_cancel(void);   /* disarm, if armed and not yet asleep */
 /* The last run's record, 24 bytes, little endian: u8 state (0 idle, 1 armed,
  * 2 done), u8 reason (0 none, 1 key, 2 cap, 3 strays, 4 blocked), u8 blocked
  * (the preconditions that failed, bits: 1 key down, 2 USB, 4 radio TX,
  * 8 display, 16 flash, 32 RTC, 64 a column off P0/P2, 128 no watchdog
  * counting), u8 slept (0: a key was already down, or no IHRC); u16 seconds asleep, u16 stray wakes;
  * u32 P0 and u32 P2 edge bits that woke it; u16 PLL lock loops; u16
- * key_presses gained across the wake (counted 1 s after); u16 the lock loops'
- * ceiling hit (1) or not. */
+ * key_presses gained across the wake (counted 1 s after); u8 the lock loops'
+ * ceiling hit (1); u8 the USB transceiver was off after the wake (1); u8 the
+ * 20 s USB restart ran (1). */
 void sleep_deep_record(uint8_t *out24);
 
 /* Each main-loop pass, at its very end (after the watchdog kick). */

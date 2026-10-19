@@ -192,6 +192,11 @@ static void pwm_tick_pins_offI(void) {
 void pwm_tick_stopI(void) {
     if (pwm_tick_stopped) return;
     gptStopTimerI(&GPTD4);
+    /* The LLD's stop leaves a latched match (its IC write is a
+     * read-modify-write of a write-only register; codex): clear it here and
+     * in the NVIC. */
+    SN_CT16B3->IC = SN_CT16B3->RIS;
+    NVIC_ClearPendingIRQ(CT16B3_IRQn);
     pwm_tick_pins_offI();
     pwm_tick_stopped = true;
 }

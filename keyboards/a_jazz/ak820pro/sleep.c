@@ -24,19 +24,37 @@
 
 /* ---- Light sleep ---------------------------------------------------------- */
 
-static uint8_t  ls_mask     = 0;
-static uint8_t  ls_yield_ms = 2;
+static uint8_t  ls_mask      = 0;
+static uint8_t  ls_yield_ms  = 2;
 static uint32_t ls_pmu_until = 0;   /* timer ms; bit 4 runs until then */
-static uint8_t  ls_applied  = 0;
+static uint32_t ls_until     = 0;   /* timer ms; the whole mask ends then (codex: a probe that
+                                     * breaks USB must end by itself, or nothing can end it) */
+static uint8_t  ls_applied   = 0;
 /* Read by the idle thread's hooks (chconf.h). */
 volatile bool     ak820_wfi       = false;
 volatile bool     ak820_pmu_sleep = false;
 volatile uint32_t ak820_wfi_count = 0;   /* WFIs the idle thread executed */
 
-void sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s) {
+void sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s) {
+    uint32_t now = timer_read32();
     ls_mask      = mask & SLEEP_LS_ALL;
     ls_yield_ms  = (yield_ms >= 1 && yield_ms <= 4) ? yield_ms : 2;   /* the RX queue wants a pass every ~5.5 ms */
-    ls_pmu_until = timer_read32() + (uint32_t)(pmu_s ? pmu_s : 60) * 1000u;
+    ls_pmu_until = now + (uint32_t)(pmu_s ? pmu_s : 60) * 1000u;
+    ls_until     = now + (uint32_t)(ttl_s ? ttl_s : 240) * 1000u;
+}
+
+uint8_t sleep_light_yield(void) {
+    return ls_yield_ms;
+}
+
+/* PMU Sleep and Deep-sleep turn the USB transceiver off (manual p. 245,
+ * USB_CFG.PHY_EN, bit 30); whether it comes back by itself is not written:
+ * set it back. Returns whether it was off. */
+#    define USB_CFG_PHY_EN (1u << 30)
+static bool usb_phy_onI(void) {
+    if (SN_USB->CFG & USB_CFG_PHY_EN) return false;
+    SN_USB->CFG |= USB_CFG_PHY_EN;
+    return true;
 }
 
 uint8_t sleep_light_mask(void) {
@@ -48,6 +66,7 @@ uint8_t sleep_light_applied(void) {
 }
 
 static void light_task(void) {
+    if (ls_mask && (int32_t)(timer_read32() - ls_until) >= 0) ls_mask = 0;
     uint8_t m = power_rgb_dark() ? ls_mask : 0;
     /* Bit 4 only inside its window, and never with USB up: the transceiver
      * turns itself off in PMU Sleep (manual p. 245). */
@@ -57,6 +76,11 @@ static void light_task(void) {
     if ((m & SLEEP_LS_TICK) && (display_backlight_effective() > 0 || indicators_any_lit()))
         m &= (uint8_t)~SLEEP_LS_TICK;
     if ((m ^ ls_applied) & SLEEP_LS_TICK) pwm_tick_run(!(m & SLEEP_LS_TICK));
+    if ((ls_applied & SLEEP_LS_PMU) && !(m & SLEEP_LS_PMU)) {
+        chSysLock();
+        usb_phy_onI();
+        chSysUnlock();
+    }
     sn32f2xx_set_scan_only((m & SLEEP_LS_SCAN) != 0);
     ak820_wfi       = (m & (SLEEP_LS_WFI | SLEEP_LS_PMU)) != 0;
     ak820_pmu_sleep = (m & SLEEP_LS_PMU) != 0;
@@ -76,6 +100,10 @@ enum { DSB_KEY = 1, DSB_USB = 2, DSB_TX = 4, DSB_DISPLAY = 8, DSB_FLASH = 16, DS
 #    define ADC_ADM_EOC    (1u << 6)
 #    define ADC_ADM_ADS    (1u << 7)
 #    define ADC_ADM_ADENB  (1u << 12)
+#    define UART_LS_RDR    (1u << 0)    /* receive data ready */
+#    define SPI_STAT_BUSY  (1u << 4)
+#    define SPI0_DMACTRL_DMAEN (1u << 0)
+#    define CLK_WAIT_LOOPS 100000u      /* a clock switch reports in a few cycles */
 
 #    define DS_GIVE_UP_MS 60000u   /* armed and never safe this long after the delay: give up */
 #    define DS_STRAYS_MAX 1000u    /* a wake that is neither a key nor a second, this often: leave */
@@ -90,6 +118,9 @@ static uint16_t ds_secs, ds_strays, ds_pll_loops, ds_kp_gain;
 static uint32_t ds_p0_ris, ds_p2_ris;
 static bool     ds_pll_ceiling;
 static bool     ds_slept;
+static bool     ds_phy_was_off;   /* the transceiver was off after the wake */
+static bool     ds_usb_restarted; /* the 20 s fallback ran */
+static bool     ds_usb_watch;     /* waiting to see USB come back */
 static uint16_t ds_kp_before;
 static uint32_t ds_woke_at;
 static bool     ds_kp_pending;
@@ -110,7 +141,13 @@ void sleep_deep_arm(uint8_t delay_s, uint16_t cap_s, bool no_feed) {
     ds_p0_ris = ds_p2_ris = 0;
     ds_pll_ceiling = false;
     ds_slept       = false;
+    ds_phy_was_off = ds_usb_restarted = ds_usb_watch = false;
     ds_kp_pending  = false;
+    ls_mask        = 0;   /* light sleep off: the deep run starts from the plain board */
+}
+
+void sleep_deep_cancel(void) {
+    if (ds_state == DS_ARMED) ds_state = DS_IDLE;
 }
 
 void sleep_deep_record(uint8_t *o) {
@@ -128,6 +165,8 @@ void sleep_deep_record(uint8_t *o) {
     o[16] = (uint8_t)ds_pll_loops; o[17] = (uint8_t)(ds_pll_loops >> 8);
     o[18] = (uint8_t)ds_kp_gain;   o[19] = (uint8_t)(ds_kp_gain >> 8);
     o[20] = ds_pll_ceiling ? 1 : 0;
+    o[21] = ds_phy_was_off ? 1 : 0;
+    o[22] = ds_usb_restarted ? 1 : 0;
 }
 
 /* The wake pins: the matrix's columns, which must all sit on P0 or P2 (the
@@ -144,13 +183,30 @@ static bool col_masks(uint32_t *p0, uint32_t *p2) {
     return true;
 }
 
+/* The radio's side is quiet: nothing queued or awaiting an ACK, the serial
+ * output queue empty (the module's ACKs go straight to it, bypassing the
+ * protocol queue; codex), and UART2's transmitter empty. I-class, and a
+ * thread form that takes the lock. */
+static bool tx_quietI(void) {
+    return ch582_tx_idle() && oqIsEmptyI(&SD2.oqueue) && (SN_UART2->LS & UART_LS_TEMT);
+}
+
+static bool tx_quietI_locked(void) {
+    chSysLock();
+    bool q = tx_quietI();
+    chSysUnlock();
+    return q;
+}
+
 static uint8_t blockers(void) {
     uint8_t b = 0;
     for (uint8_t r = 0; r < MATRIX_ROWS; r++)
         if (matrix_get_row(r)) b |= DSB_KEY;
     if (battery_usb_configured()) b |= DSB_USB;
-    if (!ch582_tx_idle() || !(SN_UART2->LS & UART_LS_TEMT)) b |= DSB_TX;
-    if (!display_bus_idle()) b |= DSB_DISPLAY;
+    if (!tx_quietI_locked()) b |= DSB_TX;
+    if (!display_bus_idle() || (SN_SPI0->STAT & SPI_STAT_BUSY) || (SN_SPI0->DMACTRL & SPI0_DMACTRL_DMAEN) ||
+        (SN_SPI1->STAT & SPI_STAT_BUSY))
+        b |= DSB_DISPLAY;
     if (kb_eeconfig_write_pending() || EFLD1.state != FLASH_READY) b |= DSB_FLASH;
     if (!rtc_sleep_ok()) b |= DSB_RTC;
     uint32_t p0, p2;
@@ -171,7 +227,7 @@ static bool take_second(void) {
     return true;
 }
 
-static void deep_sleep(void) {
+static bool deep_sleep(void) {
     WDT_SCOPE(WDT_SITE_DEEP_SLEEP);
     static volatile uint32_t sacrificial;
     sacrificial++;   /* the breadcrumb above must reach RAM before the CPU stops */
@@ -184,6 +240,12 @@ static void deep_sleep(void) {
      * register writes): a lock call would unlock on its way out, and a wake
      * interrupt taken has no handler (codex, must-fix 1). */
     chSysLock();
+    /* The admission again, under the lock: nothing can be queued for the
+     * radio, or USB come up, between the check and the teardown (codex). */
+    if (battery_usb_configured() || !tx_quietI()) {
+        chSysUnlock();
+        return false;
+    }
     /* Outputs off: the LED matrix, the 20 kHz tick with the pins it drives. */
     sn32f2xx_sleep_enterI();
     pwm_tick_stopI();
@@ -235,7 +297,8 @@ static void deep_sleep(void) {
         /* The system clock to the IHRC, then the PLL off (never a selected
          * PLL, p. 64), then the flash to its slow mode for <= 24 MHz. */
         SN_SYS0->CLKCFG = 0x0;
-        while ((SN_SYS0->CLKCFG & 0x70u) != 0x0u) {}
+        for (uint32_t k = 0; (SN_SYS0->CLKCFG & 0x70u) != 0x0u; k++)
+            if (k >= CLK_WAIT_LOOPS) NVIC_SystemReset();
         SN_SYS0->PLLCTRL = pllctrl & ~(1u << 15);   /* PLLEN */
         SN_FLASH->LPCTRL = 0x5AFA0000u;
         slept = true;
@@ -247,7 +310,8 @@ static void deep_sleep(void) {
             __WFI();
             SN_PMU->CTRL = 0;
             uint32_t r0 = SN_GPIO0->RIS & p0m, r2 = SN_GPIO2->RIS & p2m;
-            if (take_second()) {
+            bool second = take_second();
+            if (second) {
                 if (!ds_no_feed) SN_WDT->FEED = (mskWDT_WDKEY | mskWDT_FV);   /* no lock calls in here */
                 secs++;
                 if (!(r0 || r2) && secs >= ds_cap_s) {
@@ -261,6 +325,7 @@ static void deep_sleep(void) {
                 ds_reason = DS_KEY;
                 break;
             }
+            if (second) continue;   /* a second is not a stray */
             if (++strays >= DS_STRAYS_MAX) {
                 ds_reason = DS_STRAYS;
                 break;
@@ -280,7 +345,8 @@ static void deep_sleep(void) {
         ds_pll_ceiling = loops >= DS_PLL_LOOPS;
         if (ds_pll_ceiling) NVIC_SystemReset();   /* the UART, USB and timers all assume 48 MHz */
         SN_SYS0->CLKCFG = clkcfg;
-        while ((SN_SYS0->CLKCFG & 0x70u) != (clkcfg << 4)) {}
+        for (uint32_t k = 0; (SN_SYS0->CLKCFG & 0x70u) != (clkcfg << 4); k++)
+            if (k >= CLK_WAIT_LOOPS) NVIC_SystemReset();
     }
     /* The wake pins quiet again; the temporary vectors off BEFORE the old
      * enables go back (writing ISER cannot disable one; codex). */
@@ -292,27 +358,38 @@ static void deep_sleep(void) {
     NVIC->ISER[0] = iser;
     /* Rows to the unselected level the matrix scan expects (driven high). */
     for (uint8_t i = 0; i < ARRAY_SIZE(ds_rows); i++) gpio_write_pin_high(ds_rows[i]);
-    /* The ADC and UART2's receiver back, at 48 MHz. */
+    /* The ADC and UART2's receiver back, at 48 MHz; whatever the receiver
+     * holds from before is dropped, with its error flags (reading LS clears
+     * them), and the radio's parser starts its window over (codex). */
     SN_ADC->ADM    = adm;
     SN_UART2->CTRL = uart_ctrl;
+    for (uint8_t k = 0; k < 32u && (SN_UART2->LS & UART_LS_RDR); k++) (void)SN_UART2->RB;
+    (void)SN_UART2->LS;
+    iqResetI(&SD2.iqueue);
     for (volatile uint32_t d = 0; d < 1200u; d++) {}   /* the ADC's 100 us before a conversion */
     /* The kernel's alarm: left off and pended, so its handler serves the
      * timers now and re-arms the next one. */
     SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
     sn32f2xx_sleep_exitI();
     pwm_tick_startI();
+    bool phy_off = usb_phy_onI();
     rtc_account_sleepI(secs);   /* both software clocks, before any second is served */
     chSysUnlock();
 
-    ds_secs   = secs;
-    ds_strays = strays;
-    ds_slept  = slept;
-    /* The transceiver was off: start USB over, so a host that returns can
-     * enumerate it (the data was down, by the preconditions). */
-    if (slept) restart_usb_driver(&USB_DRIVER);
+    ch582_rx_resync();
+    ls_applied &= (uint8_t)~SLEEP_LS_TICK;   /* the tick runs again; light_task stops it if wanted */
+    ds_secs        = secs;
+    ds_strays      = strays;
+    ds_slept       = slept;
+    ds_phy_was_off = phy_off;
+    /* No USB restart here: its 50 ms wait would hold the main loop while the
+     * waking key is down (codex). The transceiver is back on; if the host has
+     * not configured it 20 s after the wake, deep_task() restarts it once. */
+    ds_usb_watch  = slept;
     ds_woke_at    = timer_read32();
     ds_kp_pending = true;
     ds_state      = DS_DONE;
+    return true;
 }
 
 static void deep_task(void) {
@@ -320,12 +397,19 @@ static void deep_task(void) {
         ds_kp_gain    = (uint16_t)(health_key_presses() - ds_kp_before);
         ds_kp_pending = false;
     }
+    if (ds_usb_watch && timer_elapsed32(ds_woke_at) >= 20000u) {
+        ds_usb_watch = false;
+        if (!battery_usb_configured()) {
+            ds_usb_restarted = true;
+            restart_usb_driver(&USB_DRIVER);   /* 50 ms, long after the waking key */
+        }
+    }
     if (ds_state != DS_ARMED) return;
     uint32_t waited = timer_elapsed32(ds_armed_at);
     if (waited < (uint32_t)ds_delay_s * 1000u) return;
     ds_blocked = blockers();
-    if (ds_blocked == 0) {
-        deep_sleep();
+    if (ds_blocked == 0 && deep_sleep()) {
+        return;
     } else if (waited >= (uint32_t)ds_delay_s * 1000u + DS_GIVE_UP_MS) {
         ds_reason = DS_BLOCKED;
         ds_state  = DS_DONE;
@@ -338,7 +422,9 @@ void sleep_task(void) {
 }
 
 #else
-void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s) { (void)mask; (void)yield_ms; (void)pmu_s; }
+void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s) { (void)mask; (void)yield_ms; (void)pmu_s; (void)ttl_s; }
+uint8_t sleep_light_yield(void) { return 0; }
+void    sleep_deep_cancel(void) {}
 uint8_t sleep_light_mask(void) { return 0; }
 uint8_t sleep_light_applied(void) { return 0; }
 void    sleep_deep_arm(uint8_t delay_s, uint16_t cap_s, bool no_feed) { (void)delay_s; (void)cap_s; (void)no_feed; }

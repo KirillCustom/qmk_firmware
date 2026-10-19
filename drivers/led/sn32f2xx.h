@@ -101,7 +101,9 @@ void sn32f2xx_set_power_scale(uint8_t scale);
  * ISR, or the mux freezes with one row/channel driving at full duty. */
 void sn32f2xx_blank(void);
 
-/* Scan-only, for a board's light sleep: while on, the row ISR drives no LED
+/* Sleep hooks, compiled only where the board defines SN32F2XX_SLEEP_HOOKS.
+ *
+ * Scan-only, for a board's light sleep: while on, the row ISR drives no LED
  * and scans one key row per call at a longer period (SN32F2XX_SCAN_ONLY_TICKS),
  * each key sampled every ~3.9 ms against the field's ~4.6. The ISR applies it at
  * its next call, and the LED field resumes where it was when it ends. Only for

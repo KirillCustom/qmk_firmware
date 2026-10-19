@@ -17,6 +17,9 @@
  *   A4 A5 C0 C1 C2 C3 A6 A7 C4 C5 C6 C7 C14 C8 C9
  * and the SN_PFPA pin-mux constants are datasheet-verified (docs/HARDWARE_PWM.md). */
 #define SN32F2XX_PWM_MULTI_TIMER
+#ifdef AK820_DEV_HOOKS
+#    define SN32F2XX_SLEEP_HOOKS   // scan-only and the deep-sleep hooks, for sleep.c's experiments
+#endif
 #define SN32F2XX_PWM_COL_MAP { \
     {&PWMD1, 4}, {&PWMD1, 5}, {&PWMD1, 8}, {&PWMD2, 1}, {&PWMD2, 2}, {&PWMD2, 3}, \
     {&PWMD1, 6}, {&PWMD1, 7}, {&PWMD1, 9}, {&PWMD0, 1}, {&PWMD0, 0}, {&PWMD1, 10}, \

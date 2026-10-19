@@ -625,9 +625,11 @@ void housekeeping_task_kb(void) {
     // wedged pass another full timeout and prove nothing about what follows.
     watchdog_kick();
 
-    /* The sleep experiments (dev builds; a no-op otherwise): after the kick,
-     * so a yield or a deep sleep starts from a fresh timeout. */
+#ifdef AK820_DEV_HOOKS
+    /* The sleep experiments: after the kick, so a yield or a deep sleep
+     * starts from a fresh timeout. */
     sleep_task();
+#endif
 }
 
 /*

@@ -720,6 +720,15 @@ static void ch582_tx_pump(void) {
     tx_stat_sent++;
 }
 
+/* The parser's 3-byte window starts over at the next ch582_task(): bytes from
+ * before a gap in the line (sleep.c's deep sleep, its receiver off) must not
+ * pair with bytes after it into a phantom frame. */
+static volatile bool rx_resync_req = false;
+
+void ch582_rx_resync(void) {
+    rx_resync_req = true;
+}
+
 bool ch582_tx_idle(void) {
     return !tx_in_flight && tx_head == tx_tail;
 }
@@ -1035,6 +1044,10 @@ void ch582_task(void) {
      *                   independent (streams even while disconnected) -> never use
      *                   it as a "connected" signal. */
     static uint8_t b2 = 0, b1 = 0, b0 = 0;
+    if (rx_resync_req) {
+        rx_resync_req = false;
+        b2 = b1 = b0 = 0;
+    }
 
     /* Cold-boot-only select retry. The mode slider is wired directly to the
      * CH582F, so once the module is up it handles advertising/reconnect itself

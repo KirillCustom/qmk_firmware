@@ -35,11 +35,17 @@
 #    define CH_CFG_IDLE_LOOP_HOOK() do {                                    \
         extern volatile bool     ak820_wfi, ak820_pmu_sleep;                \
         extern volatile uint32_t ak820_wfi_count;                           \
+        /* Masked: a preemption between the mode and the WFI would leave   \
+         * the mode to the leave hook; a pending interrupt still ends the  \
+         * WFI, and is taken at the unmask. */                              \
+        __disable_irq();                                                    \
         if (ak820_wfi) {                                                    \
             SN_PMU->CTRL = ak820_pmu_sleep ? 4u : 0u;                       \
             ak820_wfi_count++;                                              \
+            __DSB();                                                        \
             __WFI();                                                        \
             SN_PMU->CTRL = 0;                                               \
         }                                                                   \
+        __enable_irq();                                                     \
     } while (0)
 #endif

@@ -662,6 +662,7 @@ __attribute__((weak)) void sn32f2xx_isr_exit_hook(void) {}
  * key row per ISR at a longer period, on its own row counter so the LED field's
  * row pairing is untouched and resumes where it was. ISR-owned but for the
  * request flag. */
+#if defined(SN32F2XX_SLEEP_HOOKS)
 #ifndef SN32F2XX_SCAN_ONLY_TICKS
 #    define SN32F2XX_SCAN_ONLY_TICKS 3000u   /* 0.625 ms at 4.8 MHz, plus the body: each key every ~3.9 ms,
                                                * under sym_defer_pk's 5 ms so debounce sees a fresh sample */
@@ -677,6 +678,7 @@ void sn32f2xx_set_scan_only(bool on) {
 bool sn32f2xx_scan_only_active(void) {
     return scan_only;
 }
+#endif
 
 static void rgb_callback(PWMDriver *pwmp) {
     sn32f2xx_isr_enter_hook();
@@ -718,14 +720,16 @@ static void rgb_callback(PWMDriver *pwmp) {
         }
     }
 #endif
-#if defined(SHARED_MATRIX) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+#if defined(SN32F2XX_SLEEP_HOOKS) && defined(SHARED_MATRIX) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
     /* Scan-only: the switch is applied here, between periods. Entering blanks
      * every output once (the columns stay released from PWM, so they read as
-     * the inputs every scan needs) and lengthens the period; leaving restores
-     * the field's period, and the next update_pwm_channels() drives it again. */
+     * the inputs every scan needs); the period changes in the locked re-arm
+     * below; leaving restores the field's period, and the next
+     * update_pwm_channels() drives it again. */
+    bool period_change = false;
     if (scan_only_req != scan_only) {
-        scan_only = scan_only_req;
-        pwmChangePeriodI(pwmp, scan_only ? SN32F2XX_SCAN_ONLY_TICKS : periodticks);
+        scan_only     = scan_only_req;
+        period_change = true;
         if (scan_only) shared_matrix_rgb_disable_output();
     }
     if (scan_only) {
@@ -771,6 +775,9 @@ static void rgb_callback(PWMDriver *pwmp) {
     }
     sn32f2xx_isr_exit_hook();
     chSysLockFromISR();
+#if defined(SN32F2XX_SLEEP_HOOKS) && defined(SHARED_MATRIX) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    if (period_change) pwmChangePeriodI(pwmp, scan_only ? SN32F2XX_SCAN_ONLY_TICKS : periodticks);
+#endif
     // Advance the timer to just before the wrap-around, that will start a new PWM cycle
     pwm_lld_change_counter(pwmp, UINT16_MAX);
 #if defined(SN32F2XX_PWM_MULTI_TIMER)
@@ -787,7 +794,7 @@ static void rgb_callback(PWMDriver *pwmp) {
     chSysUnlockFromISR();
 }
 
-#if (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+#if defined(SN32F2XX_SLEEP_HOOKS) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
 /* Deep sleep (a board's experiment): every output off and the row ISR's
  * notification off, the columns left released from PWM (inputs with their
  * pull-ups, as for a scan); then put back, the counters re-armed on one
@@ -808,6 +815,11 @@ void sn32f2xx_sleep_enterI(void) {
 }
 
 void sn32f2xx_sleep_exitI(void) {
+    /* A match latched while the notification was off: cleared, in the timer
+     * and the NVIC, so the first ISR after this is a real period (codex). */
+    uint32_t ris = SN32_CT_PWM_GET(&PWMD1, irq.RIS);
+    SN32_CT_PWM_SET(&PWMD1, irq.IC, ris);
+    NVIC_ClearPendingIRQ(CT16B1_IRQn);
     pwm_lld_change_counter(&PWMD1, UINT16_MAX);
 #    if defined(SN32F2XX_PWM_MULTI_TIMER)
     pwm_lld_change_counter(&PWMD0, UINT16_MAX);
