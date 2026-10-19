@@ -25,7 +25,7 @@ uint32_t sleep_pass_us(void);
 /* A wake's recovery is under way: no sleep, and deferred flash writes wait. */
 bool sleep_recovering(void);
 
-/* The sleep's figures for HC_POWER page 1 (hid_protocol.c), 26 bytes:
+/* The sleep's figures for HC_POWER page 1 (hid_protocol.c), 28 bytes:
  * u8 0x81, u8 the last wake's source (SLEEP_WAKE_*), u8 validity bits
  * (SLEEP_V_*), u8 the recovery's open steps (SLEEP_RC_* still pending);
  * u32 sleeps since boot (also the last sleep's sequence number), u32 slept
