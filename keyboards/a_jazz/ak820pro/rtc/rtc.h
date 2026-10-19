@@ -60,6 +60,10 @@ void rtc_task(void);
  *  - rtc_wake_slept(): the slept seconds once the coarse read is done (from the
  *    PCF, or the counted ones if it failed); rtc_wake_busy(): until the
  *    acquisition has ended;
+ *  - rtc_wake_gauge_taken(): the gauge has the slept seconds; the acquisition
+ *    starts only after it, so the gauge's pass is free of I2C;
+ *  - rtc_pass_used_bus(): a PCF transaction since the last rtc_pass_mark(),
+ *    which sleep_task() calls at each pass's end;
  *  - rtc_clock_generation(): bumped by every change to the calendar shown, so
  *    the display can tell a paint made after the correction. */
 bool     rtc_sleep_ok(void);
@@ -70,6 +74,9 @@ void     rtc_wake_allow(void);
 bool     rtc_wake_busy(void);
 void     rtc_wake_abandon(void);   /* sleep.c's bound: what is left ends now */
 bool     rtc_wake_slept(uint32_t *slept_s, bool *from_pcf);
+void     rtc_wake_gauge_taken(void);
+bool     rtc_pass_used_bus(void);
+void     rtc_pass_mark(void);
 int16_t  rtc_wake_acq_step_ms(void);
 uint8_t  rtc_wake_acq_result(void);   /* the acquisition's state: 2 done, 3 aborted */
 uint16_t rtc_clock_generation(void);

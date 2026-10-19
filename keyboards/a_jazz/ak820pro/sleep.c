@@ -281,8 +281,6 @@ static uint8_t  ds_reason, ds_flags;
 static uint16_t ds_strays, ds_pll_loops, ds_kp_before;
 static uint32_t ds_secs, ds_p0_ris, ds_p1_ris, ds_p2_ris;
 static uint32_t ds_sleeps, ds_slept_total;   /* since boot */
-static uint32_t ds_cap_s = DS_BACKSTOP_S, ds_preset_s = 0;
-static bool     ds_no_feed = false;
 static uint16_t ds_wanted_blocked;   /* the blockers while a sleep was last wanted */
 
 /* The recovery's state (below). */
@@ -297,13 +295,21 @@ static uint32_t ur_at;
 static uint16_t ur_fn0;
 static uint32_t rc_pcf_s;
 static bool     rc_usb_watch;
+static uint16_t rc_samples0;         /* battery_supply_samples() at the wake */
+/* The steps that ended on their own timeout or the 10 s bound, not by doing
+ * their job (SLEEP_RC_* bits; codex, deep-sleep build review 7). */
+static uint8_t  rc_timed_out;
 
 static void recovery_begin(uint8_t reason);
 
 /* The sleep: false if it unwound before the teardown (a host's frame, the
  * radio busy), true otherwise, whether it slept (ds_flags) or a source was
- * already active. */
-static bool deep_sleep(void) {
+ * already active. It wakes after `cap_s` counted seconds, counting from
+ * `preset_s`; `no_feed` leaves the watchdog unfed. The ladder's sleep passes
+ * the backstop, fed, from 0; only the dev bench's arm passes its own, so an
+ * arm cancelled or left over never reaches the ladder's (codex, deep-sleep
+ * build review 5). */
+static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
     WDT_SCOPE(WDT_SITE_DEEP_SLEEP);
     static volatile uint32_t sacrificial;
     sacrificial++;   /* the breadcrumb above must reach RAM before the CPU stops */
@@ -364,7 +370,7 @@ static bool deep_sleep(void) {
     NVIC->ICPR[0] = wake_irqs;
     NVIC->ISER[0] = wake_irqs;
 
-    uint32_t secs = ds_preset_s, strays = 0;
+    uint32_t secs = preset_s, strays = 0;
     if (take_second()) secs++;   /* one that came since the lock: its handler cannot run now */
     /* A source already active is a wake with no sleep (codex, must-fix 2): a
      * column low (a key down, or pressed before the clear erased its edge);
@@ -409,9 +415,9 @@ static bool deep_sleep(void) {
             uint32_t r0 = SN_GPIO0->RIS & p0w, r1 = SN_GPIO1->RIS & p1w, r2 = SN_GPIO2->RIS & p2w;
             bool second = take_second();
             if (second) {
-                if (!ds_no_feed) SN_WDT->FEED = (mskWDT_WDKEY | mskWDT_FV);   /* no lock calls in here */
+                if (!no_feed) SN_WDT->FEED = (mskWDT_WDKEY | mskWDT_FV);   /* no lock calls in here */
                 secs++;
-                if (!(r0 || r1 || r2) && secs >= ds_cap_s) {
+                if (!(r0 || r1 || r2) && secs >= cap_s) {
                     ds_reason = SLEEP_WAKE_BACKSTOP;
                     break;
                 }
@@ -476,7 +482,7 @@ static bool deep_sleep(void) {
     sn32f2xx_sleep_exitI();
     pwm_tick_startI();
     bool     phy_off = usb_phy_onI();
-    uint32_t counted = secs - ds_preset_s;
+    uint32_t counted = secs - preset_s;
     rtc_account_sleepI(counted);   /* both software clocks, before any second is served */
     if (slept) rtc_wake_beginI(counted);
     chSysUnlock();
@@ -505,8 +511,8 @@ static bool deep_sleep(void) {
  *  5. the radio's battery poll, once the waking report has left; its reply
  *     or 2 s;
  *  6. host content expired (at the wake);
- *  7. the supply: 1.5 s of samples after the wake (on EXTERNAL the ladder is
- *     off, so the board stays awake);
+ *  7. the supply: 1.5 s of fresh samples after the wake, or 3 s whatever
+ *     they were (on EXTERNAL the ladder is off, so the board stays awake);
  *  8. USB: one re-attach if no host's frame came within 3 s, through to D+
  *     back;
  *  9. the display: the backlight held dark until the clock and the battery
@@ -514,7 +520,8 @@ static bool deep_sleep(void) {
 #define RC_INPUT_MAX_MS   50u
 #define RC_POLL_AFTER_MS  100u
 #define RC_POLL_WAIT_MS   2000u
-#define RC_SUPPLY_MS      1500u
+#define RC_SUPPLY_SAMPLES 15u        /* 1.5 s of the battery task's 10 Hz samples */
+#define RC_SUPPLY_MAX_MS  3000u
 #define RC_HOLD_MAX_MS    500u
 #define UR_WAIT_MS        3000u
 #define UR_OFF_MS         100u
@@ -529,6 +536,8 @@ static void recovery_begin(uint8_t reason) {
     rc_woke_at   = timer_read32();
     rc_poll_sent = false;
     rc_reports0  = ch582_battery_reports();
+    rc_samples0  = battery_supply_samples();
+    rc_timed_out = 0;
     /* A key or knob wake is input: the ladder's idle restarts even if the
      * first detent decodes nothing (codex, plan review 4). */
     if (reason == SLEEP_WAKE_KEY) last_matrix_activity_trigger();
@@ -576,6 +585,7 @@ static void recovery_task(void) {
                 rc_pcf_s = s;
                 ds_slept_total += s;
                 battery_sleep_account(s * 1000u);
+                rtc_wake_gauge_taken();
             }
         }
         if (!rc_done(SLEEP_RC_DISPLAY)) display_wake_release();
@@ -586,6 +596,7 @@ static void recovery_task(void) {
             chSysUnlock();
         }
         ur_state  = UR_DONE;
+        rc_timed_out |= rc_open;
         rc_open   = 0;
         rc_active = false;
         ds_flags |= SLEEP_V_BOUND;
@@ -598,13 +609,17 @@ static void recovery_task(void) {
                 : ds_reason == SLEEP_WAKE_KNOB   ? last_encoder_activity_time() != rc_enc_t0
                                                  : true;
         if (in || since >= RC_INPUT_MAX_MS) {
+            if (!in) rc_timed_out |= SLEEP_RC_INPUT;
             rc_close(SLEEP_RC_INPUT);
             rtc_wake_allow();
         }
     }
     /* 2 and 3. The clock's coarse read, then the gauge: in a pass with no
-     * I2C (rtc.c marks the display's deferral when it used the bus). */
-    if (rc_done(SLEEP_RC_INPUT) && !rc_done(SLEEP_RC_GAUGE) && !display_pass_deferred()) {
+     * PCF transaction (rtc.c counts them from the last pass's end; the
+     * display's deferral flag is cleared before this runs, so it cannot say:
+     * codex, deep-sleep build review 2). rtc.c holds the acquisition until
+     * the gauge has its seconds, so the pass after the coarse read is free. */
+    if (rc_done(SLEEP_RC_INPUT) && !rc_done(SLEEP_RC_GAUGE) && !rtc_pass_used_bus()) {
         uint32_t s;
         bool     pcf;
         if (rtc_wake_slept(&s, &pcf)) {
@@ -612,6 +627,7 @@ static void recovery_task(void) {
             if (pcf) ds_flags |= SLEEP_V_PCF;
             ds_slept_total += s;
             battery_sleep_account(s * 1000u);
+            rtc_wake_gauge_taken();
             rc_gauge_at = timer_read32();
             rc_close(SLEEP_RC_GAUGE);
             display_wake_corrected();   /* the clock and the row to repaint, now */
@@ -628,11 +644,25 @@ static void recovery_task(void) {
         rc_poll_sent = true;
         rc_poll_at   = timer_read32();
     }
-    if (rc_poll_sent && !rc_done(SLEEP_RC_RADIO) &&
-        (ch582_battery_reports() != rc_reports0 || timer_elapsed32(rc_poll_at) >= RC_POLL_WAIT_MS))
-        rc_close(SLEEP_RC_RADIO);
-    /* 7. The supply. */
-    if (!rc_done(SLEEP_RC_SUPPLY) && since >= RC_SUPPLY_MS) rc_close(SLEEP_RC_SUPPLY);
+    if (rc_poll_sent && !rc_done(SLEEP_RC_RADIO)) {
+        if (ch582_battery_reports() != rc_reports0) {
+            rc_close(SLEEP_RC_RADIO);
+        } else if (timer_elapsed32(rc_poll_at) >= RC_POLL_WAIT_MS) {
+            rc_timed_out |= SLEEP_RC_RADIO;
+            rc_close(SLEEP_RC_RADIO);
+        }
+    }
+    /* 7. The supply: 1.5 s of fresh samples since the wake (the battery
+     * task's conversions that read), or 3 s whatever they were, flagged
+     * (codex, deep-sleep build review 7). */
+    if (!rc_done(SLEEP_RC_SUPPLY)) {
+        if ((uint16_t)(battery_supply_samples() - rc_samples0) >= RC_SUPPLY_SAMPLES) {
+            rc_close(SLEEP_RC_SUPPLY);
+        } else if (since >= RC_SUPPLY_MAX_MS) {
+            rc_timed_out |= SLEEP_RC_SUPPLY;
+            rc_close(SLEEP_RC_SUPPLY);
+        }
+    }
     /* 8. USB: latched, a frame since this wake; else one re-attach. D+ off
      * and on are read-modify-writes of CFG, which the USB ISR also writes:
      * under the lock (codex). Never restart_usb_driver(): its 50 ms wait
@@ -657,11 +687,14 @@ static void recovery_task(void) {
     }
     if (ur_state == UR_DONE) rc_close(SLEEP_RC_USB);
     /* 9. The display. */
-    if (!rc_done(SLEEP_RC_DISPLAY) && rc_done(SLEEP_RC_GAUGE) &&
-        (display_wake_repainted() || timer_elapsed32(rc_gauge_at) >= RC_HOLD_MAX_MS)) {
-        display_wake_release();
-        rc_close(SLEEP_RC_DISPLAY);
-        if (rc_pcf_s >= RC_LONG_SLEEP_S) power_wake_notice();   /* "6h use left", if it matters */
+    if (!rc_done(SLEEP_RC_DISPLAY) && rc_done(SLEEP_RC_GAUGE)) {
+        bool painted = display_wake_repainted();
+        if (painted || timer_elapsed32(rc_gauge_at) >= RC_HOLD_MAX_MS) {
+            if (!painted) rc_timed_out |= SLEEP_RC_DISPLAY;
+            display_wake_release();
+            rc_close(SLEEP_RC_DISPLAY);
+            if (rc_pcf_s >= RC_LONG_SLEEP_S) power_wake_notice();   /* "6h use left", if it matters */
+        }
     }
     if (rc_open == 0) rc_active = false;
 }
@@ -687,6 +720,7 @@ void sleep_page1_fill(uint8_t *out) {
     PUT16(ds_pll_loops);
     PUT16(ds_strays);
     PUT16(ds_wanted_blocked);
+    *p++ = rc_timed_out;
 #undef PUT16
 #undef PUT32
 }
@@ -700,30 +734,31 @@ static uint16_t ds_blocked, ds_kp_gain;
 static uint32_t ds_armed_at, ds_woke_at;
 static uint8_t  ds_delay_s;
 static bool     ds_kp_pending;
+static uint32_t ds_arm_cap_s, ds_arm_preset_s;   /* this arm's, never the ladder's */
+static bool     ds_arm_no_feed;
 
 void sleep_deep_arm(uint8_t delay_s, uint32_t cap_s, bool no_feed, uint32_t preset_s) {
-    ds_state      = DS_ARMED;
-    ds_reason     = SLEEP_WAKE_NONE;
-    ds_blocked    = 0;
-    ds_armed_at   = timer_read32();
-    ds_delay_s    = delay_s;
-    ds_cap_s      = cap_s ? cap_s : DS_BACKSTOP_S;
-    ds_no_feed    = no_feed;
-    ds_preset_s   = preset_s;
-    if (ds_cap_s <= ds_preset_s) ds_cap_s = ds_preset_s + 1u;
-    ds_kp_gain    = 0;
+    /* The counted seconds past the preset at most the backstop's, so the
+     * slept time's ms (x 1000, u32) and the cap (preset + span) never wrap
+     * (codex, deep-sleep build review 4). 0: the backstop. */
+    if (preset_s > UINT32_MAX - DS_BACKSTOP_S) preset_s = UINT32_MAX - DS_BACKSTOP_S;
+    uint32_t span = cap_s > preset_s ? cap_s - preset_s : 1u;
+    if (cap_s == 0 || span > DS_BACKSTOP_S) span = DS_BACKSTOP_S;
+    ds_state        = DS_ARMED;
+    ds_reason       = SLEEP_WAKE_NONE;
+    ds_blocked      = 0;
+    ds_armed_at     = timer_read32();
+    ds_delay_s      = delay_s;
+    ds_arm_cap_s    = preset_s + span;
+    ds_arm_no_feed  = no_feed;
+    ds_arm_preset_s = preset_s;
+    ds_kp_gain      = 0;
     ds_kp_pending = false;
     ls_mask       = 0;   /* light sleep off: the deep run starts from the plain board */
 }
 
 void sleep_deep_cancel(void) {
     if (ds_state == DS_ARMED) ds_state = DS_IDLE;
-}
-
-static void arm_restore(void) {
-    ds_cap_s    = DS_BACKSTOP_S;
-    ds_no_feed  = false;
-    ds_preset_s = 0;
 }
 
 static void arm_task(void) {
@@ -737,16 +772,14 @@ static void arm_task(void) {
     ds_blocked = blockers() & (uint16_t)~(DSB_LIT | DSB_RGB);   /* the bench forces the stage */
     if (ds_blocked == 0 && rtc_sleep_prepare()) {
         battery_sleep_enter();
-        if (deep_sleep()) {
+        if (deep_sleep(ds_arm_cap_s, ds_arm_no_feed, ds_arm_preset_s)) {
             ds_state      = DS_DONE;
             ds_woke_at    = timer_read32();
             ds_kp_pending = true;
-            arm_restore();
         }
     } else if (waited >= (uint32_t)ds_delay_s * 1000u + DS_GIVE_UP_MS) {
         ds_reason = SLEEP_WAKE_BLOCKED;
         ds_state  = DS_DONE;
-        arm_restore();
     }
 }
 
@@ -766,6 +799,7 @@ void sleep_deep_record(uint8_t *o) {
     *p++ = (uint8_t)ds_pll_loops; *p++ = (uint8_t)(ds_pll_loops >> 8);
     *p++ = (uint8_t)ds_kp_gain;   *p++ = (uint8_t)(ds_kp_gain >> 8);
     *p++ = (uint8_t)ds_sleeps;    *p++ = (uint8_t)(ds_sleeps >> 8);
+    *p++ = rc_timed_out;
 }
 #else
 void sleep_deep_arm(uint8_t delay_s, uint32_t cap_s, bool no_feed, uint32_t preset_s) {
@@ -791,8 +825,9 @@ void sleep_task(void) {
         ds_wanted_blocked = b;
         if (b == 0 && rtc_sleep_prepare()) {
             battery_sleep_enter();
-            deep_sleep();
+            deep_sleep(DS_BACKSTOP_S, false, 0);
         }
     }
+    rtc_pass_mark();                  /* the PCF transactions of the next pass count from here */
     pass_t0 = chVTGetSystemTimeX();   /* the next pass starts here */
 }

@@ -708,8 +708,13 @@ bool rgb_matrix_eeprom_flush_allowed(void) {
      *
      * Cheap enough to run from rgb_task_sync: six byte compares and a timer
      * read. Self-contained on purpose -- it must not depend on PARAM_OVERLAY,
-     * which is a removable nicety. */
-    if (lcd_blit_busy()) return false;
+     * which is a removable nicety.
+     *
+     * And never during a deep sleep's wake recovery, whose passes are
+     * budgeted: kb_eeconfig's flush waits for it too, and an RGB key pressed
+     * to wake the board would otherwise flush here (codex, deep-sleep build
+     * review 3). */
+    if (lcd_blit_busy() || sleep_recovering()) return false;
 
     static uint8_t  last_mode = 0, last_h = 0, last_s = 0, last_v = 0, last_sp = 0;
     static bool     last_on = false, primed = false;

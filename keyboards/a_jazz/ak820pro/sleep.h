@@ -25,14 +25,18 @@ uint32_t sleep_pass_us(void);
 /* A wake's recovery is under way: no sleep, and deferred flash writes wait. */
 bool sleep_recovering(void);
 
-/* The sleep's figures for HC_POWER page 1 (hid_protocol.c), 28 bytes:
+/* The sleep's figures for HC_POWER page 1 (hid_protocol.c), 29 bytes:
  * u8 0x81, u8 the last wake's source (SLEEP_WAKE_*), u8 validity bits
  * (SLEEP_V_*), u8 the recovery's open steps (SLEEP_RC_* still pending);
  * u32 sleeps since boot (also the last sleep's sequence number), u32 slept
  * seconds since boot, u32 the last sleep's PCF seconds, u32 its counted
  * seconds; u16 the acquisition's step (ms, signed), u16 PLL lock loops, u16
- * strays; then u16 the blockers seen while a sleep was last wanted. */
-#define SLEEP_PAGE1_SIZE 28u
+ * strays; u16 the blockers seen while a sleep was last wanted; then u8 the
+ * last recovery's steps that ended on their own timeout or the 10 s bound
+ * rather than by doing their job (SLEEP_RC_*: the input not counted in 50
+ * ms, no battery report in 2 s, under 1.5 s of supply samples by 3 s, the
+ * repaint not done in 500 ms, or whatever the bound ended). */
+#define SLEEP_PAGE1_SIZE 29u
 void sleep_page1_fill(uint8_t *out);
 
 enum { SLEEP_WAKE_NONE = 0, SLEEP_WAKE_KEY, SLEEP_WAKE_BACKSTOP, SLEEP_WAKE_STRAYS, SLEEP_WAKE_BLOCKED,
@@ -88,6 +92,7 @@ void sleep_deep_cancel(void);   /* disarm, if armed and not yet asleep */
  * (SLEEP_V_*); u32 counted seconds; u16 strays; u16 the P0 edge bits, u16 the
  * P2 edge bits, u32 the P1 edge bits, that woke it; u16 PLL lock loops; u16
  * key_presses gained across the wake (counted 1 s after); u16 the sleep's
- * sequence number (low 16 bits); u8 spare. */
+ * sequence number (low 16 bits); u8 the recovery's timed-out steps (as page
+ * 1's last byte). */
 #define SLEEP_RECORD_SIZE 27u
 void sleep_deep_record(uint8_t *out);

@@ -187,6 +187,14 @@ static bool charging_now(void) {
     return supply == BATTERY_SUPPLY_EXTERNAL && chrg_hold != 0;
 }
 
+/* Conversions that read, since boot (wrapping): a deep sleep's recovery waits
+ * for 1.5 s of them after the wake before it lets the board sleep again. */
+static uint16_t supply_samples = 0;
+
+uint16_t battery_supply_samples(void) {
+    return supply_samples;
+}
+
 static void supply_tick(uint16_t raw_mv) {
     bool chrg_low = !gpio_read_pin(CHARGE_CHRG_PIN);
     if (chrg_low) {
@@ -206,6 +214,7 @@ static void supply_tick(uint16_t raw_mv) {
      * A second of them and the runs expire -- the supply then holds (only CHRG
      * can still move it), but nothing counts as fresh proof of USB. */
     if (raw_mv) {
+        supply_samples++;
         adc_fail_run = 0;
         ext_run  = (raw_mv >= EXT_ENTER_MV)  ? (uint8_t)(ext_run  < UINT8_MAX ? ext_run  + 1u : ext_run)  : 0u;
         batt_run = (raw_mv <  BATT_ENTER_MV) ? (uint8_t)(batt_run < UINT8_MAX ? batt_run + 1u : batt_run) : 0u;
@@ -1472,14 +1481,12 @@ static uint8_t log_m_now(void) {
 static bool     sleep_pending = false;   /* woken, the sleep not yet accounted */
 static log_acc_t frz;                    /* the open period as it stood at the sleep */
 static uint32_t frz_at;                  /* log time at the sleep */
-static uint16_t frz_level;
 static uint8_t  frz_flags, frz_chg, frz_m;
 static bool     frz_on_battery;
 
 void battery_sleep_enter(void) {
     energy_tick();   /* the awake energy up to the sleep: none left pending across it */
     frz_at         = log_now();
-    frz_level      = level;
     frz_flags      = battery_flags();
     frz_chg        = chg_state_now();
     frz_m          = log_m_now();
@@ -1504,13 +1511,21 @@ static uint32_t overlap_ms(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) {
     return (int32_t)(hi - lo) > 0 ? hi - lo : 0u;
 }
 
-/* The level at log time `t` across the sleep [s0, s1): from the entry's to the
- * debited one, linearly in the slept time. */
-static uint16_t sleep_level_at(uint32_t t, uint32_t s0, uint32_t s1, uint16_t l0, uint16_t l1) {
-    if (l0 == LEVEL_UNKNOWN || l1 == LEVEL_UNKNOWN) return l1;
-    uint32_t span = s1 - s0, in = overlap_ms(s0, t, s0, s1);
-    if (span == 0) return l1;
-    return (uint16_t)((int32_t)l0 + (((int32_t)l1 - (int32_t)l0) * (int64_t)in) / (int64_t)span);
+/* The level and the count's remainder just before the sleep's debit
+ * (battery_sleep_account). */
+static uint16_t acct_l0;
+static uint64_t acct_nj0;
+
+/* The level at log time `t` across the sleep [s0, s1): the sleep's energy up
+ * to `t` debited from the level before it, as count_take does, and never
+ * below where the debit ended (the floor, a hold, the cut). Not a line to the
+ * final level: a sleep that reached the floor early would spread the floor
+ * across the whole night (codex, deep-sleep build review 6). */
+static uint16_t sleep_level_at(uint32_t t, uint32_t s0, uint32_t s1, uint32_t p_uw) {
+    if (acct_l0 == LEVEL_UNKNOWN || level == LEVEL_UNKNOWN) return level;
+    uint64_t e  = acct_nj0 + (uint64_t)p_uw * overlap_ms(s0, t, s0, s1);
+    int64_t  lv = (int64_t)acct_l0 - (int64_t)(e / E_PM_NJ);
+    return lv < (int64_t)level ? level : (uint16_t)lv;
 }
 
 /* The sleep laid onto the log's periods (codex, deep-sleep verifies 2-3). The
@@ -1550,7 +1565,7 @@ static void log_reconcile(uint32_t slept_ms, uint32_t p_uw) {
         }
         a.slept_ms += in;
         a.e_nj += carry + (uint64_t)p_uw * in;
-        uint16_t lv = sleep_level_at(p1, s0, s1, frz_level, level);
+        uint16_t lv = sleep_level_at(p1, s0, s1, p_uw);
         carry = log_put(&a, frz_flags, lv, 0, k == 0 ? frz_m : 0xFFu, frz_chg, 0, k >= skip);
     }
     /* The open period now: [p0, p0 + LOG_PERIOD_MS), the live intake in it. */
@@ -1565,6 +1580,8 @@ void battery_sleep_account(uint32_t slept_ms) {
     if (!sleep_pending) return;
     uint32_t p_uw = frz_on_battery ? BATTERY_P_SLEEP_UW : 0u;   /* none for a sleep on USB power */
     uint64_t e    = (uint64_t)p_uw * slept_ms;                   /* uW x ms = nJ */
+    acct_l0       = level;
+    acct_nj0      = count_nj;
     if (frz_on_battery) {
         e_used_nj += e;
         band_hold = false;

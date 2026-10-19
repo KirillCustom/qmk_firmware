@@ -223,7 +223,13 @@ static inline uint32_t cyc_elapsed(uint32_t sc0, uint32_t c0, uint32_t sc1, uint
     int32_t d = (int32_t)c1 - (int32_t)c0 + (int32_t)(sc1 - sc0) * (int32_t)(rtc_lld_get_period(&RTCD1) + 1);
     return d < 0 ? 0 : (uint32_t)d;
 }
+/* PCF transactions since boot, and the count at the last pass's end
+ * (rtc_pass_mark): a deep sleep's recovery runs its gauge step only in a pass
+ * that made none (codex, deep-sleep build review 2). */
+static uint32_t pcf_xfers = 0, pcf_xfers_mark = 0;
+
 static void i2c_note(msg_t r, uint32_t sc0, uint32_t c0) {
+    pcf_xfers++;
     uint32_t sc1, c1; cyc_stamp(&sc1, &c1);
     uint32_t e = cyc_elapsed(sc0, c0, sc1, c1);
     if (e > i2c_max_cycles) i2c_max_cycles = e;
@@ -1118,8 +1124,10 @@ bool rtc_set_time(const rtc_time_t *t)
     RTCDateTime dt;
 
     /* Synchronous I2C: never inside a deep sleep's recovery, whose passes are
-     * budgeted (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4). The host retries. */
-    if (rtc_wake_busy()) return false;
+     * budgeted (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4) -- the whole of it,
+     * not only the clock's part (codex, deep-sleep build review 1). The host
+     * retries. */
+    if (rtc_wake_busy() || sleep_recovering()) return false;
     host_sync_gen++;
     clock_gen++;
     rtc_to_chibiostime(t, &dt);
@@ -1290,7 +1298,7 @@ static int16_t ps_brk_prev_sec = -1;
 #define PCF_MAX_ATTEMPTS    5       /* per transaction before recovery / back-off */
 
 enum { PS_IDLE = 0, PS_STOP_READ, PS_STOP_WRITE, PS_TIME_WRITE, PS_RELEASE_READ,
-       PS_RELEASE_WRITE, PS_VERIFY, PS_RECOVER, PS_BRACKET };
+       PS_RELEASE_WRITE, PS_VERIFY, PS_RECOVER, PS_BRACKET, PS_RECOVER_VERIFY };
 static uint8_t  ps_state = PS_IDLE;
 static uint8_t  ps_ctl = 0;
 static bool     stop_asserted = false;
@@ -1441,16 +1449,22 @@ static void pcf_machine_step(void)
     }
     case PS_RECOVER: {
         /* STOP must never be left asserted: clear it with the preserved
-         * control bits, indefinitely, at the back-off cadence. */
+         * control bits, indefinitely, at the back-off cadence. The write and
+         * its check are a pass each, as every other step (codex, deep-sleep
+         * build review 1: a recovery's passes take one transaction). */
         if ((int32_t)(rtc_seconds_count - pcf_backoff_until) < 0) return;
         pcf_backoff_until = rtc_seconds_count + 5;
-        if (pcf_reg_write_raw(0x00, (uint8_t)(ps_ctl & ~PCF_CTL_STOP))) {
-            uint8_t v;
-            if (pcf_reg_read_raw(0x00, &v) && !(v & PCF_CTL_STOP)) {
-                stop_asserted = false; pcf_maybe_stopped = false;
-                ps_state = PS_IDLE; pcf_pending = false;
-                pcf_backoff = true; pcf_backoff_until = rtc_seconds_count + 60;
-            }
+        if (pcf_reg_write_raw(0x00, (uint8_t)(ps_ctl & ~PCF_CTL_STOP))) ps_state = PS_RECOVER_VERIFY;
+        return;
+    }
+    case PS_RECOVER_VERIFY: {
+        uint8_t v;
+        if (pcf_reg_read_raw(0x00, &v) && !(v & PCF_CTL_STOP)) {
+            stop_asserted = false; pcf_maybe_stopped = false;
+            ps_state = PS_IDLE; pcf_pending = false;
+            pcf_backoff = true; pcf_backoff_until = rtc_seconds_count + 60;
+        } else {
+            ps_state = PS_RECOVER;   /* again at the back-off cadence */
         }
         return;
     }
@@ -1588,7 +1602,7 @@ static bool acquisition_step(void)
 enum { WK_IDLE = 0, WK_COARSE, WK_ACQ };
 #define RTC_ADMIT_US 10000u
 static uint8_t  wk_state = WK_IDLE;
-static bool     wk_allowed, wk_pre_ok, wk_from_pcf, wk_coarse_done;
+static bool     wk_allowed, wk_pre_ok, wk_from_pcf, wk_coarse_done, wk_gauge_taken;
 static uint32_t wk_counted, wk_slept_s;
 static time_t   wk_pre_epoch;
 static uint16_t wk_gen;
@@ -1641,6 +1655,7 @@ void rtc_wake_beginI(uint32_t counted_s)
     wk_state       = WK_COARSE;
     wk_allowed     = false;
     wk_coarse_done = false;
+    wk_gauge_taken = false;
     wk_from_pcf    = false;
     wk_counted     = counted_s;
     wk_slept_s     = counted_s;
@@ -1650,6 +1665,21 @@ void rtc_wake_beginI(uint32_t counted_s)
 void rtc_wake_allow(void)
 {
     wk_allowed = true;
+}
+
+void rtc_wake_gauge_taken(void)
+{
+    wk_gauge_taken = true;
+}
+
+bool rtc_pass_used_bus(void)
+{
+    return pcf_xfers != pcf_xfers_mark;
+}
+
+void rtc_pass_mark(void)
+{
+    pcf_xfers_mark = pcf_xfers;
 }
 
 bool rtc_wake_busy(void)
@@ -1713,8 +1743,10 @@ static void wake_coarse(void)
     bool       ok    = wk_pre_ok && pcf_read_raw(&t) && rtc_time_epoch(&t, &after);
     int64_t    slept = ok ? (int64_t)(after - wk_pre_epoch) : -1;
     /* Checked against the counted seconds: asleep the ILRC runs ~13-16% slow,
-     * so the PCF's figure is a little more; one far off is a bad read. */
-    if (ok && (slept < (int64_t)wk_counted / 2 - 2 || slept > (int64_t)wk_counted * 2 + 2)) ok = false;
+     * so the PCF's figure is a little more; one far off is a bad read. Never
+     * negative: a short sleep's window reaches below zero, and -1 s as u32
+     * would debit the pack ~49.7 days (codex, deep-sleep build review 4). */
+    if (ok && (slept < 0 || slept < (int64_t)wk_counted / 2 - 2 || slept > (int64_t)wk_counted * 2 + 2)) ok = false;
     wk_from_pcf = ok;
     wk_slept_s  = ok ? (uint32_t)slept : wk_counted;
     if (ok) {
@@ -1743,12 +1775,15 @@ static bool wake_step(void)
         wake_coarse();
         return true;
     }
-    /* WK_ACQ: the acquisition until it is done or aborted; then the recovery
-     * ends, and the discipline and the write machine resume. */
+    /* WK_ACQ: the acquisition until it is done or aborted; then the clock's
+     * part ends. It starts only once the gauge has taken the slept seconds,
+     * so the pass after the coarse read is free of I2C for it (codex,
+     * deep-sleep build review 2). */
     if (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED) {
         wk_state = WK_IDLE;
         return false;
     }
+    if (!wk_gauge_taken) return false;
     return acquisition_step();
 }
 
@@ -1762,15 +1797,20 @@ void rtc_fast_task(void)
         return;
     }
     /* A deep sleep's recovery: the arbiter's stricter rules for every PCF
-     * transaction until it ends (see "Deep sleep's recovery" above). It ends
-     * when the acquisition does, whether or not the bus is free this pass. */
+     * transaction until the WHOLE recovery ends (sleep_recovering()), not
+     * only the clock's part (see "Deep sleep's recovery" above; codex,
+     * deep-sleep build review 1): after the acquisition, a host sync's write
+     * machine runs under them too. The clock's part ends when the acquisition
+     * does, whether or not the bus is free this pass. */
     if (wk_state == WK_ACQ && (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED)) wk_state = WK_IDLE;
-    if (wk_state != WK_IDLE) {
+    if (wk_state != WK_IDLE || sleep_recovering()) {
         if (!bus_admit()) return;
+        uint32_t n0 = pcf_xfers;
         pcf_short_timeout = true;
-        bool used = wake_step();
+        if (wk_state != WK_IDLE) wake_step();
+        else pcf_machine_step();
         pcf_short_timeout = false;
-        if (used) display_defer_pass();
+        if (pcf_xfers != n0) display_defer_pass();
         return;
     }
     if (acq_state == ACQ_WAIT_SPLASH || acq_active()) { acquisition_step(); return; }
@@ -1804,8 +1844,13 @@ void rtc_task(void)
 #ifdef RTC_AUTO_CALIBRATION
 
     /* Suspended through a deep sleep's recovery: its coarse read and the
-     * acquisition own the PCF, and the trim window restarts after it. */
-    if (wk_state != WK_IDLE) return;
+     * acquisition own the PCF, its passes are budgeted, and the trim window
+     * restarts after it. And never while a write to the PCF is pending or
+     * running: until it lands the PCF holds the time before a host's sync,
+     * and a snap to it would undo the sync (codex, deep-sleep build review
+     * 1). The check stays due and runs once the write is done. */
+    if (wk_state != WK_IDLE || sleep_recovering()) return;
+    if (pcf_pending || ps_state != PS_IDLE) return;
     if (rtc_check_seconds < RTC_CHECK_INTERVAL_S) {
         return;
     }

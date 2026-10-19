@@ -160,6 +160,9 @@ void battery_sleep_enter(void);
 void battery_sleep_wake(void);
 void battery_sleep_account(uint32_t slept_ms);
 bool battery_sleep_pending(void);   /* woken, the sleep not yet accounted */
+/* The supply decision's samples that read (VDD converted), since boot,
+ * wrapping: the recovery's step 7 counts them after the wake. */
+uint16_t battery_supply_samples(void);
 
 /* Real charging sessions (CHRG low 60 s) since boot, wrapping: power.c re-arms
  * its low-battery notice on a change, as the warning re-arms on a session. */
