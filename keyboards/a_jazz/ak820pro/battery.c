@@ -1524,7 +1524,10 @@ static uint32_t overlap_ms(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) {
  * the floor across the whole night (codex, deep-sleep build review 6 and its
  * verify). */
 static uint16_t sleep_level_at(uint32_t t, uint32_t s0, uint32_t s1, uint32_t p_uw) {
-    if (frz_level == LEVEL_UNKNOWN || frz_level <= COUNT_FLOOR_PM) return frz_level;
+    /* A sleep on USB power costs the pack nothing: no debit at all, not even a
+     * remainder the RELAX branch left at the floor before a charge raised the
+     * level (codex, the deep-sleep build's second verify). */
+    if (p_uw == 0 || frz_level == LEVEL_UNKNOWN || frz_level <= COUNT_FLOOR_PM) return frz_level;
     uint64_t e  = frz_nj + (uint64_t)p_uw * overlap_ms(s0, t, s0, s1);
     int64_t  lv = (int64_t)frz_level - (int64_t)(e / E_PM_NJ);
     return lv < (int64_t)COUNT_FLOOR_PM ? (uint16_t)COUNT_FLOOR_PM : (uint16_t)lv;
