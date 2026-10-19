@@ -1614,10 +1614,16 @@ static const uint8_t bolt_runs[][4] = {
 /* The power mode's bulb (plans/POWER-MODE-ICONS-PLAN.md), in the same slot on
  * battery, where the bolt and the cross never show; on USB every mode is
  * Always on, and the slot is theirs. One bulb losing its light: lit with
- * rays (Always on), lit (Balanced), dimmed (Power saver), unlit (Lights out).
- * '#' is the outline or the lit glass, '*' the dimmed glass, '=' the collar
- * and '+' the screw base. Row 0 is the slot's top, so the rays reach it and
- * the bulb sits on the battery's bottom row. */
+ * rays (Always on), lit (Balanced), dimmed (Power saver), unlit and struck
+ * through (Lights out). The slash is the usual mark for "switched off" (a
+ * muted bell); an X would echo the no-pack cross in this slot. Lights out is
+ * the mode whose screen is dark but for a few seconds after a message, so its
+ * bulb must read at a glance, and the slash parts it from Saver by shape,
+ * not by fill alone. The bulb is cut back a pixel wherever it touches the
+ * slash, at an edge or a corner, so the slash lies over it. '#' is the
+ * outline or the lit glass, '*' the dimmed glass, '=' the collar, '+' the
+ * screw base and '/' the slash. Row 0 is the slot's top, so the rays reach
+ * it and the bulb sits on the battery's bottom row. */
 #define BULB_W 13
 #define BULB_H 14
 static const char bulb_art[POWER_MODE_COUNT][BULB_H][BULB_W + 1] = {
@@ -1640,9 +1646,9 @@ static const char bulb_art[POWER_MODE_COUNT][BULB_H][BULB_W + 1] = {
         "....+++++....", ".....+++.....",
     },
     [POWER_MODE_MINIMAL] = {
-        ".............", ".............", ".............", ".....###.....",
-        "...##...##...", "...#.....#...", "..#.......#..", "..#.......#..",
-        "..#.......#..", "...#.....#...", "....#...#....", "....=====....",
+        ".............", ".............", ".//..........", "..//..##.....",
+        "...//...##...", "....//...#...", "..#..//...#..", "..#...//..#..",
+        "..#....//....", "...#....//...", "....#....//..", "....====..//.",
         "....+++++....", ".....+++.....",
     },
 };
@@ -1653,7 +1659,9 @@ static const char bulb_art[POWER_MODE_COUNT][BULB_H][BULB_W + 1] = {
  * grey glass. Its top row is a darker collar, which parts it from the glass
  * the way a real bulb's does, without the black gap that squashed the glass.
  * The glass changes with the mode, the metal does not, except in Lights out,
- * which is slate all over so the whole bulb looks switched off. Never yellow
+ * which is slate all over so the whole bulb looks switched off; on the panel
+ * the slate reads nearly grey. Its slash is light grey, clearly not white yet
+ * well apart from the slate (chosen on the panel from four shades). Never yellow
  * (the bolt's, in the bolt's place) or red and amber (a low battery, on this
  * row). */
 #define COL_BULB_BASE       0xB5B6   /* #B4B4B4: the screw base */
@@ -1662,12 +1670,13 @@ static const char bulb_art[POWER_MODE_COUNT][BULB_H][BULB_W + 1] = {
 #define COL_BULB_OFF        0x8D18   /* #8EA2C6: Lights out's outline, slate */
 #define COL_BULB_OFF_BASE   0x6BD2   /* #6B7994: Lights out's base, a darker slate */
 #define COL_BULB_OFF_COLLAR 0x4AAD   /* #4C566A: Lights out's collar */
-/* Per mode: '#', '*', '+', '='. */
-static const uint16_t bulb_cols[POWER_MODE_COUNT][4] = {
-    [POWER_MODE_FULL]    = {COL_FG, 0, COL_BULB_BASE, COL_BULB_COLLAR},
-    [POWER_MODE_NORMAL]  = {COL_FG, 0, COL_BULB_BASE, COL_BULB_COLLAR},
-    [POWER_MODE_SAVER]   = {COL_FG, COL_BULB_DIM, COL_BULB_BASE, COL_BULB_COLLAR},
-    [POWER_MODE_MINIMAL] = {COL_BULB_OFF, 0, COL_BULB_OFF_BASE, COL_BULB_OFF_COLLAR},
+#define COL_BULB_OFF_SLASH  0xDEFB   /* #DCDCDC: Lights out's slash */
+/* Per mode: '#', '*', '+', '=', '/'. */
+static const uint16_t bulb_cols[POWER_MODE_COUNT][5] = {
+    [POWER_MODE_FULL]    = {COL_FG, 0, COL_BULB_BASE, COL_BULB_COLLAR, 0},
+    [POWER_MODE_NORMAL]  = {COL_FG, 0, COL_BULB_BASE, COL_BULB_COLLAR, 0},
+    [POWER_MODE_SAVER]   = {COL_FG, COL_BULB_DIM, COL_BULB_BASE, COL_BULB_COLLAR, 0},
+    [POWER_MODE_MINIMAL] = {COL_BULB_OFF, 0, COL_BULB_OFF_BASE, COL_BULB_OFF_COLLAR, COL_BULB_OFF_SLASH},
 };
 #define SLOT_NO_BULB 0xFFu
 
@@ -1717,7 +1726,7 @@ static void draw_bolt_slot(bool absent, bool chrg, uint8_t bulb) {
         for (uint8_t y = 0; y < BULB_H; y++)
             for (uint8_t x = 0; x < BULB_W; x++) {
                 char c = bulb_art[bulb][y][x];
-                if (c != '.') tile[y * ICON_SLOT_W + x] = bulb_cols[bulb][c == '#' ? 0 : c == '*' ? 1 : c == '+' ? 2 : 3];
+                if (c != '.') tile[y * ICON_SLOT_W + x] = bulb_cols[bulb][c == '#' ? 0 : c == '*' ? 1 : c == '+' ? 2 : c == '=' ? 3 : 4];
             }
     }
     /* CPU pushes share SPI0 with the DMA blits. lcd_blit_ram quiesces the bus
