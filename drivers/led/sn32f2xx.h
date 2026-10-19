@@ -89,8 +89,10 @@ uint32_t sn32f2xx_led_load(void);
  * accumulated since the last call, which closes the interval at `now_ms` and
  * starts the next. Divided by the elapsed ms it is the mean drive over the
  * interval, whatever the effect's frame pattern. `lit_ms`, if not NULL, gets
- * the ms of the interval in which any channel was lit. Main-thread only. */
-uint64_t sn32f2xx_led_drive_take(uint32_t now_ms, uint32_t *lit_ms);
+ * the ms of the interval in which any channel was lit; `rgb_ms`, if not NULL,
+ * the same sum x ms per colour (red, green, blue), whose total is returned.
+ * Main-thread only. */
+uint64_t sn32f2xx_led_drive_take(uint32_t now_ms, uint32_t *lit_ms, uint64_t rgb_ms[3]);
 
 /* Scale every LED's output by scale/256 (255 = unscaled) below the rgb_matrix
  * config: dim or darken the matrix without touching the user's brightness.

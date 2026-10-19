@@ -554,14 +554,22 @@ uint16_t battery_led_pm(void) { return led_pm; }
  *   backlight linear in its duty: 39.1 mW at duty 48/48
  *   RGB      the committed frames' drive, time-weighted
  *            (sn32f2xx_led_drive_take): A while any LED is lit, plus B per
- *            unit of the channel sum. Linear in drive (QMK's CIE curve made it
- *            look otherwise in values: 64 and 128 are drives of 12 and 48).
- *            White: 17.9 mW at 12, 43.0 at 48, 188.7 at 255. */
+ *            unit of each colour's channel sum. Linear in drive (QMK's CIE
+ *            curve made it look otherwise in values: 64 and 128 are drives of
+ *            12 and 48). PER COLOUR (the 10-19 map,
+ *            history/power-bench-2026-10-15/rgb-curve-20261019/,
+ *            scripts/rgb_fit.py): red draws 1.29x the mean per unit, green
+ *            0.90, blue 0.81; one B for all read red 7.7% low and blue 7.2%
+ *            high, the fit is within 0.6% at every step, and purple, outside
+ *            it, within 0.2%. A is the fit's 7.71 mW against the measured
+ *            RGB-off, refitted against this model's own (0.93 mW lower). */
 #define P_BASE_UW        106900u
 #define P_USB_UW           7100u
 #define P_BKL_FULL_UW     39100u
-#define P_RGB_A_UW         9500u
-#define P_RGB_B_NW         2857u   /* nW per unit of the channel sum (246 channels) */
+#define P_RGB_A_UW         8640u
+#define P_RGB_R_NW         3636u   /* nW per unit of the red channels' sum (82 channels) */
+#define P_RGB_G_NW         2533u   /* ... green */
+#define P_RGB_B_NW         2294u   /* ... blue */
 #define BKL_DUTY_FULL        48u
 /* The capacity: R3's 15,579 mWh from FULL to the RGB cut, at JD's settings
  * (history/battery-2026-10-15-drain-2f/, "A1/A2"). One pm is a thousandth:
@@ -650,13 +658,14 @@ static void energy_full(void) {
     band_hold = false;
 }
 
-/* The model's energy over `dt` ms, given the LED drive's sum x ms over it and
- * the ms any LED was lit: the RGB's intercept only for the lit time (codex). */
-static uint64_t model_nj(uint32_t dt, uint64_t drive_ms, uint32_t lit_ms) {
+/* The model's energy over `dt` ms, given each colour's drive sum x ms over it
+ * and the ms any LED was lit: the RGB's intercept only for the lit time (codex). */
+static uint64_t model_nj(uint32_t dt, const uint64_t rgb_ms[3], uint32_t lit_ms) {
     uint64_t uw = P_BASE_UW + (uint64_t)P_BKL_FULL_UW * display_backlight_duty() / BKL_DUTY_FULL;
     if (battery_usb_configured()) uw += P_USB_UW;
     uint64_t e = uw * dt;
-    e += (uint64_t)P_RGB_A_UW * (lit_ms < dt ? lit_ms : dt) + (drive_ms * P_RGB_B_NW) / 1000u;
+    e += (uint64_t)P_RGB_A_UW * (lit_ms < dt ? lit_ms : dt) +
+         (rgb_ms[0] * P_RGB_R_NW + rgb_ms[1] * P_RGB_G_NW + rgb_ms[2] * P_RGB_B_NW) / 1000u;
     return e;
 }
 
@@ -720,7 +729,8 @@ static void time_left_update(void) {
 static void energy_tick(void) {
     uint32_t now      = timer_read32();
     uint32_t lit_ms   = 0;
-    uint64_t drive_ms = sn32f2xx_led_drive_take(now, &lit_ms);
+    uint64_t rgb_ms[3];
+    uint64_t drive_ms = sn32f2xx_led_drive_take(now, &lit_ms, rgb_ms);
     if (!e_started) {
         e_started = true;
         e_last_ms = now;
@@ -736,7 +746,7 @@ static void energy_tick(void) {
         e_minute_nj = 0;
         return;
     }
-    uint64_t e = model_nj(dt, drive_ms, lit_ms);
+    uint64_t e = model_nj(dt, rgb_ms, lit_ms);
     p_now_uw   = (uint32_t)(e / dt);
     e_used_nj += e;
     e_period_nj += e;

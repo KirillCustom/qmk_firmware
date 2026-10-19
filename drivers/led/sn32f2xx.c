@@ -925,25 +925,29 @@ void sn32f2xx_blank(void) {
     }
 }
 
-/* The committed frame's drive, time-weighted (sn32f2xx_led_drive_take). The
- * sum is taken after the masked copy, not inside it: only this function
- * writes led_state[], and the ISR only reads it. */
-static uint32_t drive_now   = 0;   /* the committed frame's channel sum */
-static uint32_t drive_since = 0;   /* when it was committed, ms */
-static uint64_t drive_acc   = 0;   /* sum x ms since the last take */
-static uint32_t drive_lit   = 0;   /* ms with any channel lit, since the last take */
+/* The committed frame's drive, time-weighted (sn32f2xx_led_drive_take), per
+ * colour: red, green and blue draw differently per unit (a board's power model
+ * weights them). The sums are taken after the masked copy, not inside it: only
+ * this function writes led_state[], and the ISR only reads it. */
+static uint32_t drive_now[3] = {0};   /* the committed frame's channel sums: r, g, b */
+static uint32_t drive_since  = 0;     /* when it was committed, ms */
+static uint64_t drive_acc[3] = {0};   /* sum x ms since the last take, per colour */
+static uint32_t drive_lit    = 0;     /* ms with any channel lit, since the last take */
 
 static void drive_close(uint32_t now) {
     uint32_t dt = now - drive_since;
-    drive_acc += (uint64_t)drive_now * dt;
-    if (drive_now) drive_lit += dt;
+    for (uint8_t k = 0; k < 3; k++) drive_acc[k] += (uint64_t)drive_now[k] * dt;
+    if (drive_now[0] | drive_now[1] | drive_now[2]) drive_lit += dt;
     drive_since = now;
 }
 
-uint64_t sn32f2xx_led_drive_take(uint32_t now_ms, uint32_t *lit_ms) {
+uint64_t sn32f2xx_led_drive_take(uint32_t now_ms, uint32_t *lit_ms, uint64_t rgb_ms[3]) {
     drive_close(now_ms);
-    uint64_t r = drive_acc;
-    drive_acc  = 0;
+    uint64_t r = drive_acc[0] + drive_acc[1] + drive_acc[2];
+    for (uint8_t k = 0; k < 3; k++) {
+        if (rgb_ms) rgb_ms[k] = drive_acc[k];
+        drive_acc[k] = 0;
+    }
     if (lit_ms) *lit_ms = drive_lit;
     drive_lit = 0;
     return r;
@@ -966,12 +970,16 @@ void sn32f2xx_flush(void) {
         memcpy(led_state, led_state_buf, sizeof(RGB) * SN32F2XX_LED_COUNT);
         led_state_buf_update_required = false;
         chSysUnlock();
-        uint32_t sum = 0;
+        uint32_t sr = 0, sg = 0, sb = 0;
         for (int i = 0; i < SN32F2XX_LED_COUNT; i++) {
-            sum += (uint32_t)led_state[i].r + led_state[i].g + led_state[i].b;
+            sr += led_state[i].r;
+            sg += led_state[i].g;
+            sb += led_state[i].b;
         }
         drive_close(timer_read32());
-        drive_now = sum;
+        drive_now[0] = sr;
+        drive_now[1] = sg;
+        drive_now[2] = sb;
     }
 }
 
