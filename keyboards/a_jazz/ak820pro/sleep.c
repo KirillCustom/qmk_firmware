@@ -11,7 +11,6 @@
 #    include <hal.h>
 #    include "usb_main.h"   /* USB_DRIVER */
 #    include "power.h"
-#    include "battery.h"   /* battery_usb_configured */
 #    include "indicators.h"
 #    include "watchdog_record.h"
 #    include "kb_eeconfig.h"
@@ -57,6 +56,29 @@ static bool usb_phy_onI(void) {
     return true;
 }
 
+/* Is a host on the bus? Not the USB driver's state: with the data cut (the
+ * bench's uhubctl) it stays USB_ACTIVE, nothing telling it the bus went away
+ * (measured 19:06 10-18: the deep run never slept, "USB" blocked). The frame
+ * number (FRMNO, a SOF every 1 ms) moves only while a host is talking: a bus
+ * whose frame number has not moved for 100 ms has no host. Sampled every
+ * main-loop pass by sleep_task(). */
+#    define USB_IDLE_MS 100u
+static uint16_t usb_fn_last     = 0xFFFFu;
+static uint32_t usb_fn_moved_at = 0;
+
+static void usb_watch(void) {
+    uint16_t fn = (uint16_t)(SN_USB->FRMNO & 0x7FFu);
+    if (fn != usb_fn_last) {
+        usb_fn_last     = fn;
+        usb_fn_moved_at = timer_read32();
+    }
+}
+
+static bool usb_bus_live(void) {
+    usb_watch();
+    return timer_elapsed32(usb_fn_moved_at) < USB_IDLE_MS;
+}
+
 uint8_t sleep_light_mask(void) {
     return ls_mask;
 }
@@ -70,7 +92,7 @@ static void light_task(void) {
     uint8_t m = power_rgb_dark() ? ls_mask : 0;
     /* Bit 4 only inside its window, and never with USB up: the transceiver
      * turns itself off in PMU Sleep (manual p. 245). */
-    if ((m & SLEEP_LS_PMU) && ((int32_t)(timer_read32() - ls_pmu_until) >= 0 || battery_usb_configured()))
+    if ((m & SLEEP_LS_PMU) && ((int32_t)(timer_read32() - ls_pmu_until) >= 0 || usb_bus_live()))
         m &= (uint8_t)~SLEEP_LS_PMU;
     /* Bit 3 only with the screen dark and no indicator lit. */
     if ((m & SLEEP_LS_TICK) && (display_backlight_effective() > 0 || indicators_any_lit()))
@@ -205,12 +227,15 @@ static uint8_t blockers(void) {
     uint8_t b = 0;
     for (uint8_t r = 0; r < MATRIX_ROWS; r++)
         if (matrix_get_row(r)) b |= DSB_KEY;
-    if (battery_usb_configured()) b |= DSB_USB;
+    if (usb_bus_live()) b |= DSB_USB;
     if (!tx_quietI_locked()) b |= DSB_TX;
     if (!display_bus_idle() || (SN_SPI0->STAT & SPI_STAT_BUSY) || (SN_SPI0->DMACTRL & SPI0_DMACTRL_DMAEN) ||
         (SN_SPI1->STAT & SPI_STAT_BUSY))
         b |= DSB_DISPLAY;
-    if (kb_eeconfig_write_pending() || EFLD1.state != FLASH_READY) b |= DSB_FLASH;
+    /* The EFL driver is STOPPED between writes (wear_leveling_efl.c starts it
+     * for a write and stops it after), so idle is STOP or READY: block only a
+     * program or an erase in flight, and a deferred write still to come. */
+    if (kb_eeconfig_write_pending() || EFLD1.state == FLASH_PGM || EFLD1.state == FLASH_ERASE) b |= DSB_FLASH;
     if (!rtc_sleep_ok()) b |= DSB_RTC;
     uint32_t p0, p2;
     if (!col_masks(&p0, &p2)) b |= DSB_PINS;
@@ -245,7 +270,7 @@ static bool deep_sleep(void) {
     chSysLock();
     /* The admission again, under the lock: nothing can be queued for the
      * radio, or USB come up, between the check and the teardown (codex). */
-    if (battery_usb_configured() || !tx_quietI()) {
+    if ((uint16_t)(SN_USB->FRMNO & 0x7FFu) != usb_fn_last || !tx_quietI()) {   /* a frame since the check: a host */
         chSysUnlock();
         return false;
     }
@@ -405,9 +430,9 @@ static void deep_task(void) {
      * inside that wait is lost whenever it runs (codex). If the transceiver
      * bit was not the whole story, the record says so and a power cycle
      * brings USB back; the keyboard types over the radio meanwhile. */
-    if (ds_usb_watch && (battery_usb_configured() || timer_elapsed32(ds_woke_at) >= 20000u)) {
+    if (ds_usb_watch && (usb_bus_live() || timer_elapsed32(ds_woke_at) >= 20000u)) {
         ds_usb_watch     = false;
-        ds_usb_restarted = battery_usb_configured();   /* the record's byte 22: USB came back */
+        ds_usb_restarted = usb_bus_live();   /* the record's byte 22: a host's frames again within 20 s */
     }
     if (ds_state != DS_ARMED) return;
     uint32_t waited = timer_elapsed32(ds_armed_at);
@@ -422,6 +447,7 @@ static void deep_task(void) {
 }
 
 void sleep_task(void) {
+    usb_watch();
     deep_task();
     light_task();
 }
