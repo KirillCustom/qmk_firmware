@@ -1481,12 +1481,16 @@ static uint8_t log_m_now(void) {
 static bool     sleep_pending = false;   /* woken, the sleep not yet accounted */
 static log_acc_t frz;                    /* the open period as it stood at the sleep */
 static uint32_t frz_at;                  /* log time at the sleep */
+static uint16_t frz_level;               /* the level at the sleep, and the count's remainder */
+static uint64_t frz_nj;
 static uint8_t  frz_flags, frz_chg, frz_m;
 static bool     frz_on_battery;
 
 void battery_sleep_enter(void) {
     energy_tick();   /* the awake energy up to the sleep: none left pending across it */
     frz_at         = log_now();
+    frz_level      = level;
+    frz_nj         = count_nj;
     frz_flags      = battery_flags();
     frz_chg        = chg_state_now();
     frz_m          = log_m_now();
@@ -1511,21 +1515,19 @@ static uint32_t overlap_ms(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) {
     return (int32_t)(hi - lo) > 0 ? hi - lo : 0u;
 }
 
-/* The level and the count's remainder just before the sleep's debit
- * (battery_sleep_account). */
-static uint16_t acct_l0;
-static uint64_t acct_nj0;
-
 /* The level at log time `t` across the sleep [s0, s1): the sleep's energy up
- * to `t` debited from the level before it, as count_take does, and never
- * below where the debit ended (the floor, a hold, the cut). Not a line to the
- * final level: a sleep that reached the floor early would spread the floor
- * across the whole night (codex, deep-sleep build review 6). */
+ * to `t` debited from the level AT THE SLEEP (frz_level, frz_nj: noted at
+ * the entry, so nothing the recovery does before the accounting -- a cut, a
+ * re-seat -- can rewrite the night), as count_take debits it: down to the
+ * floor and no further, and not at all from the floor or the cut's 0. Not a
+ * line to the final level: a sleep that reached the floor early would spread
+ * the floor across the whole night (codex, deep-sleep build review 6 and its
+ * verify). */
 static uint16_t sleep_level_at(uint32_t t, uint32_t s0, uint32_t s1, uint32_t p_uw) {
-    if (acct_l0 == LEVEL_UNKNOWN || level == LEVEL_UNKNOWN) return level;
-    uint64_t e  = acct_nj0 + (uint64_t)p_uw * overlap_ms(s0, t, s0, s1);
-    int64_t  lv = (int64_t)acct_l0 - (int64_t)(e / E_PM_NJ);
-    return lv < (int64_t)level ? level : (uint16_t)lv;
+    if (frz_level == LEVEL_UNKNOWN || frz_level <= COUNT_FLOOR_PM) return frz_level;
+    uint64_t e  = frz_nj + (uint64_t)p_uw * overlap_ms(s0, t, s0, s1);
+    int64_t  lv = (int64_t)frz_level - (int64_t)(e / E_PM_NJ);
+    return lv < (int64_t)COUNT_FLOOR_PM ? (uint16_t)COUNT_FLOOR_PM : (uint16_t)lv;
 }
 
 /* The sleep laid onto the log's periods (codex, deep-sleep verifies 2-3). The
@@ -1580,8 +1582,6 @@ void battery_sleep_account(uint32_t slept_ms) {
     if (!sleep_pending) return;
     uint32_t p_uw = frz_on_battery ? BATTERY_P_SLEEP_UW : 0u;   /* none for a sleep on USB power */
     uint64_t e    = (uint64_t)p_uw * slept_ms;                   /* uW x ms = nJ */
-    acct_l0       = level;
-    acct_nj0      = count_nj;
     if (frz_on_battery) {
         e_used_nj += e;
         band_hold = false;
