@@ -23,8 +23,8 @@
  * Power. The wake is the keypress itself (or the knob), which also types as
  * normal; the lights follow within one 10 Hz tick.
  *
- * Not here yet: light sleep, the radio, deep sleep. Key scanning lives in the
- * row ISR, so sleeping the MCU needs a wake path of its own. */
+ * The ladder's last stage is the deep sleep (power_sleep_wanted; sleep.c does
+ * it, with its own wake path: the row ISR that scans keys stops asleep). */
 #include "quantum.h"
 #include "power.h"
 #include "battery.h"
@@ -35,16 +35,20 @@
 #define NEVER UINT32_MAX
 
 /* Each mode's idle times, ms: the RGB to the dim cap, the RGB off with the
- * screen capped at SCREEN_DIM_LEVEL, the screen's backlight off. */
+ * screen capped at SCREEN_DIM_LEVEL, the screen's backlight off, and the deep
+ * sleep (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, section 1: SLEEP-PLAN.md's
+ * first draft, to tune in use). The screen goes off when the board sleeps:
+ * its dim level needs the 20 kHz tick, which a sleep stops. */
 typedef struct {
-    uint32_t dim_ms, lights_off_ms, screen_off_ms;
+    uint32_t dim_ms, lights_off_ms, screen_off_ms, sleep_ms;
 } ladder_t;
 
 static const ladder_t ladders[POWER_MODE_COUNT] = {
-    [POWER_MODE_FULL]   = {NEVER, NEVER, NEVER},
-    [POWER_MODE_NORMAL] = {60000u, 300000u, 900000u},    /* 1, 5, 15 min */
-    [POWER_MODE_SAVER]  = {30000u, 120000u, 300000u},    /* 30 s, 2, 5 min */
-    [POWER_MODE_MINIMAL] = {0u, 0u, 0u},                 /* dark at once, even typing */
+    [POWER_MODE_FULL]   = {NEVER, NEVER, NEVER, NEVER},
+    [POWER_MODE_NORMAL] = {60000u, 300000u, 420000u, 420000u},    /* 1, 5, 7 min; asleep at 7 */
+    [POWER_MODE_SAVER]  = {30000u, 120000u, 180000u, 180000u},    /* 30 s, 2, 3 min; asleep at 3 */
+    [POWER_MODE_MINIMAL] = {0u, 0u, 0u, 30000u},                  /* dark at once, even typing; asleep
+                                                                   * after a 30 s pause */
 };
 
 /* Minimal mode's dark screen lights, at the user's level, for this long after
@@ -71,13 +75,15 @@ static const ladder_t ladders[POWER_MODE_COUNT] = {
 static power_stage_t stage      = POWER_STAGE_ACTIVE;
 static power_mode_t  mode       = POWER_MODE_NORMAL;
 static bool          lights_cut = false;
+static bool          low_now    = false;   /* below LOW_CAP_PM on battery, this tick */
 static bool          low_noted  = false;   /* the low cap's notice given (or owed) */
 static bool          low_owed   = false;   /* ... and waiting for a lit screen */
 static uint16_t      low_sessions = 0;     /* battery_session_count() when it was noted */
 static bool          announce   = false;
 static uint8_t       val_cap    = 255;
 #ifdef AK820_DEV_HOOKS
-static uint8_t forced = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF none */
+static uint8_t  forced      = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF none */
+static uint32_t bench_sleep = 0;      /* HC_DEVHOOK: a short sleep time for the bench, 0 none */
 #endif
 
 /* The overlay holds 12 characters (display.c, CONN_STATUS_MAX). */
@@ -191,6 +197,7 @@ void power_task(void) {
             if (saver > want) want = saver;
         }
     }
+    low_now = low;
     /* The low cap's notice: once a discharge, and only where it can be read --
      * with the screen dark it waits for it to light, and it lapses if the cap
      * does (USB). A real charge re-arms it. Never in Minimal, which has
@@ -227,6 +234,22 @@ power_stage_t power_stage(void) {
     return stage;
 }
 
+/* The ladder's last stage: asleep once the idle time passes the mode's sleep
+ * time. Battery only, never in Full (at low battery too: there the low cap
+ * stays a lighting cap, plan section 1), never under a stage the bench holds.
+ * Low battery shortens Normal's sleep to Saver's. sleep.c sleeps at the first
+ * pass where its preconditions hold, so this only says it is wanted. */
+bool power_sleep_wanted(void) {
+    if (!battery_on_battery() || mode == POWER_MODE_FULL) return false;
+    uint32_t t = ladders[mode].sleep_ms;
+    if (low_now && ladders[POWER_MODE_SAVER].sleep_ms < t) t = ladders[POWER_MODE_SAVER].sleep_ms;
+#ifdef AK820_DEV_HOOKS
+    if (forced != 0xFF) return false;
+    if (bench_sleep) t = bench_sleep;
+#endif
+    return last_input_activity_elapsed() >= t;
+}
+
 power_mode_t power_mode(void) {
     return mode;
 }
@@ -252,5 +275,11 @@ void power_force_stage(uint8_t s) {
 
 uint8_t power_forced_stage(void) {
     return forced;
+}
+
+void power_set_bench_sleep_ms(uint32_t ms) {
+    /* Never under 30 s: physical holds and short release deadlines must still
+     * finish before a sleep, as at the real times (codex, deep-sleep review). */
+    bench_sleep = ms == 0 ? 0 : (ms < 30000u ? 30000u : ms);
 }
 #endif

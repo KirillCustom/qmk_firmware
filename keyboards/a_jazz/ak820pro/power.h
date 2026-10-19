@@ -23,8 +23,8 @@ typedef enum {
 #define POWER_HAS_MODES 1
 typedef enum {
     POWER_MODE_FULL = 0,      /* the ladder never runs */
-    POWER_MODE_NORMAL,        /* dim 1 min, RGB off 5, screen off 15 */
-    POWER_MODE_SAVER,         /* dim 30 s, RGB off 2 min, screen off 5 */
+    POWER_MODE_NORMAL,        /* dim 1 min, RGB off 5, screen off and asleep 7 */
+    POWER_MODE_SAVER,         /* dim 30 s, RGB off 2 min, screen off and asleep 3 */
     POWER_MODE_MINIMAL,       /* RGB and backlight off on battery, typing or not;
                                * the backlight lights a moment for a message */
     POWER_MODE_COUNT
@@ -41,6 +41,10 @@ power_mode_t  power_mode(void);
 /* Fn+B: the next mode, persisted, and shown as an overlay. */
 void power_cycle_mode(void);
 
+/* The deep sleep is wanted: on battery, not Full, idle past the mode's sleep
+ * time (Saver's when the battery is low). sleep.c decides when it can. */
+bool power_sleep_wanted(void);
+
 /* The dim stage's ceiling on the lighting's value: 255, or the cap. */
 uint8_t power_val_cap(void);
 
@@ -56,4 +60,7 @@ bool power_rgb_dark(void);
 void    power_set_mode(power_mode_t m);
 void    power_force_stage(uint8_t s);
 uint8_t power_forced_stage(void);
+/* A short sleep time for the bench (not persisted; 0 clears it; at least
+ * 30 s), so the soak runs through the ladder's own path. */
+void    power_set_bench_sleep_ms(uint32_t ms);
 #endif
