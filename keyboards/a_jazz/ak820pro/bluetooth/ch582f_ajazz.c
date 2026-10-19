@@ -359,19 +359,27 @@ void ch582_led5a_reset(void) {
  * store. Main-loop context only, like the parser that feeds it.
  *
  * Byte n lands in slot n % CH582_RXTAP_RING; the count is the total since
- * arming, so a host reading the count first knows which slots it has. */
+ * arming, so a host reading the count first knows which slots it has. The
+ * slot is its own index, not count % ring: 2^32 is not a multiple of 260, so
+ * a wrapped count would skip slots 256-259 (codex rx-tap should-fix 1), and
+ * the M0 has no divide instruction to spend per byte. */
 #define CH582_RXTAP_RING 260   /* ten 26-byte pages */
 static bool     rxtap_armed = false;
 static uint32_t rxtap_count = 0;
+static uint16_t rxtap_slot  = 0;
 static uint8_t  rxtap_ring[CH582_RXTAP_RING];
 
 static inline void rxtap_note(uint8_t c) {
-    if (rxtap_armed) rxtap_ring[rxtap_count++ % CH582_RXTAP_RING] = c;
+    if (!rxtap_armed) return;
+    rxtap_ring[rxtap_slot] = c;
+    if (++rxtap_slot == CH582_RXTAP_RING) rxtap_slot = 0;
+    rxtap_count++;
 }
 
 void ch582_rxtap_arm(bool armed) {
     if (armed) {
         rxtap_count = 0;
+        rxtap_slot  = 0;
         memset(rxtap_ring, 0, sizeof(rxtap_ring));
     }
     rxtap_armed = armed;
@@ -1273,10 +1281,15 @@ void ch582_task(void) {
 #ifdef WDT_TEST_HOOKS
         else if (ch582_rx_muted) { bytes_processed++; continue; } /* discard real byte */
 #endif
-        else bytes_processed++;
+        else {
+            bytes_processed++;
 #ifdef AK820_DEV_HOOKS
-        rxtap_note(c);
+            /* Here, not after the if-chain: only a real, unmuted byte from the
+             * module (codex rx-tap should-fix 2: an injected byte falls through
+             * to below in a build with WDT_TEST_HOOKS too). */
+            rxtap_note(c);
 #endif
+        }
 
         b2 = b1;
         b1 = b0;
