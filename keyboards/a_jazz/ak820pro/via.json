@@ -289,7 +289,7 @@
     },
     {
       "name": "PWR_MODE",
-      "title": "Power mode: Full / Normal / Saver",
+      "title": "Power mode: Always on / Balanced / Power saver / Lights out",
       "shortName": "Power"
     }
   ]

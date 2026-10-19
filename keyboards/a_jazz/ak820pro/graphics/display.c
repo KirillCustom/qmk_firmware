@@ -16,6 +16,7 @@
 #include "ak820pro.h"      /* LOOP_SITE profiler (LOOPGAP_INSTRUMENT) */
 #include "indicators.h"   /* charge_is_charging + battery_is_absent */
 #include "battery.h"      /* VDD for the debug page */
+#include "power.h"        /* the battery row's bulb: power_lights_mode */
 /* Also included further down beside the connection-state code, which is where
  * it historically lived; #pragma once makes the duplicate free. Hoisted because
  * the Fn+D debug page sits above that point and reads the battery and TX
@@ -1609,31 +1610,94 @@ static const uint8_t bolt_runs[][4] = {
  * Nudged by eye on hardware rather than by arithmetic. */
 #define CROSS_Y_NUDGE 1
 #define CROSS_Y_OFF (((BOLT_H - CROSS_WH) / 2) + CROSS_Y_NUDGE)
-/* The cross is WIDER than the bolt it shares a slot with, so the rect that
- * clears that slot has to be the wider of the two -- clearing only BOLT_W would
- * leave the cross's last columns on the panel when it is taken down. */
-#define ICON_SLOT_W ((CROSS_WH > BOLT_W) ? CROSS_WH : BOLT_W)
+
+/* The power mode's bulb (plans/POWER-MODE-ICONS-PLAN.md), in the same slot on
+ * battery, where the bolt and the cross never show; on USB every mode is
+ * Always on, and the slot is theirs. One bulb losing its light: lit with
+ * rays (Always on), lit (Balanced), dimmed (Power saver), unlit (Lights out).
+ * '#' is the outline or the lit glass, '*' the dimmed glass, '+' the screw
+ * base. Row 0 is the slot's top, so the rays reach it and the bulb sits on
+ * the battery's bottom row. */
+#define BULB_W 13
+#define BULB_H 14
+static const char bulb_art[POWER_MODE_COUNT][BULB_H][BULB_W + 1] = {
+    [POWER_MODE_FULL] = {
+        "......#......", ".#.........#.", "..#.......#..", ".....###.....",
+        "...#######...", "##.#######.##", "..#########..", "..#########..",
+        "..#########..", "...#######...", "....#####....", ".....+++.....",
+        ".....+++.....", "......+......",
+    },
+    [POWER_MODE_NORMAL] = {
+        ".............", ".............", ".............", ".....###.....",
+        "...#######...", "...#######...", "..#########..", "..#########..",
+        "..#########..", "...#######...", "....#####....", ".....+++.....",
+        ".....+++.....", "......+......",
+    },
+    [POWER_MODE_SAVER] = {
+        ".............", ".............", ".............", ".....###.....",
+        "...##***##...", "...#*****#...", "..#*******#..", "..#*******#..",
+        "..#*******#..", "...#*****#...", "....#***#....", ".....+++.....",
+        ".....+++.....", "......+......",
+    },
+    [POWER_MODE_MINIMAL] = {
+        ".............", ".............", ".............", ".....###.....",
+        "...##...##...", "...#.....#...", "..#.......#..", "..#.......#..",
+        "..#.......#..", "...#.....#...", "....#...#....", ".....+++.....",
+        ".....+++.....", "......+......",
+    },
+};
+/* Starting values, to judge on the panel: mid grey (0x8410) was
+ * near-illegible as 5x7 text here (COL_AMPM). Saver's glass is a filled area
+ * and may survive it; try 0xA514 beside it. Lights out's outline is a 1 px
+ * stroke, so it is lighter than the glass, and the missing fill is what tells
+ * it from Saver. Never yellow (the bolt's, in the bolt's place) or red and
+ * amber (a low battery, on this row). */
+#define COL_BULB_BASE     0x8C71   /* #8C8C8C: the lit bulbs' screw base */
+#define COL_BULB_DIM      0x8410   /* #808080: Saver's glass */
+#define COL_BULB_DIM_BASE 0x4228   /* #464646: darker, so the grey glass does not run into it */
+#define COL_BULB_OFF      0xA514   /* #A0A0A0: Lights out's outline */
+/* Per mode: '#', '*', '+'. */
+static const uint16_t bulb_cols[POWER_MODE_COUNT][3] = {
+    [POWER_MODE_FULL]    = {COL_FG, 0, COL_BULB_BASE},
+    [POWER_MODE_NORMAL]  = {COL_FG, 0, COL_BULB_BASE},
+    [POWER_MODE_SAVER]   = {COL_FG, COL_BULB_DIM, COL_BULB_DIM_BASE},
+    [POWER_MODE_MINIMAL] = {COL_BULB_OFF, 0, COL_BULB_DIM_BASE},
+};
+#define SLOT_NO_BULB 0xFFu
+
+/* The slot is the union of the three: the bulb's rays make it 13 wide and
+ * start it a row above the bolt, which moves down a row inside it to stay
+ * where it was. Clearing less than the widest would leave the last columns of
+ * whatever is taken down. Right edge x 47, so the row's text (at most 7
+ * cells, from x 54: draw_battery's txt[8]) clears it. */
+#define ICON_SLOT_W 13
+#define ICON_SLOT_H 15
+#define SLOT_Y      (BOLT_Y - 1)
+#define BOLT_DY     (BOLT_Y - SLOT_Y)
+_Static_assert(ICON_SLOT_W >= CROSS_WH && ICON_SLOT_W >= BOLT_W && ICON_SLOT_W >= BULB_W, "slot width");
+_Static_assert(ICON_SLOT_H >= BOLT_H + BOLT_DY && ICON_SLOT_H >= BULB_H, "slot height");
 
 static void slot_run(uint16_t *t, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint16_t col) {
-    for (uint8_t y = y0; y <= y1 && y < BOLT_H; y++)
+    for (uint8_t y = y0; y <= y1 && y < ICON_SLOT_H; y++)
         for (uint8_t x = x0; x <= x1 && x < ICON_SLOT_W; x++) t[y * ICON_SLOT_W + x] = col;
 }
 
-/* The bolt slot -- the bolt, the cross, or blank -- as ONE RAM tile in ONE
- * transfer (flash 2c). It was a clear and 11 lcd_fill_rect runs for the bolt,
- * 24 for the cross, each paying an 11-byte window command sent byte by byte:
- * 19 ms at every plug-in, measured on flash 2b and 2c alike (the plug-in
- * snapshots of 2026-10-11), the lesson draw_ampm learned first. The tile paints
- * its own background, so no clear goes first, and it is always the whole slot
- * (ICON_SLOT_W, the wider of the two), so neither leaves pixels under the
- * other. */
-static void draw_bolt_slot(bool absent, bool chrg) {
-    static uint16_t tile[ICON_SLOT_W * BOLT_H];
+/* The bolt slot -- the bolt, the cross, the mode's bulb, or blank -- as ONE
+ * RAM tile in ONE transfer (flash 2c). It was a clear and 11 lcd_fill_rect
+ * runs for the bolt, 24 for the cross, each paying an 11-byte window command
+ * sent byte by byte: 19 ms at every plug-in, measured on flash 2b and 2c alike
+ * (the plug-in snapshots of 2026-10-11), the lesson draw_ampm learned first.
+ * The tile paints its own background, so no clear goes first, and it is
+ * always the whole slot, so none leaves pixels under another. The bulb is
+ * rasterized from its art into the same tile: no runs, no second transfer.
+ * bulb is a power_mode_t, or SLOT_NO_BULB. */
+static void draw_bolt_slot(bool absent, bool chrg, uint8_t bulb) {
+    static uint16_t tile[ICON_SLOT_W * ICON_SLOT_H];
     memset(tile, 0, sizeof(tile));                      /* black background */
     if (absent) {
         /* Two-pixel strokes, clamped at the edges, CROSS_Y_OFF down. */
         for (uint8_t i = 0; i < CROSS_WH; i++) {
-            uint8_t y = (uint8_t)(CROSS_Y_OFF + i);
+            uint8_t y = (uint8_t)(BOLT_DY + CROSS_Y_OFF + i);
             uint8_t a = i;                              /* the "\" stroke */
             uint8_t b = (uint8_t)(CROSS_WH - 1 - i);    /* the "/" stroke  */
             slot_run(tile, a, y, (a < CROSS_WH - 1) ? (uint8_t)(a + 1) : a, y, COL_BATT_LOW);
@@ -1641,13 +1705,20 @@ static void draw_bolt_slot(bool absent, bool chrg) {
         }
     } else if (chrg) {
         for (uint8_t i = 0; i < sizeof(bolt_runs) / sizeof(bolt_runs[0]); i++)
-            slot_run(tile, bolt_runs[i][0], bolt_runs[i][1], bolt_runs[i][2], bolt_runs[i][3], COL_BOLT);
+            slot_run(tile, bolt_runs[i][0], (uint8_t)(bolt_runs[i][1] + BOLT_DY), bolt_runs[i][2],
+                     (uint8_t)(bolt_runs[i][3] + BOLT_DY), COL_BOLT);
+    } else if (bulb < POWER_MODE_COUNT) {
+        for (uint8_t y = 0; y < BULB_H; y++)
+            for (uint8_t x = 0; x < BULB_W; x++) {
+                char c = bulb_art[bulb][y][x];
+                if (c != '.') tile[y * ICON_SLOT_W + x] = bulb_cols[bulb][c == '#' ? 0 : c == '*' ? 1 : 2];
+            }
     }
     /* CPU pushes share SPI0 with the DMA blits. lcd_blit_ram quiesces the bus
      * itself (bus_quiesce); the explicit wait is draw_ampm's pattern, and free
      * when the bus is idle. */
     lcd_blit_wait();
-    lcd_blit_ram(tile, BOLT_X, BOLT_Y, ICON_SLOT_W, BOLT_H);
+    lcd_blit_ram(tile, BOLT_X, SLOT_Y, ICON_SLOT_W, ICON_SLOT_H);
 }
 #define BATT_IN_H (BATT_IN_Y1 - BATT_IN_Y0 + 1)
 
@@ -1675,6 +1746,7 @@ static void draw_battery(bool force) {
     static uint16_t last_txt_x = PANEL_WIDTH;  /* where the percent text starts   */
     static uint16_t last_txt_w = 0;            /* ...and how wide it is            */
     static bool     last_absent = false;       /* no pack fitted: cross, no number */
+    static uint8_t  last_bulb  = SLOT_NO_BULB; /* the mode's bulb in the slot, on battery */
     static char     last_txt[8] = "\x01";      /* what the text slot says ("\x01": never drawn) */
 
     /* The level is battery.c's, from the CH582F's `5C` -- a voltmeter on the
@@ -1710,7 +1782,7 @@ static void draw_battery(bool force) {
             snprintf(txt, sizeof(txt), "%u%%", batt);
         }
     }
-    /* "Charge", not "Charging": at 10 px a cell that is 80 px against the 78
+    /* "Charge", not "Charging": at 10 px a cell that is 80 px against the 76
      * between the icon slot and the bezel margin, and it would start inside
      * the slot that a bolt toggle clears. */
     else if (st == BATTERY_STATE_CHARGING)        snprintf(txt, sizeof(txt), "Charge");
@@ -1768,12 +1840,18 @@ static void draw_battery(bool force) {
                  : (batt <= 50) ? COL_BATT_WARN
                                 : COL_BATT_OK;
     }
-    /* Charging state changes the bolt, and presence owns the same rect. */
-    if (chrg != last_chrg || absent != last_absent) batt_dirty |= BATT_DIRTY_BOLT;
+    /* The mode's bulb: on battery only, where the ladder runs; on USB every
+     * mode is Always on and the slot is the bolt's, or blank. Saver's while
+     * the low cap holds the lights to its stages (power_lights_mode). */
+    uint8_t bulb = (!absent && !chrg && battery_on_battery()) ? (uint8_t)power_lights_mode() : SLOT_NO_BULB;
+    /* Charging state changes the bolt, and presence and the bulb own the same
+     * rect: one mark, one tile, one transfer, whichever changed. */
+    if (chrg != last_chrg || absent != last_absent || bulb != last_bulb) batt_dirty |= BATT_DIRTY_BOLT;
     if (!same_txt) { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; txt_placed = false; }
     if (want_fw != last_fw || (want_fw && want_col != last_col)) batt_dirty |= BATT_DIRTY_BAR;
     last_chrg   = chrg;
     last_absent = absent;
+    last_bulb   = bulb;
     memcpy(last_txt, txt, sizeof(last_txt));
     if (!batt_dirty || batt_painted_this_pass) return;
     batt_painted_this_pass = true;
@@ -1808,15 +1886,15 @@ static void draw_battery(bool force) {
      * earlier version recoloured the whole icon cyan, which hid the level
      * exactly when "15% and charging" is the most useful thing to know. */
     if (batt_dirty & BATT_DIRTY_BOLT) {
-        /* One rect, three states, one transfer (draw_bolt_slot). */
-        draw_bolt_slot(absent, chrg);
+        /* One rect, four kinds of state, one transfer (draw_bolt_slot). */
+        draw_bolt_slot(absent, chrg, bulb);
         batt_dirty &= (uint8_t)~BATT_DIRTY_BOLT;
         return;
     }
 
     /* The text slot: the level, "Low", a state word while the level is
      * unknown, or -- with no pack -- "No Batt", which at 10px/cell is 70px
-     * against the 78px between the cross and the bezel margin.
+     * against the 76px between the icon slot and the bezel margin.
      *
      * Right-aligned, so a SHORTER string starts further right and would leave
      * its old leftmost cells behind ("100%" -> "99%", and "No Batt" -> "5%").

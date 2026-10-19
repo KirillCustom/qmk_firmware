@@ -19,8 +19,8 @@
  * here: as a cap, the user's own RGB toggle cannot turn the lights back on
  * underneath it, which rgb_matrix_disable_noeeprom() allowed.
  *
- * Battery only (battery_on_battery): with the cable in, every mode is Full
- * Power. The wake is the keypress itself (or the knob), which also types as
+ * Battery only (battery_on_battery): with the cable in, every mode is Always
+ * on. The wake is the keypress itself (or the knob), which also types as
  * normal; the lights follow within one 10 Hz tick.
  *
  * The ladder's last stage is the deep sleep (power_sleep_wanted; sleep.c does
@@ -88,12 +88,13 @@ static uint8_t  forced      = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF no
 static uint32_t bench_sleep = 0;      /* HC_DEVHOOK: a short sleep time for the bench, 0 none */
 #endif
 
-/* The overlay holds 12 characters (display.c, CONN_STATUS_MAX). */
+/* The overlay holds 12 characters (display.c, CONN_STATUS_MAX). The names
+ * the user sees (plans/POWER-MODE-ICONS-PLAN.md); the enum keeps its own. */
 static const char *const mode_names[POWER_MODE_COUNT] = {
-    [POWER_MODE_FULL]   = "Full power",
-    [POWER_MODE_NORMAL] = "Normal power",
+    [POWER_MODE_FULL]   = "Always on",
+    [POWER_MODE_NORMAL] = "Balanced",
     [POWER_MODE_SAVER]  = "Power saver",
-    [POWER_MODE_MINIMAL] = "Minimal mode",
+    [POWER_MODE_MINIMAL] = "Lights out",
 };
 
 static uint8_t applied_scale = 255;
@@ -278,6 +279,14 @@ bool power_sleep_wanted(void) {
 
 power_mode_t power_mode(void) {
     return mode;
+}
+
+/* The battery row's bulb: Saver's while the low cap holds a lighter mode's
+ * lights to Saver's stages (power_task), so the icon says what the board is
+ * doing. Minimal is darker than those stages and keeps its own. low_now is
+ * only ever set on battery. */
+power_mode_t power_lights_mode(void) {
+    return (low_now && mode < POWER_MODE_SAVER) ? POWER_MODE_SAVER : mode;
 }
 
 void power_cycle_mode(void) {

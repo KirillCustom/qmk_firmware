@@ -18,15 +18,17 @@ typedef enum {
     POWER_STAGE_SCREEN_OFF,   /* RGB dark, screen backlight off */
 } power_stage_t;
 
-/* The modes on Fn+B (PWR_MODE), persisted; Normal is the default. The macro
- * tells scripts/battery_sim which power.c it is building. */
+/* The modes on Fn+B (PWR_MODE), persisted; Normal is the default. The macros
+ * tell scripts/battery_sim which power.c it is building: POWER_HAS_BULB, the
+ * names below and power_lights_mode() (plans/POWER-MODE-ICONS-PLAN.md). */
 #define POWER_HAS_MODES 1
+#define POWER_HAS_BULB  1
 typedef enum {
-    POWER_MODE_FULL = 0,      /* the ladder never runs */
-    POWER_MODE_NORMAL,        /* dim 1 min, RGB off 5, screen off and asleep 7 */
-    POWER_MODE_SAVER,         /* dim 30 s, RGB off 2 min, screen off and asleep 3 */
-    POWER_MODE_MINIMAL,       /* RGB and backlight off on battery, typing or not;
-                               * the backlight lights a moment for a message */
+    POWER_MODE_FULL = 0,      /* "Always on": the ladder never runs */
+    POWER_MODE_NORMAL,        /* "Balanced": dim 1 min, RGB off 5, screen off and asleep 7 */
+    POWER_MODE_SAVER,         /* "Power saver": dim 30 s, RGB off 2 min, screen off and asleep 3 */
+    POWER_MODE_MINIMAL,       /* "Lights out": RGB and backlight off on battery, typing
+                               * or not; the backlight lights a moment for a message */
     POWER_MODE_COUNT
 } power_mode_t;
 
@@ -38,6 +40,9 @@ void power_task(void);
 
 power_stage_t power_stage(void);
 power_mode_t  power_mode(void);
+/* The mode whose stages the lights follow: the mode, or Saver's while the
+ * low cap holds Always on or Balanced to them. The battery row's bulb. */
+power_mode_t  power_lights_mode(void);
 /* Fn+B: the next mode, persisted, and shown as an overlay. */
 void power_cycle_mode(void);
 
