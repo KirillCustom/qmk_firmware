@@ -86,6 +86,11 @@ void ch582_led5a_reset(void);
  * armed. arm(true) clears and starts it, arm(false) stops it. fill: [armed]
  * [bytes since arming u32][ring size u16] at out[0..6]. page: [page][0], then
  * slots page*26 .. page*26+25, 28 bytes; false past the last page. */
+/* Raw HID over the 2.4G dongle, stage 1's echo (HC_DEVHOOK op 17; the
+ * collector in ch582f_ajazz.c). fill: page 0 the seven counters, page 1 the
+ * state, 28 bytes. */
+void ch582_raw81_fill(uint8_t page, uint8_t *out28);
+void ch582_raw81_clear_counters(void);
 void ch582_rxtap_arm(bool armed);
 void ch582_rxtap_fill(uint8_t *out);
 bool ch582_rxtap_page(uint8_t page, uint8_t *out);

@@ -608,6 +608,140 @@ static uint32_t tx_stat_giveup = 0, tx_stat_replaced = 0;
 static event_listener_t uart_err_listener;
 static uint32_t         uart_err_overrun, uart_err_framing, uart_err_parity;
 
+/* Read and count the UART's error flags since the last call; returns them so a
+ * caller can also act on them (the raw-HID collector below). Main-loop only. */
+static eventflags_t uart_err_poll(void) {
+    static bool listening = false;
+    if (!listening) {   /* lazily: the listener binds to this (main) thread */
+        chEvtRegisterMaskWithFlags(chnGetEventSource(&CH582_SERIAL_DRIVER),
+                                   &uart_err_listener, EVENT_MASK(0),
+                                   SD_OVERRUN_ERROR | SD_FRAMING_ERROR | SD_PARITY_ERROR);
+        listening = true;
+    }
+    eventflags_t f = chEvtGetAndClearFlags(&uart_err_listener);
+    if (f & SD_OVERRUN_ERROR) uart_err_overrun++;
+    if (f & SD_FRAMING_ERROR) uart_err_framing++;
+    if (f & SD_PARITY_ERROR)  uart_err_parity++;
+    return f;
+}
+
+#ifdef AK820_DEV_HOOKS
+/* Raw HID over the 2.4G dongle, stage 1: an echo (plans/RAWHID-24G-PLAN.md,
+ * "Codex's plan review and stage 1 as specified"). A 32-byte report the host
+ * writes to the dongle's FF60 interface arrives from the module as
+ *     81 <32 bytes> <sum = (0x81 + the 32) & 0xFF>
+ * and the stock firmware answers with 91 <32 bytes> <sum> the same way. Stage 1
+ * answers each committed 81 with a 91 carrying the same 32 bytes, and nothing
+ * else: no dispatch, so a false commit costs a stray reply and no more.
+ *
+ * Receive, beside the 3-byte window:
+ *   - A collection starts only on a 0x81 at a BOUNDARY, decided before the
+ *     byte is consumed: after the window was cleared by a matched frame or
+ *     ACK, or after measured silence. Any byte the window takes without a
+ *     match clears it, so `5C 25 | 81` (37%) completes the 5C and never
+ *     starts, nor does P3's `5A 81 ..` (codex plan review, must-fix 1).
+ *   - Silence: a drain that finds the input queue EMPTY at least
+ *     RAW81_SILENCE_MS after the last byte was read. The UART ISR queues each
+ *     byte as it arrives, so an empty queue then means none came in that span
+ *     (give or take the FIFO trigger and a masked ISR, both well under it).
+ *   - Collecting, bytes go to the buffer, not the window (payloads can hold a
+ *     valid 5x frame or 61 0D 0A). A UART error flag seen meanwhile, a bad
+ *     sum, or a collection older than RAW81_LIFETIME_MS aborts it; an abort
+ *     QUARANTINES the line: every byte is dropped until it has been silent
+ *     RAW81_SILENCE_MS, so no tail reaches the window (must-fix 2).
+ *   - Collected in every mode, so a 81's payload never reaches the window;
+ *     answered only in 2.4G with the link up.
+ * Transmit: one 34-byte slot, sent only when the keyboard queue is empty and
+ * nothing is in flight (keys first), never retried or coalesced, dropped and
+ * counted if a reply is still waiting when the next 81 commits. After a 91
+ * the A-frame pump waits RAW91_ACK_WINDOW_MS: an ACK in that window is counted
+ * as the 91's and pops nothing, so a late one cannot release an A1 (61 0D 0A
+ * carries no sequence). That count is what says whether the module ACKs 91
+ * (must-fix 5). */
+#define RAW81_LEN           34u
+#define RAW81_SILENCE_MS    5u
+#define RAW81_LIFETIME_MS   15u
+#define RAW91_ACK_WINDOW_MS 15u
+typedef enum { R81_IDLE, R81_COLLECT, R81_QUARANTINE } r81_state_t;
+static r81_state_t r81_state       = R81_IDLE;
+static bool        r81_boundary    = true;
+static uint8_t     r81_buf[RAW81_LEN];
+static uint8_t     r81_len;
+static uint16_t    r81_start;
+static uint16_t    rx_last_byte_at;
+static bool        r91_pending, r91_ack_window;
+static uint8_t     r91_buf[RAW81_LEN];
+static uint16_t    r91_sent_at;
+static uint32_t    r81_ok, r81_badsum, r81_lifetime, r81_taint, r81_qbytes;
+static uint32_t    r91_sent, r91_dropped, r91_acks;
+
+static void r81_abort(uint32_t *why) {
+    (*why)++;
+    r81_state    = R81_QUARANTINE;
+    r81_boundary = false;
+}
+
+/* The line starts over (a resync, a sleep's wake): nothing half-collected or
+ * waiting survives it. The ACK window is left to run out on its own. */
+static void r81_reset(void) {
+    r81_state    = R81_IDLE;
+    r81_boundary = true;
+    r91_pending  = false;
+}
+
+static void r81_commit(void) {
+    if (uart_err_poll()) {   /* an error during this drain, before the commit */
+        r81_abort(&r81_taint);
+        return;
+    }
+    uint8_t s = 0;
+    for (uint8_t i = 0; i < RAW81_LEN - 1u; i++) s += r81_buf[i];
+    if (s != r81_buf[RAW81_LEN - 1u]) {
+        r81_abort(&r81_badsum);
+        return;
+    }
+    r81_ok++;
+    r81_state    = R81_IDLE;
+    r81_boundary = true;
+    if (!is_module_connected || usb_mode || requested_profile != CH582_PROFILE_PEER_24G) return;
+    if (r91_pending) {
+        r91_dropped++;
+        return;
+    }
+    s          = 0x91;
+    r91_buf[0] = 0x91;
+    for (uint8_t i = 1; i < RAW81_LEN - 1u; i++) {
+        r91_buf[i] = r81_buf[i];
+        s += r81_buf[i];
+    }
+    r91_buf[RAW81_LEN - 1u] = s;
+    r91_pending             = true;
+}
+
+/* HC_DEVHOOK op 17 (hid_protocol.c). page 0: commits, bad sums, lifetime
+ * aborts, UART-taint aborts, 91s sent, replies dropped, ACKs in the window
+ * (u32 each, 28 bytes). page 1: [state][boundary][pending][ack window]
+ * [quarantined bytes u32]. */
+void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
+    memset(out28, 0, 28);
+    if (page == 0) {
+        const uint32_t v[7] = {r81_ok, r81_badsum, r81_lifetime, r81_taint, r91_sent, r91_dropped, r91_acks};
+        memcpy(out28, v, sizeof(v));
+    } else {
+        out28[0] = (uint8_t)r81_state;
+        out28[1] = r81_boundary ? 1 : 0;
+        out28[2] = r91_pending ? 1 : 0;
+        out28[3] = r91_ack_window ? 1 : 0;
+        memcpy(&out28[4], &r81_qbytes, 4);
+    }
+}
+
+void ch582_raw81_clear_counters(void) {
+    r81_ok = r81_badsum = r81_lifetime = r81_taint = r81_qbytes = 0;
+    r91_sent = r91_dropped = r91_acks = 0;
+}
+#endif
+
 #ifdef CONSOLE_ENABLE
 /* ACK turnaround, instrumented builds (2026-09-23): docs/wireless.md asks for
  * this before CH582_TX_ACK_TIMEOUT_MS is touched -- ~half of all frames time
@@ -749,6 +883,15 @@ static inline void tx_link_change_check(const ch582_tx_frame_t *f) {
  * Called every ch582_task() (main-loop cadence, sub-ms), so the 10 ms timeout is
  * honoured with fine granularity. */
 static void ch582_tx_pump(void) {
+#ifdef AK820_DEV_HOOKS
+    /* After a 91, hold the A-frames until its ACK, if any, has had time to
+     * come (r81 above): one arriving now must not pop an A1. Nothing is in
+     * flight here, since a 91 only goes when the queue is idle. */
+    if (r91_ack_window) {
+        if (timer_elapsed(r91_sent_at) < RAW91_ACK_WINDOW_MS) return;
+        r91_ack_window = false;
+    }
+#endif
     if (tx_in_flight) {
         if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS) return;   /* still waiting for ACK */
         tx_stat_timeout++;
@@ -762,7 +905,24 @@ static void ch582_tx_pump(void) {
         tx_sent_time = timer_read();
         return;
     }
-    if (tx_head == tx_tail) return;                                          /* queue empty */
+    if (tx_head == tx_tail) {                                                /* queue empty */
+#ifdef AK820_DEV_HOOKS
+        /* The reply slot goes only now, behind every keyboard frame. The link
+         * is checked again: it may have moved since the 81 committed. The same
+         * blocking write as every frame; 34 bytes through the 16-byte output
+         * queue wait ~1.6 ms at most, paced by the UART. */
+        if (r91_pending) {
+            r91_pending = false;
+            if (is_module_connected && !usb_mode && requested_profile == CH582_PROFILE_PEER_24G) {
+                sdWrite(&CH582_SERIAL_DRIVER, r91_buf, RAW81_LEN);
+                r91_sent++;
+                r91_sent_at    = timer_read();
+                r91_ack_window = true;
+            }
+        }
+#endif
+        return;
+    }
     tx_link_change_check(&tx_q[tx_head]);
     sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len);
     tx_sent_time = timer_read();
@@ -783,6 +943,9 @@ void ch582_rx_resync(void) {
 }
 
 bool ch582_tx_idle(void) {
+#ifdef AK820_DEV_HOOKS
+    if (r91_pending || r91_ack_window) return false;   /* sleep admission waits for a reply too */
+#endif
     return !tx_in_flight && tx_head == tx_tail;
 }
 
@@ -850,6 +1013,9 @@ static void ch582_tx_ack(void) {
     } else {
         ack_orphan++;
     }
+#endif
+#ifdef AK820_DEV_HOOKS
+    if (r91_ack_window && !tx_in_flight) r91_acks++;   /* the 91's, if it has one */
 #endif
     if (tx_in_flight) ch582_tx_pop();
 }
@@ -1123,6 +1289,9 @@ void ch582_task(void) {
     if (rx_resync_req) {
         rx_resync_req = false;
         b2 = b1 = b0 = 0;
+#ifdef AK820_DEV_HOOKS
+        r81_reset();
+#endif
     }
 
     /* Cold-boot-only select retry. The mode slider is wired directly to the
@@ -1243,17 +1412,17 @@ void ch582_task(void) {
     }
 
     {
-        static bool listening = false;
-        if (!listening) {   /* lazily: the listener binds to this (main) thread */
-            chEvtRegisterMaskWithFlags(chnGetEventSource(&CH582_SERIAL_DRIVER),
-                                       &uart_err_listener, EVENT_MASK(0),
-                                       SD_OVERRUN_ERROR | SD_FRAMING_ERROR | SD_PARITY_ERROR);
-            listening = true;
+        eventflags_t f = uart_err_poll();
+#ifdef AK820_DEV_HOOKS
+        /* A byte lost under a collection, or one older than its lifetime:
+         * abort before another byte is taken (r81 above). */
+        if (r81_state == R81_COLLECT) {
+            if (f) r81_abort(&r81_taint);
+            else if (timer_elapsed(r81_start) >= RAW81_LIFETIME_MS) r81_abort(&r81_lifetime);
         }
-        eventflags_t f = chEvtGetAndClearFlags(&uart_err_listener);
-        if (f & SD_OVERRUN_ERROR) uart_err_overrun++;
-        if (f & SD_FRAMING_ERROR) uart_err_framing++;
-        if (f & SD_PARITY_ERROR)  uart_err_parity++;
+#else
+        (void)f;
+#endif
     }
 
     uint8_t c;
@@ -1277,7 +1446,19 @@ void ch582_task(void) {
             bytes_processed++;
         } else
 #endif
-        if (chnReadTimeout(&CH582_SERIAL_DRIVER, &c, 1, TIME_IMMEDIATE) == 0) break;
+        if (chnReadTimeout(&CH582_SERIAL_DRIVER, &c, 1, TIME_IMMEDIATE) == 0) {
+#ifdef AK820_DEV_HOOKS
+            /* The queue is empty: if nothing has come for RAW81_SILENCE_MS, the
+             * line was silent that long, so a quarantine ends and the next byte
+             * starts at a boundary (r81 above). A collection is left to its
+             * lifetime. */
+            if (r81_state != R81_COLLECT && timer_elapsed(rx_last_byte_at) >= RAW81_SILENCE_MS) {
+                r81_state    = R81_IDLE;
+                r81_boundary = true;
+            }
+#endif
+            break;
+        }
 #ifdef WDT_TEST_HOOKS
         else if (ch582_rx_muted) { bytes_processed++; continue; } /* discard real byte */
 #endif
@@ -1290,6 +1471,26 @@ void ch582_task(void) {
             rxtap_note(c);
 #endif
         }
+#ifdef AK820_DEV_HOOKS
+        /* The 81 collector (r81 above), before the window sees the byte. */
+        rx_last_byte_at = timer_read();
+        if (r81_state == R81_QUARANTINE) {
+            r81_qbytes++;
+            continue;
+        }
+        if (r81_state == R81_COLLECT) {
+            r81_buf[r81_len++] = c;
+            if (r81_len == RAW81_LEN) r81_commit();
+            continue;
+        }
+        if (r81_boundary && c == 0x81) {
+            r81_state  = R81_COLLECT;
+            r81_buf[0] = c;
+            r81_len    = 1;
+            r81_start  = timer_read();
+            continue;
+        }
+#endif
 
         b2 = b1;
         b1 = b0;
@@ -1490,6 +1691,10 @@ void ch582_task(void) {
              * (Audit finding IV-2, findings-input-validation.md.) */
             health_note_rx_malformed();
         }
+#ifdef AK820_DEV_HOOKS
+        /* A boundary only right after a frame or ACK the window completed. */
+        r81_boundary = matched;
+#endif
     }
 
     /* Drive the reliable TX queue: send/retransmit/drop the in-flight frame.

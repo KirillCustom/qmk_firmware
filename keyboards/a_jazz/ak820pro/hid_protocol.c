@@ -576,6 +576,14 @@ enum {
      *       slots arg*26 .. arg*26+25 at [6..31]; byte n is in slot n % ring
      *       size. Op 15 (arg 0), the pages, then op 15 again, is a consistent
      *       read only if the count did not move between them.
+     * op 17: raw HID over the 2.4G dongle, stage 1's echo (ch582f_ajazz.c,
+     *       plans/RAWHID-24G-PLAN.md). arg 0: [4..31] seven u32 -- 81s
+     *       committed, bad sums, lifetime aborts, UART-taint aborts, 91s sent,
+     *       replies dropped (slot full), ACKs inside the 91's window. arg 1:
+     *       [4] state (0 idle, 1 collecting, 2 quarantine), [5] boundary,
+     *       [6] reply pending, [7] ACK window open, [8..11] quarantined bytes
+     *       u32. arg 2: zero the counters, then reply as arg 0. Anything
+     *       else is unhandled.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -1070,6 +1078,13 @@ static void health_command(uint8_t *data, uint8_t length) {
                 case 16:
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
+                case 17: {
+                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    uint8_t sub = data[4];
+                    if (sub == 2) ch582_raw81_clear_counters();
+                    ch582_raw81_fill(sub == 1 ? 1 : 0, &data[4]);
+                    break;
+                }
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;
