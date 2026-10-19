@@ -567,6 +567,15 @@ enum {
      *       rule does not apply to a forced stage). Replies [mode][stage]
      *       [val cap][forced stage, 0xFF none][on battery] at [4..8]. For the
      *       bench's load map of the stages (PHASE2-BUILD-PLAN.md).
+     * op 15: the RX tap (ch582f_ajazz.c): every raw byte from the module
+     *       while armed. arg 0 reads, 1 clears and arms, 2 stops; any other
+     *       arg is unhandled. Replies [armed][bytes since arming u32][ring
+     *       size u16] at [4..10]. For an undocumented module frame type (the
+     *       2.4G dongle's FF60 interface, plans/GREMLIN-RESULTS.md).
+     * op 16: its ring, page arg (0..9): [4] the page again, [5] 0, then
+     *       slots arg*26 .. arg*26+25 at [6..31]; byte n is in slot n % ring
+     *       size. Op 15 (arg 0), the pages, then op 15 again, is a consistent
+     *       read only if the count did not move between them.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -1052,6 +1061,15 @@ static void health_command(uint8_t *data, uint8_t length) {
                     data[8] = battery_on_battery() ? 1 : 0;
                     break;
                 }
+                case 15:
+                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    if (data[4] != 0) ch582_rxtap_arm(data[4] == 1);
+                    memset(&data[4], 0, 28);
+                    ch582_rxtap_fill(&data[4]);
+                    break;
+                case 16:
+                    if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
+                    break;
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;

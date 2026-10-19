@@ -350,6 +350,49 @@ void ch582_led5a_reset(void) {
     memset(led5a_ring, 0, sizeof(led5a_ring));
 }
 
+/* The RX tap (dev builds; HC_DEVHOOK ops 15-16): every raw byte the module
+ * sends, while it is armed. The parser's window drops a byte that is not part
+ * of a 5A/5B/5C frame or an ACK without a trace, so a frame type nobody has
+ * documented would be invisible; this is what shows one -- for the 2.4G
+ * dongle's raw-HID-usage interface first (plans/GREMLIN-RESULTS.md). Off by
+ * default and off after a reset, so it costs one test per byte; armed, one
+ * store. Main-loop context only, like the parser that feeds it.
+ *
+ * Byte n lands in slot n % CH582_RXTAP_RING; the count is the total since
+ * arming, so a host reading the count first knows which slots it has. */
+#define CH582_RXTAP_RING 260   /* ten 26-byte pages */
+static bool     rxtap_armed = false;
+static uint32_t rxtap_count = 0;
+static uint8_t  rxtap_ring[CH582_RXTAP_RING];
+
+static inline void rxtap_note(uint8_t c) {
+    if (rxtap_armed) rxtap_ring[rxtap_count++ % CH582_RXTAP_RING] = c;
+}
+
+void ch582_rxtap_arm(bool armed) {
+    if (armed) {
+        rxtap_count = 0;
+        memset(rxtap_ring, 0, sizeof(rxtap_ring));
+    }
+    rxtap_armed = armed;
+}
+
+void ch582_rxtap_fill(uint8_t *out) {
+    out[0] = rxtap_armed ? 1 : 0;
+    memcpy(&out[1], &rxtap_count, 4);
+    uint16_t ring = CH582_RXTAP_RING;
+    memcpy(&out[5], &ring, 2);
+}
+
+/* The reply echoes its page, as the 5A trace's does. */
+bool ch582_rxtap_page(uint8_t page, uint8_t *out) {
+    if (page >= CH582_RXTAP_RING / 26) return false;
+    out[0] = page;
+    out[1] = 0;
+    memcpy(&out[2], &rxtap_ring[page * 26], 26);
+    return true;
+}
+
 /* The lock-LED channel's receiver (lockchan.c; plans/LOCK-LED-CHANNEL-PLAN.md).
  * Dev builds only while it is an experiment: frames are decoded and counted,
  * and HC_DEVHOOK ops 10-13 read them; nothing acts on them yet. Fed every 5A
@@ -1231,6 +1274,9 @@ void ch582_task(void) {
         else if (ch582_rx_muted) { bytes_processed++; continue; } /* discard real byte */
 #endif
         else bytes_processed++;
+#ifdef AK820_DEV_HOOKS
+        rxtap_note(c);
+#endif
 
         b2 = b1;
         b1 = b0;

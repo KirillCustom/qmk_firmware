@@ -82,6 +82,13 @@ uint8_t ch582_get_host_leds(void);
 void ch582_led5a_fill(uint8_t *out);
 bool ch582_led5a_page(uint8_t page, uint8_t *out);
 void ch582_led5a_reset(void);
+/* The RX tap (HC_DEVHOOK ops 15-16): every raw byte from the module while
+ * armed. arm(true) clears and starts it, arm(false) stops it. fill: [armed]
+ * [bytes since arming u32][ring size u16] at out[0..6]. page: [page][0], then
+ * slots page*26 .. page*26+25, 28 bytes; false past the last page. */
+void ch582_rxtap_arm(bool armed);
+void ch582_rxtap_fill(uint8_t *out);
+bool ch582_rxtap_page(uint8_t page, uint8_t *out);
 /* The lock-LED channel's receiver (HC_DEVHOOK ops 10-13). */
 #include "lockchan.h"
 const lockchan_t *ch582_lockchan(void);
