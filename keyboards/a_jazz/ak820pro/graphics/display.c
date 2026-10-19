@@ -1738,6 +1738,16 @@ static bool    txt_placed = false;   /* its x is set and its vacated cells clear
  * last thing housekeeping_task_kb() does, clears this once a pass. */
 static bool    batt_painted_this_pass = false;
 #define BATT_TXT_CHUNK   3           /* glyphs per call: 10x23 is ~2.5 ms each */
+static uint8_t batt_last_bulb = SLOT_NO_BULB;   /* the mode's bulb draw_battery() last wanted */
+
+/* A bulb is up and the mode it shows has changed (Fn+B, or the low cap): the
+ * 10 Hz tick calls draw_battery() for it, so the bulb follows Fn+B's overlay
+ * rather than the next RTC second (codex, power-icons review, note 3). Only a
+ * mode change: supply and CHRG edges keep the 1 Hz cadence they had, so an
+ * unsmoothed CHRG cannot repaint the slot faster than before. */
+static bool batt_bulb_stale(void) {
+    return batt_last_bulb != SLOT_NO_BULB && (uint8_t)power_lights_mode() != batt_last_bulb;
+}
 
 static void draw_battery(bool force) {
     static bool     last_chrg  = false;
@@ -1746,7 +1756,6 @@ static void draw_battery(bool force) {
     static uint16_t last_txt_x = PANEL_WIDTH;  /* where the percent text starts   */
     static uint16_t last_txt_w = 0;            /* ...and how wide it is            */
     static bool     last_absent = false;       /* no pack fitted: cross, no number */
-    static uint8_t  last_bulb  = SLOT_NO_BULB; /* the mode's bulb in the slot, on battery */
     static char     last_txt[8] = "\x01";      /* what the text slot says ("\x01": never drawn) */
 
     /* The level is battery.c's, from the CH582F's `5C` -- a voltmeter on the
@@ -1846,12 +1855,12 @@ static void draw_battery(bool force) {
     uint8_t bulb = (!absent && !chrg && battery_on_battery()) ? (uint8_t)power_lights_mode() : SLOT_NO_BULB;
     /* Charging state changes the bolt, and presence and the bulb own the same
      * rect: one mark, one tile, one transfer, whichever changed. */
-    if (chrg != last_chrg || absent != last_absent || bulb != last_bulb) batt_dirty |= BATT_DIRTY_BOLT;
+    if (chrg != last_chrg || absent != last_absent || bulb != batt_last_bulb) batt_dirty |= BATT_DIRTY_BOLT;
     if (!same_txt) { batt_dirty |= BATT_DIRTY_TEXT; txt_done = 0; txt_placed = false; }
     if (want_fw != last_fw || (want_fw && want_col != last_col)) batt_dirty |= BATT_DIRTY_BAR;
-    last_chrg   = chrg;
-    last_absent = absent;
-    last_bulb   = bulb;
+    last_chrg      = chrg;
+    last_absent    = absent;
+    batt_last_bulb = bulb;
     memcpy(last_txt, txt, sizeof(last_txt));
     if (!batt_dirty || batt_painted_this_pass) return;
     batt_painted_this_pass = true;
@@ -3185,8 +3194,9 @@ void display_housekeeping_task(void) {
             display_playback_tick();
             LOOP_SITE(LOOP_SITE_CLOCK, DPROBE(DP_CLOCK, draw_clock()));
             LOOP_SITE(LOOP_SITE_BATT,  DPROBE(DP_BATT, draw_battery(false))); // self-guards, only draws on change
-        } else if (batt_dirty) {
-            /* The rest of a battery repaint, one component per tick. */
+        } else if (batt_dirty || batt_bulb_stale()) {
+            /* The rest of a battery repaint, one component per tick; or a new
+             * mode's bulb (batt_bulb_stale). */
             LOOP_SITE(LOOP_SITE_BATT, DPROBE(DP_BATT, draw_battery(false)));
         }
     }
