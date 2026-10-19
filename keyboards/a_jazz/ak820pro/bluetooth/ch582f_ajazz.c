@@ -360,7 +360,7 @@ const lockchan_t *ch582_lockchan(void) { return &lockchan; }
 void ch582_lockchan_clear(void) { lockchan_clear_stats(&lockchan); }
 /* Only while the radio is the active host: in cable mode the LED state the
  * band shows is USB's, which a radio frame must not hold (codex, flash 2h). */
-bool ch582_lockchan_busy(void) { return !usb_mode && lockchan_busy(&lockchan); }
+bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scroll(&lockchan); }
 #    define LOCKCHAN_LINK_LOST() lockchan_link_lost(&lockchan)
 #else
 #    define LOCKCHAN_LINK_LOST() ((void)0)

@@ -230,9 +230,10 @@ bool led_update_kb(led_t led_state) {
     if (led_state.scroll_lock != ind_scroll) {
         ind_scroll     = led_state.scroll_lock;
         scr_changed_at = timer_read32();
-        /* Not mid-frame: a frame's first edge could pass for the answer to a
-         * press made just before it (codex, flash 2h). */
-        if (scr_key_armed && timer_elapsed32(scr_key_at) < SCR_OWN_KEY_MS && !ch582_lockchan_busy()) {
+        /* Not mid-frame in one that can move Scroll: a frame's first edge
+         * could pass for the answer to a press made just before it (codex,
+         * flash 2h). */
+        if (scr_key_armed && timer_elapsed32(scr_key_at) < SCR_OWN_KEY_MS && !ch582_lockchan_holds_scroll()) {
             scr_shown     = ind_scroll;
             scr_key_armed = false;
         }
@@ -351,8 +352,9 @@ void update_leds(void) {
     ind_winlock = keymap_config.no_gui;
 
     // Scroll Lock for the band, once it has settled (see scr_shown). A frame
-    // in progress owns the lights: the settle clock starts after it ends.
-    if (ch582_lockchan_busy()) scr_changed_at = timer_read32();
+    // in progress that can move Scroll owns it: the settle clock starts after
+    // it ends. P1 and P3 frames never touch Scroll, so they do not hold it.
+    if (ch582_lockchan_holds_scroll()) scr_changed_at = timer_read32();
     if (scr_shown != ind_scroll && timer_elapsed32(scr_changed_at) >= SCR_SETTLE_MS) {
         scr_shown = ind_scroll;
     }

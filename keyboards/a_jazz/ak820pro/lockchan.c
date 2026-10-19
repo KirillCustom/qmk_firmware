@@ -255,6 +255,15 @@ bool lockchan_busy(const lockchan_t *lc) {
     return lc->st != ST_IDLE;
 }
 
+bool lockchan_holds_scroll(const lockchan_t *lc) {
+    switch (lc->st) {
+        case ST_IDLE: return false;
+        case ST_PRE:
+        case ST_HDR: return lc->pre_mask != PRE_PAD;   /* P0, or P1/P2 until the header says which */
+        default: return lc->pay_profile == LOCKCHAN_P0 || lc->pay_profile == LOCKCHAN_P2;
+    }
+}
+
 void lockchan_init(lockchan_t *lc) {
     memset(lc, 0, sizeof(*lc));
 }

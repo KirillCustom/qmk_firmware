@@ -94,7 +94,12 @@ void lockchan_poll(lockchan_t *lc, uint32_t now_ms, bool linked);
  * of the same UART drain, which may already hold a reconnect and the rest of
  * the old frame (codex, flash 2h). */
 void lockchan_link_lost(lockchan_t *lc);
-/* Mid-frame: the band's settled Scroll Lock waits while this is true. */
+/* Mid-frame. */
 bool lockchan_busy(const lockchan_t *lc);
+/* Mid-frame in one that can move Scroll Lock: the band's settled Scroll Lock
+ * waits while this is true. P0 and P2 frames, and a bits 3-4 preamble and
+ * header (they may announce P2); P1 and P3 never touch Scroll, so a real
+ * change shows on time under them (codex, flash 2i). */
+bool lockchan_holds_scroll(const lockchan_t *lc);
 /* Zero the counters and the last frame; a frame in progress carries on. */
 void lockchan_clear_stats(lockchan_t *lc);

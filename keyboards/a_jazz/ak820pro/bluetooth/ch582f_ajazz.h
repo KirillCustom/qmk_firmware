@@ -81,9 +81,9 @@ void ch582_led5a_reset(void);
 #include "lockchan.h"
 const lockchan_t *ch582_lockchan(void);
 void ch582_lockchan_clear(void);
-bool ch582_lockchan_busy(void);
+bool ch582_lockchan_holds_scroll(void);
 #else
-static inline bool ch582_lockchan_busy(void) { return false; }
+static inline bool ch582_lockchan_holds_scroll(void) { return false; }
 #endif
 
 /* Cumulative TX health counters (sent / ACK timeouts / queue-full drops). */
