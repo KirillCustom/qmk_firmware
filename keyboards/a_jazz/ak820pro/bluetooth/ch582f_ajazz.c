@@ -217,6 +217,8 @@ static uint16_t         last_battery_poll = 0;
 static uint32_t         battery_last_recv = 0;
 static uint16_t         battery_reports   = 0;   /* 5C frames received, wrapping */
 static bool             battery_seen      = false;
+static bool             battery_stale     = false;   /* the last report predates a deep sleep */
+static bool             battery_poll_held = false;   /* a deep sleep's wake: until sleep.c lets go */
 static uint8_t          battery_min       = 100;
 
 /* Request a battery-level report from the module. Logic-analyzer-decoded from the
@@ -733,6 +735,27 @@ bool ch582_tx_idle(void) {
     return !tx_in_flight && tx_head == tx_tail;
 }
 
+/* Deep sleep (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, sections 4-5). At the
+ * wake: the parser's window starts over; the last battery report is from
+ * before the sleep, so its age reads as none until a new one comes (QMK's
+ * timer stood still asleep and would call it fresh); the lock-LED receiver's
+ * frame in progress is dropped; and the periodic battery poll waits for
+ * sleep.c's input gate, so the waking key's report goes first. Then one poll
+ * at once. */
+void ch582_sleep_wake(void) {
+    rx_resync_req     = true;
+    battery_stale     = true;
+    battery_poll_held = true;
+    LOCKCHAN_LINK_LOST();
+}
+
+void ch582_battery_poll_release(void) {
+    if (!battery_poll_held) return;
+    battery_poll_held = false;
+    last_battery_poll = timer_read();
+    ch582_poll_status();
+}
+
 bool ch582_tx_drain(uint16_t timeout_ms) {
     /* A reset that beats the main loop's pump strands whatever is queued: for
      * the jump, the key releases just queued, which would leave a key down at
@@ -983,7 +1006,7 @@ uint8_t ch582_battery_min(void) {
 /* Milliseconds since the last 5C frame. UINT32_MAX if the module has never sent
  * one -- the caller must not render that as an age. */
 uint32_t ch582_battery_age_ms(void) {
-    if (!battery_seen) return UINT32_MAX;
+    if (!battery_seen || battery_stale) return UINT32_MAX;
     return timer_elapsed32(battery_last_recv);
 }
 
@@ -1044,12 +1067,12 @@ void ch582_task(void) {
      *                   independent (streams even while disconnected) -> never use
      *                   it as a "connected" signal. */
     static uint8_t b2 = 0, b1 = 0, b0 = 0;
-#ifdef AK820_DEV_HOOKS
+    /* In every build: a deep sleep's wake starts the window over (codex,
+     * deep-sleep review 24: draining the UART alone left the history stale). */
     if (rx_resync_req) {
         rx_resync_req = false;
         b2 = b1 = b0 = 0;
     }
-#endif
 
     /* Cold-boot-only select retry. The mode slider is wired directly to the
      * CH582F, so once the module is up it handles advertising/reconnect itself
@@ -1156,7 +1179,9 @@ void ch582_task(void) {
      * boot" JD noticed. Asking earlier than module_alive is pointless:
      * at cold boot the module's UART is not up yet and the frame is dropped
      * (the same reason the connect select needs its own cold-boot retry). */
-    if (module_alive && !battery_seen) {
+    if (battery_poll_held) {
+        /* a deep sleep's wake: sleep.c releases it */
+    } else if (module_alive && !battery_seen) {
         if (timer_elapsed(last_battery_poll) >= CH582_BATTERY_FIRST_POLL_MS) {
             last_battery_poll = timer_read();
             ch582_poll_status();
@@ -1346,6 +1371,7 @@ void ch582_task(void) {
                     if (d <= 100) {
                         battery_level     = d;
                         battery_last_recv = timer_read32();
+                        battery_stale     = false;
                         battery_reports++;
                         if (prof) {
                             uint16_t h0 = ACCT_NOW();

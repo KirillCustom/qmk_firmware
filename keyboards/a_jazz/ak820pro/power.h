@@ -44,6 +44,9 @@ void power_cycle_mode(void);
 /* The deep sleep is wanted: on battery, not Full, idle past the mode's sleep
  * time (Saver's when the battery is low). sleep.c decides when it can. */
 bool power_sleep_wanted(void);
+/* A wake after a long sleep (sleep.c): say the time left in hours of use, if
+ * it matters (under 10 h), once the band is free. */
+void power_wake_notice(void);
 
 /* The dim stage's ceiling on the lighting's value: 255, or the cap. */
 uint8_t power_val_cap(void);

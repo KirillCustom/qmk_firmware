@@ -42,6 +42,11 @@ bool ch582_tx_drain(uint16_t timeout_ms);
 bool ch582_tx_idle(void);
 /* Start the RX parser's window over (after a gap in the line). */
 void ch582_rx_resync(void);
+/* A deep sleep's wake (sleep.c): the parser resynced, the last battery report
+ * marked stale, the lock-LED receiver's frame dropped, the periodic battery
+ * poll held until ch582_battery_poll_release() (which sends one at once). */
+void ch582_sleep_wake(void);
+void ch582_battery_poll_release(void);
 /* Queue fresh all-released keyboard (A1) and consumer (A3) frames, whatever
  * QMK last sent. False if a full queue dropped either. For the same jump. */
 bool ch582_send_releases(void);

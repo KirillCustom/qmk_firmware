@@ -12,6 +12,7 @@
 #include "../graphics/lcd_bus.h"
 #include "../graphics/display.h"   /* display_splash_done() */
 #include "../ak820pro.h"
+#include "../sleep.h"              /* the deep sleep's pass budget */
 
 #include <time.h>
 
@@ -28,7 +29,13 @@
 #define PCF8563_ADDR            0x51
 #define PCF8563_REG_SECONDS     0x02
 #define PCF8563_VL_FLAG         0x80
-#define PCF8563_I2C_TIMEOUT     TIME_MS2I(20)
+/* 20 ms normally; 5 ms for the deep sleep's transactions (the pre-sleep read
+ * and the wake's recovery: plans/DEEP-SLEEP-BUILD-PLAN.md, section 4, "The
+ * budget"). The software I2C applies it as a deadline from the transaction's
+ * start; with rtc.c's 15-NOP bit delay a whole read is well under 1 ms, so 5
+ * bounds only a stuck bus. */
+static bool pcf_short_timeout = false;
+#define PCF8563_I2C_TIMEOUT     (pcf_short_timeout ? TIME_MS2I(5) : TIME_MS2I(20))
 
 
 #ifndef PCF8563_I2C_DELAY_NOPS
@@ -113,6 +120,8 @@ static uint16_t i2c_fail_count = 0;   /* PCF transactions that returned != MSG_O
 static uint32_t i2c_max_cycles = 0;   /* longest PCF transaction, ILRC cycles */
 static uint32_t last_sync_secs = 0;   /* rtc_seconds_count at the last host set */
 static bool     host_synced    = false;
+static uint16_t host_sync_gen  = 0;   /* bumped by every host set (a deep sleep's recovery yields to a newer one) */
+static uint16_t clock_gen      = 0;   /* bumped by every change to the calendar the display shows */
 static int16_t  last_host_offset_ms = 0;
 
 /* ---- Phase 1: reload ownership (PLAN.md 3.0, R1-R3) -----------------------
@@ -230,10 +239,12 @@ static void rtc_bus_guard(void) {
     lcd_blit_wait();
 }
 
-static bool pcf_read(rtc_time_t *out)
+/* The full calendar with NO bus guard: the caller already knows no
+ * flash->LCD DMA is in flight (rtc_fast_task's slot, or the deep sleep's
+ * admission, whose display bus is idle). */
+static bool pcf_read_raw(rtc_time_t *out)
 {
     WDT_SCOPE(WDT_SITE_I2C_READ);
-    rtc_bus_guard();
     uint8_t reg = PCF8563_REG_SECONDS;
     uint8_t buf[7];
 
@@ -283,7 +294,12 @@ static bool pcf_read(rtc_time_t *out)
     return true;
 }
 
-
+/* Legacy path (the seed, the 60 s discipline): guarded, synchronous. */
+static bool pcf_read(rtc_time_t *out)
+{
+    rtc_bus_guard();
+    return pcf_read_raw(out);
+}
 
 /* The 8-byte time write with NO bus guard: the caller must already know no
  * flash->LCD DMA is in flight (rtc_fast_task checks lcd_blit_busy() itself,
@@ -457,16 +473,10 @@ static bool     rtc_cal_valid;      /* the two above are meaningful */
  * rtcGetTime() reads; codex, the sleep plan's review), with interrupts still
  * locked so no served second lands between. Only while nothing is in flight
  * that a skipped handler would break (a slew or a reload): rtc_sleep_ok(). */
-bool rtc_sleep_ok(void) {
-    return slew_state == SLEW_IDLE && !reload_pending;
-}
-
 void rtc_account_sleepI(uint32_t seconds) {
     if (seconds == 0) return;
     rtc_seconds_count += seconds;
     rtc_lld_add_secondsI(&RTCD1, seconds);
-    win_valid = false;   /* the estimator's window spans time it did not see */
-    fn_valid  = 0;       /* and the SOF count's continuity (USB was down) */
 #ifdef RTC_AUTO_CALIBRATION
     rtc_check_seconds = MIN(rtc_check_seconds + seconds, RTC_CHECK_INTERVAL_S);
 #endif
@@ -1040,6 +1050,7 @@ static void rtc_clock_discipline(void)
 #endif
     if ((error > RTC_DRIFT_THRESHOLD_S) || (error < -RTC_DRIFT_THRESHOLD_S)) {
         rtcSetTime(&RTCD1, &target);
+        clock_gen++;
         printf("[rtc] corrected drift of %ld seconds\n", (long)error);
     }
 }
@@ -1106,6 +1117,11 @@ bool rtc_set_time(const rtc_time_t *t)
 {
     RTCDateTime dt;
 
+    /* Synchronous I2C: never inside a deep sleep's recovery, whose passes are
+     * budgeted (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4). The host retries. */
+    if (rtc_wake_busy()) return false;
+    host_sync_gen++;
+    clock_gen++;
     rtc_to_chibiostime(t, &dt);
 
     bool ok = pcf_write(t);
@@ -1128,6 +1144,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
 {
     if (ms > 999) return RTC_SET_REJECT;
     if (bias_ppm != 0x7FFF && bias_ppm >= -600 && bias_ppm <= 600) sof_bias_ppm = bias_ppm;
+    if (!(flags & RTC_SETF_INTERNAL)) host_sync_gen++;   /* a host's: a deep sleep's recovery yields to it */
 
     rtc_stamp_t now;
     bool have_now = rtc_now(&now);
@@ -1205,6 +1222,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     chSysLock();
     slew_state = SLEW_IDLE;             /* a step supersedes any running slew */
     rtcSetTime(&RTCD1, &dt_s);          /* software seconds */
+    clock_gen++;
     reload_pending = true;              /* ISR restores P_nom at the next match */
     rtc_lld_set_period(&RTCD1, reg);    /* resets SECCNT: next SECIF in R ms */
     interval_cycles = 0;                /* the interval now running is not a known length */
@@ -1441,73 +1459,321 @@ static void pcf_machine_step(void)
 
 /* Boot acquisition: bracket the PCF's seconds increment with 1-byte reads
  * every ACQ_EVERY passes (~20 ms), then take the full calendar and step the
- * board to the PCF's phase. Cancelled by a host sync. */
+ * board to the PCF's phase. Cancelled by a host sync. Re-armed by a deep
+ * sleep's recovery.
+ *
+ * ONE I2C transaction per pass (plans/DEEP-SLEEP-BUILD-PLAN.md, step 4; codex,
+ * the deep-sleep verifies): the bracket's read, the full calendar and the
+ * confirming read each get a pass of their own. Split, the full read can come
+ * a second after the bracket: it must show the second the bracket saw, within
+ * ACQ_FULL_MAX_MS of the edge, or the bracket is dropped and reacquired (a
+ * full read a second late would otherwise pass the confirmation, and the
+ * elapsed time set the clock nearly a second wrong). The 1.5 s timeout runs
+ * from the first start, across reacquisitions, and with the cancellation is
+ * checked every pass (acq_watch), even while the bus defers the work. */
 #define ACQ_EVERY       8
 #define ACQ_TIMEOUT_MS  1500
-enum { ACQ_WAIT_SPLASH = 0, ACQ_COARSE, ACQ_DONE, ACQ_ABORTED };
+#define ACQ_FULL_MAX_MS 900
+/* 0-3 as before (the status page reports the state); FULL and CONFIRM are
+ * the split's transient steps. */
+enum { ACQ_WAIT_SPLASH = 0, ACQ_COARSE, ACQ_DONE, ACQ_ABORTED, ACQ_FULL, ACQ_CONFIRM };
 static uint8_t  acq_state = ACQ_WAIT_SPLASH;
 static uint8_t  acq_pass = 0, acq_fails = 0;
-static int64_t  acq_t0 = 0, acq_prev_t = 0;
-static int16_t  acq_prev_sec = -1;
+static int64_t  acq_t0 = 0, acq_prev_t = 0, acq_edge = 0;
+static int16_t  acq_prev_sec = -1, acq_new_sec = -1;
 static uint16_t acq_unc_ms = 0;
 static int16_t  acq_step_ms = 0;
+static rtc_time_t acq_full;
+#ifdef AK820_DEV_HOOKS
+static bool acq_dev_delay = false;   /* HC_DEVHOOK op 14 sub 6: the next full read held 1 s, once */
+void rtc_dev_delay_full_once(void) { acq_dev_delay = true; }
+#endif
 
-static bool acq_state_done(void) { return acq_state == 2; }   /* ACQ_DONE */
+static bool acq_state_done(void) { return acq_state == ACQ_DONE; }
+static bool acq_active(void) {
+    return acq_state == ACQ_COARSE || acq_state == ACQ_FULL || acq_state == ACQ_CONFIRM;
+}
 
-static void acquisition_step(void)
+static void acq_reacquire(void) {
+    acq_state = ACQ_COARSE; acq_prev_sec = -1; acq_pass = 0;
+}
+
+/* Every pass, before the bus admission: the timeout and the cancellation. */
+static void acq_watch(void)
 {
-    if (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED) return;
-    if (host_synced) { acq_state = ACQ_ABORTED; return; }      /* the host outranks the PCF */
+    if (!acq_active()) return;
+    if (host_synced) { acq_state = ACQ_ABORTED; return; }   /* the host outranks the PCF */
+    int64_t now; if (board_ms_now(&now) && now - acq_t0 > ACQ_TIMEOUT_MS) acq_state = ACQ_ABORTED;
+}
+
+/* One step; true if it used the bus. */
+static bool acquisition_step(void)
+{
+    if (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED) return false;
+    if (host_synced) { acq_state = ACQ_ABORTED; return false; }
     if (acq_state == ACQ_WAIT_SPLASH) {
-        if (!display_splash_done() || !rtc_valid) return;
-        int64_t ms; if (!board_ms_now(&ms)) return;
+        if (!display_splash_done() || !rtc_valid) return false;
+        int64_t ms; if (!board_ms_now(&ms)) return false;
         acq_t0 = ms; acq_state = ACQ_COARSE; acq_pass = 0; acq_prev_sec = -1;
     }
-    if (++acq_pass < ACQ_EVERY) return;
-    acq_pass = 0;
-    int64_t t_before; if (!board_ms_now(&t_before)) return;
-    if (t_before - acq_t0 > ACQ_TIMEOUT_MS) { acq_state = ACQ_ABORTED; return; }
-    uint8_t v;
-    if (!pcf_reg_read_raw(PCF8563_REG_SECONDS, &v)) { if (++acq_fails >= 3) acq_state = ACQ_ABORTED; return; }
-    int64_t t_after; if (!board_ms_now(&t_after)) return;
-    int16_t sec = (int16_t)bcd2dec(v & 0x7F);
-    if (acq_prev_sec >= 0 && sec != acq_prev_sec) {
-        /* Edge between the previous read and this one: midpoint, half-width. */
-        int64_t edge = (acq_prev_t + t_after) / 2;
-        acq_unc_ms = (uint16_t)((t_after - acq_prev_t) / 2);
-        rtc_time_t full;
-        if (!pcf_read(&full)) { acq_state = ACQ_ABORTED; return; }    /* guarded: bus was idle a moment ago */
-        uint8_t v2;
-        if (!pcf_reg_read_raw(PCF8563_REG_SECONDS, &v2) || bcd2dec(v2 & 0x7F) != full.seconds) {
-            /* raced a rollover: try again on the next edge */
-            acq_prev_sec = -1; return;
+    int64_t t_before; if (!board_ms_now(&t_before)) return false;
+    if (t_before - acq_t0 > ACQ_TIMEOUT_MS) { acq_state = ACQ_ABORTED; return false; }
+    if (acq_state == ACQ_FULL) {
+#ifdef AK820_DEV_HOOKS
+        if (acq_dev_delay) {
+            if (t_before - acq_edge < 1000) return false;
+            acq_dev_delay = false;   /* now a second late: it must reacquire */
         }
-        int64_t now_ms; if (!board_ms_now(&now_ms)) return;
-        int64_t elapsed = now_ms - edge;                               /* ms since the PCF boundary */
+#endif
+        if (t_before - acq_edge > ACQ_FULL_MAX_MS) { acq_reacquire(); return false; }   /* the bracket expired */
+        if (!pcf_read_raw(&acq_full)) { if (++acq_fails >= 3) acq_state = ACQ_ABORTED; return true; }
+        if (acq_full.seconds != acq_new_sec) { acq_reacquire(); return true; }        /* a second late */
+        acq_state = ACQ_CONFIRM;
+        return true;
+    }
+    if (acq_state == ACQ_CONFIRM) {
+        uint8_t v2;
+        if (!pcf_reg_read_raw(PCF8563_REG_SECONDS, &v2)) { if (++acq_fails >= 3) acq_state = ACQ_ABORTED; return true; }
+        if (bcd2dec(v2 & 0x7F) != acq_full.seconds) { acq_reacquire(); return true; }   /* raced a rollover */
+        int64_t now_ms; if (!board_ms_now(&now_ms)) return true;
+        int64_t elapsed = now_ms - acq_edge;                                            /* ms since the PCF boundary */
         if (elapsed < 0) elapsed = 0;
-        if (elapsed > 999) elapsed = 999;
+        if (elapsed > 990) { acq_reacquire(); return true; }   /* never clamp a late step onto the wrong second */
         int16_t off = 0;
-        uint8_t st = rtc_set_time_ms(&full, (uint16_t)elapsed, RTC_SETF_FORCE_STEP | RTC_SETF_SKIP_PCF, 0x7FFF, &off);
+        uint8_t st = rtc_set_time_ms(&acq_full, (uint16_t)elapsed,
+                                     RTC_SETF_FORCE_STEP | RTC_SETF_SKIP_PCF | RTC_SETF_INTERNAL, 0x7FFF, &off);
         host_synced = false;                /* this was the PCF, not the host */
         acq_step_ms = off;
         acq_state = (st == RTC_SET_STEPPED) ? ACQ_DONE : ACQ_ABORTED;
 #ifdef CONSOLE_ENABLE
-        printf("[rtc] boot acquisition: step %d ms, +/-%u ms\n", off, acq_unc_ms);
+        printf("[rtc] acquisition: step %d ms, +/-%u ms\n", off, acq_unc_ms);
 #endif
-        return;
+        return true;
+    }
+    if (++acq_pass < ACQ_EVERY) return false;
+    acq_pass = 0;
+    uint8_t v;
+    if (!pcf_reg_read_raw(PCF8563_REG_SECONDS, &v)) { if (++acq_fails >= 3) acq_state = ACQ_ABORTED; return true; }
+    int64_t t_after; if (!board_ms_now(&t_after)) return true;
+    int16_t sec = (int16_t)bcd2dec(v & 0x7F);
+    if (acq_prev_sec >= 0 && sec != acq_prev_sec) {
+        /* Edge between the previous read and this one: midpoint, half-width. */
+        acq_edge    = (acq_prev_t + t_after) / 2;
+        acq_unc_ms  = (uint16_t)((t_after - acq_prev_t) / 2);
+        acq_new_sec = sec;
+        acq_state   = ACQ_FULL;
+        return true;
     }
     acq_prev_sec = sec; acq_prev_t = (t_before + t_after) / 2;
+    return true;
+}
+
+/* --- Deep sleep's recovery (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4) -------
+ * The RTC counts on asleep, but its second runs ~13% slow there (3139 s
+ * counted for 3600, 10-19), so the slept time comes from the PCF: a read just
+ * before the lock and one after the wake, whole seconds. The order:
+ *  - under the lock (rtc_wake_beginI): the SOF reference broken completely,
+ *    the trim window restarted (the slow asleep seconds are not the awake
+ *    ILRC's), the 60 s discipline suspended, the host-sync generation noted;
+ *  - once sleep.c's input gate lets go (rtc_wake_allow): the coarse read. The
+ *    slept seconds, checked against the counted; rtc_seconds_count takes the
+ *    difference; the calendar is set to the PCF's whole seconds, unless a host
+ *    sync came since the wake (the newer time wins); the old host sync's flag
+ *    cleared, once;
+ *  - then the boot acquisition, every field reset, for the phase.
+ * Every PCF transaction meanwhile -- these, the acquisition's, the write
+ * machine's -- goes through one arbiter: at most one a pass, from the fast
+ * task's slot, with the display bus idle, under 10 ms into the pass, with the
+ * 5 ms timeout; a pass that used it defers its display work. */
+enum { WK_IDLE = 0, WK_COARSE, WK_ACQ };
+#define RTC_ADMIT_US 10000u
+static uint8_t  wk_state = WK_IDLE;
+static bool     wk_allowed, wk_pre_ok, wk_from_pcf, wk_coarse_done;
+static uint32_t wk_counted, wk_slept_s;
+static time_t   wk_pre_epoch;
+static uint16_t wk_gen;
+
+static bool rtc_time_epoch(const rtc_time_t *t, time_t *e)
+{
+    RTCDateTime dt; struct tm tm;
+    rtc_to_chibiostime(t, &dt);
+    rtcConvertDateTimeToStructTm(&dt, &tm, NULL);
+    *e = mktime(&tm);
+    return *e != (time_t)-1;
+}
+
+static bool bus_admit(void)
+{
+    return display_bus_idle() && sleep_pass_us() < RTC_ADMIT_US;
+}
+
+bool rtc_sleep_ok(void)
+{
+    /* Nothing in flight that a skipped second handler would break (a slew, a
+     * reload), and the PCF quiet: no write pending or running (its verify and
+     * STOP recovery included), no acquisition, no recovery unfinished. An
+     * acquisition still waiting for a first valid read (a dead PCF) does not
+     * hold the board awake. */
+    bool acq_busy = acq_active() || (acq_state == ACQ_WAIT_SPLASH && rtc_valid);
+    return slew_state == SLEW_IDLE && !reload_pending && ps_state == PS_IDLE && !pcf_pending && !acq_busy &&
+           wk_state == WK_IDLE;
+}
+
+bool rtc_sleep_prepare(void)
+{
+    if (!bus_admit()) return false;
+    rtc_time_t t;
+    pcf_short_timeout = true;
+    wk_pre_ok = pcf_read_raw(&t) && rtc_time_epoch(&t, &wk_pre_epoch);
+    pcf_short_timeout = false;
+    return true;   /* read or not: a failed read leaves the counted seconds to stand */
+}
+
+void rtc_wake_beginI(uint32_t counted_s)
+{
+    win_valid = false;   /* the estimator's window spans time it did not see */
+    fn_valid  = 0;       /* the SOF count's continuity (USB was down) */
+    sof_epoch++;         /* ... broken outright, and the reference re-qualifies */
+    sof_ok_run = 0;
+#ifdef RTC_AUTO_CALIBRATION
+    rtc_cal_valid = false;
+#endif
+    wk_state       = WK_COARSE;
+    wk_allowed     = false;
+    wk_coarse_done = false;
+    wk_from_pcf    = false;
+    wk_counted     = counted_s;
+    wk_slept_s     = counted_s;
+    wk_gen         = host_sync_gen;
+}
+
+void rtc_wake_allow(void)
+{
+    wk_allowed = true;
+}
+
+bool rtc_wake_busy(void)
+{
+    return wk_state != WK_IDLE;
+}
+
+/* sleep.c's bound on a whole recovery: whatever is left ends now. A coarse
+ * read that never ran leaves the counted seconds to stand; the wake's
+ * acquisition is dropped; the discipline resumes with a fresh window. */
+void rtc_wake_abandon(void)
+{
+    if (wk_state == WK_IDLE) return;
+    if (wk_state == WK_COARSE) {
+        wk_from_pcf    = false;
+        wk_slept_s     = wk_counted;
+        wk_coarse_done = true;
+    } else if (acq_state != ACQ_DONE) {
+        acq_state = ACQ_ABORTED;
+    }
+    wk_state = WK_IDLE;
+}
+
+bool rtc_wake_slept(uint32_t *slept_s, bool *from_pcf)
+{
+    if (wk_state == WK_COARSE) return false;   /* the coarse read still to come */
+    *slept_s  = wk_slept_s;
+    *from_pcf = wk_from_pcf;
+    return true;
+}
+
+uint16_t rtc_clock_generation(void)
+{
+    return clock_gen;
+}
+
+int16_t rtc_wake_acq_step_ms(void)
+{
+    return acq_step_ms;
+}
+
+uint8_t rtc_wake_acq_result(void)
+{
+    return acq_state;
+}
+
+static void acq_rearm(void)
+{
+    acq_pass = 0; acq_fails = 0;
+    acq_t0 = 0; acq_prev_t = 0; acq_edge = 0;
+    acq_prev_sec = -1; acq_new_sec = -1;
+    acq_unc_ms = 0; acq_step_ms = 0;
+    acq_state = rtc_valid ? ACQ_WAIT_SPLASH : ACQ_ABORTED;
+}
+
+/* The coarse step: one transaction. */
+static void wake_coarse(void)
+{
+    rtc_time_t t;
+    time_t     after = 0;
+    bool       ok    = wk_pre_ok && pcf_read_raw(&t) && rtc_time_epoch(&t, &after);
+    int64_t    slept = ok ? (int64_t)(after - wk_pre_epoch) : -1;
+    /* Checked against the counted seconds: asleep the ILRC runs ~13-16% slow,
+     * so the PCF's figure is a little more; one far off is a bad read. */
+    if (ok && (slept < (int64_t)wk_counted / 2 - 2 || slept > (int64_t)wk_counted * 2 + 2)) ok = false;
+    wk_from_pcf = ok;
+    wk_slept_s  = ok ? (uint32_t)slept : wk_counted;
+    if (ok) {
+        int32_t diff = (int32_t)(wk_slept_s - wk_counted);
+        chSysLock();
+        rtc_seconds_count += (uint32_t)diff;   /* stays seconds since boot */
+        chSysUnlock();
+        if (host_sync_gen == wk_gen) {         /* no host sync since the wake: the PCF's seconds */
+            RTCDateTime dt;
+            rtc_to_chibiostime(&t, &dt);
+            rtcSetTime(&RTCD1, &dt);
+            clock_gen++;
+        }
+    }
+    if (host_sync_gen == wk_gen) host_synced = false;   /* the old sync no longer holds: cleared once */
+    wk_coarse_done = true;
+    acq_rearm();
+    wk_state = WK_ACQ;
+}
+
+/* One recovery step under the arbiter; true if it used the bus. */
+static bool wake_step(void)
+{
+    if (wk_state == WK_COARSE) {
+        if (!wk_allowed) return false;
+        wake_coarse();
+        return true;
+    }
+    /* WK_ACQ: the acquisition until it is done or aborted; then the recovery
+     * ends, and the discipline and the write machine resume. */
+    if (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED) {
+        wk_state = WK_IDLE;
+        return false;
+    }
+    return acquisition_step();
 }
 
 /* Per main-loop pass, BEFORE display_blit_pump() (R4). At most one PCF
  * transaction, only when no blit is in flight; never the bus guard. */
 void rtc_fast_task(void)
 {
+    acq_watch();   /* the acquisition's timeout and cancellation, every pass, even deferred */
     if (lcd_blit_busy()) {
         if ((pcf_pending || ps_state != PS_IDLE) && deferred_passes < 0xFFFF) deferred_passes++;
         return;
     }
-    if (acq_state == ACQ_WAIT_SPLASH || acq_state == ACQ_COARSE) { acquisition_step(); return; }
+    /* A deep sleep's recovery: the arbiter's stricter rules for every PCF
+     * transaction until it ends (see "Deep sleep's recovery" above). It ends
+     * when the acquisition does, whether or not the bus is free this pass. */
+    if (wk_state == WK_ACQ && (acq_state == ACQ_DONE || acq_state == ACQ_ABORTED)) wk_state = WK_IDLE;
+    if (wk_state != WK_IDLE) {
+        if (!bus_admit()) return;
+        pcf_short_timeout = true;
+        bool used = wake_step();
+        pcf_short_timeout = false;
+        if (used) display_defer_pass();
+        return;
+    }
+    if (acq_state == ACQ_WAIT_SPLASH || acq_active()) { acquisition_step(); return; }
     pcf_machine_step();
 }
 
@@ -1537,6 +1803,9 @@ void rtc_task(void)
 
 #ifdef RTC_AUTO_CALIBRATION
 
+    /* Suspended through a deep sleep's recovery: its coarse read and the
+     * acquisition own the PCF, and the trim window restarts after it. */
+    if (wk_state != WK_IDLE) return;
     if (rtc_check_seconds < RTC_CHECK_INTERVAL_S) {
         return;
     }

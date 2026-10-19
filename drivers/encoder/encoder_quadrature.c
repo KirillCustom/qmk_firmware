@@ -204,6 +204,14 @@ void encoder_quadrature_handle_read(uint8_t index, uint8_t pin_a_state, uint8_t 
     }
 }
 
+/* The decoder's last state (A in bit 0, B in bit 1), read only: a board that
+ * sleeps checks its knob's pins still match it before arming their wake, so a
+ * turn caught in between is never cleared and slept through (the AK820 Pro's
+ * deep sleep). */
+uint8_t encoder_quadrature_state(uint8_t index) {
+    return index < NUM_ENCODERS ? (uint8_t)(encoder_state[index] & 0x3) : 0u;
+}
+
 __attribute__((weak)) void encoder_driver_task(void) {
     for (uint8_t i = 0; i < thisCount; i++) {
         encoder_quadrature_handle_read(i, encoder_quadrature_read_pin(i, false), encoder_quadrature_read_pin(i, true));

@@ -25,6 +25,7 @@
  *
  * The ladder's last stage is the deep sleep (power_sleep_wanted; sleep.c does
  * it, with its own wake path: the row ISR that scans keys stops asleep). */
+#include <stdio.h>
 #include "quantum.h"
 #include "power.h"
 #include "battery.h"
@@ -80,6 +81,7 @@ static bool          low_noted  = false;   /* the low cap's notice given (or owe
 static bool          low_owed   = false;   /* ... and waiting for a lit screen */
 static uint16_t      low_sessions = 0;     /* battery_session_count() when it was noted */
 static bool          announce   = false;
+static bool          wake_owed  = false;   /* a long sleep's "6h use left", for a free band */
 static uint8_t       val_cap    = 255;
 #ifdef AK820_DEV_HOOKS
 static uint8_t  forced      = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF none */
@@ -220,6 +222,26 @@ void power_task(void) {
         shown_lit = lit;
         apply();
     }
+    /* A wake after a long sleep: time left in hours of use, once it matters
+     * (plans/DEEP-SLEEP-BUILD-PLAN.md, section 7): under 10 h, on battery,
+     * the average mature, the level known and not cut. Through the owed
+     * gate below: a free band, and a lit screen -- except in Minimal, whose
+     * screen is dark until a message paints (codex, deep-sleep verify V7).
+     * Rounded down. */
+    if (wake_owed) {
+        uint16_t left    = battery_time_left_min();
+        bool     matters = battery_on_battery() && !lights_cut && left < 600u && battery_avg_minutes() >= 60u &&
+                       level != 0xFFFFu;
+        if (!matters) {
+            wake_owed = false;
+        } else if (!display_band_busy() && (mode == POWER_MODE_MINIMAL || display_backlight_effective() > 0)) {
+            char t[16];
+            if (left < 60u) snprintf(t, sizeof(t), "<1h use left");
+            else            snprintf(t, sizeof(t), "%uh use left", (unsigned)(left / 60u));
+            display_set_param_status(t);
+            wake_owed = false;
+        }
+    }
     /* Only into a free band: over the mode Fn+B just picked it would replace
      * that before it could be read, and behind an alert it would expire
      * unseen and be lost. */
@@ -232,6 +254,10 @@ void power_task(void) {
 
 power_stage_t power_stage(void) {
     return stage;
+}
+
+void power_wake_notice(void) {
+    wake_owed = true;
 }
 
 /* The ladder's last stage: asleep once the idle time passes the mode's sleep

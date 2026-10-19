@@ -13,6 +13,7 @@
  * made within ~5 s of power loss is not persisted; every field here is a
  * remembered convenience, so that trade is correct. */
 #include "quantum.h"
+#include "sleep.h"   /* sleep_recovering() */
 #include "kb_eeconfig.h"
 #include "bluetooth/ch582f_ajazz.h"
 #include "graphics/display.h"   /* DISPLAY_CLOCK_MODE_COUNT */
@@ -50,6 +51,10 @@ void kb_eeconfig_init(void) {
 
 void kb_eeconfig_task(void) {
     if (!kb_dirty || timer_elapsed32(kb_dirty_since) < KB_EECONFIG_SETTLE_MS) return;
+    /* Not inside a deep sleep's recovery: its passes are budgeted, and a
+     * flash write blocks (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4). The
+     * write waits a few passes. */
+    if (sleep_recovering()) return;
     kb_dirty = false;
     eeconfig_update_kb_datablock(&kb_config, 0, sizeof(kb_config));
 }

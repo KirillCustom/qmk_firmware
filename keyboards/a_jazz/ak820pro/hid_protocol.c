@@ -124,7 +124,7 @@ static void rtc_set_ms_command(uint8_t *data, uint8_t length) {
         .weekday = data[6], .hours = data[7], .minutes = data[8], .seconds = data[9],
     };
     uint16_t ms    = (uint16_t)(data[10] | (data[11] << 8));
-    uint8_t  flags = data[12];
+    uint8_t  flags = data[12] & (uint8_t)~RTC_SETF_INTERNAL;   /* the host's are never internal */
     int16_t  bias  = (int16_t)(data[13] | (data[14] << 8));
     int16_t  off   = 0;
     uint8_t  st    = rtc_set_time_ms(&t, ms, flags, bias, &off);
@@ -764,7 +764,17 @@ static void health_command(uint8_t *data, uint8_t length) {
             break;
         case HC_POWER:
             if (length >= 32) {
+                /* The page, read before the memset: 0 is the reply as it has
+                 * always been (older hosts send 0 there), 1 the deep sleep's
+                 * figures, which begin 0x81 so an older firmware's page-0
+                 * reply (1) is never read as them (codex, deep-sleep review). */
+                uint8_t page = data[3];
                 memset(&data[3], 0, 29);
+                if (page == 1) {
+                    _Static_assert(SLEEP_PAGE1_SIZE <= 29u, "HC_POWER page 1 must fit");
+                    sleep_page1_fill(&data[3]);
+                    break;
+                }
                 uint8_t *p = &data[3];
 #define PUT16(x) do { uint16_t v_ = (uint16_t)(x); *p++ = (uint8_t)(v_ & 0xFF); *p++ = (uint8_t)(v_ >> 8); } while (0)
 #define PUT32(x) do { uint32_t v_ = (uint32_t)(x); for (uint8_t k_ = 0; k_ < 4; k_++) *p++ = (uint8_t)(v_ >> (8 * k_)); } while (0)
@@ -967,9 +977,9 @@ static void health_command(uint8_t *data, uint8_t length) {
                         break;
                     }
                     uint8_t sub = data[4], arg = data[5];
-                    if (sub > 4 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
+                    if (sub > 6 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
                         (sub == 2 && arg != 0xFF && arg > POWER_STAGE_SCREEN_OFF) ||
-                        (sub == 3 && (arg & ~SLEEP_LS_ALL)) || (sub == 4 && arg > 2)) {
+                        (sub == 3 && (arg & ~SLEEP_LS_ALL)) || (sub == 4 && arg > 2) || (sub == 6 && arg != 1)) {
                         data[0] = RTC_UNHANDLED;
                         break;
                     }
@@ -994,15 +1004,42 @@ static void health_command(uint8_t *data, uint8_t length) {
                         break;
                     }
                     if (sub == 4) {
-                        /* The deep-sleep experiment: arg 1 arms it ([6] the
-                         * delay s, [7..8] the cap s, [9] 1 = leave the watchdog
-                         * unfed), 2 disarms it, 0 only reads. Reply: 4, then
-                         * the record. */
-                        if (arg == 1) sleep_deep_arm(data[6], (uint16_t)(data[7] | (data[8] << 8)), data[9] != 0);
+                        /* The bench's deep sleep (record v2, 32-bit counts): arg
+                         * 1 arms it ([6] the delay s, [7..10] the cap in counted
+                         * s, 0 the 24 h backstop, [11] 1 = leave the watchdog
+                         * unfed, [12..15] the counted seconds' preset), 2
+                         * disarms it, 0 only reads. Reply: 4, then the record. */
+                        if (arg == 1) {
+                            uint32_t cap = (uint32_t)data[7] | (uint32_t)data[8] << 8 | (uint32_t)data[9] << 16 |
+                                           (uint32_t)data[10] << 24;
+                            uint32_t pre = (uint32_t)data[12] | (uint32_t)data[13] << 8 | (uint32_t)data[14] << 16 |
+                                           (uint32_t)data[15] << 24;
+                            sleep_deep_arm(data[6], cap, data[11] != 0, pre);
+                        }
                         if (arg == 2) sleep_deep_cancel();
                         memset(&data[4], 0, 28);
                         data[4] = 4;
+                        _Static_assert(SLEEP_RECORD_SIZE <= 27u, "the record must fit data[5..31]");
                         sleep_deep_record(&data[5]);
+                        break;
+                    }
+                    if (sub == 5) {
+                        /* The bench's sleep time ([6..9] ms, 0 clears; at least
+                         * 30 s), so the soak runs through the ladder's own path.
+                         * Not persisted. Reply: 5. */
+                        power_set_bench_sleep_ms((uint32_t)data[6] | (uint32_t)data[7] << 8 |
+                                                 (uint32_t)data[8] << 16 | (uint32_t)data[9] << 24);
+                        memset(&data[4], 0, 28);
+                        data[4] = 5;
+                        break;
+                    }
+                    if (sub == 6) {
+                        /* The acquisition's split, tested: the next full read is
+                         * held 1 s past its bracket's edge, once; it must
+                         * reacquire, never set the clock a second wrong. */
+                        rtc_dev_delay_full_once();
+                        memset(&data[4], 0, 28);
+                        data[4] = 6;
                         break;
                     }
                     if (sub == 1) power_set_mode((power_mode_t)arg);

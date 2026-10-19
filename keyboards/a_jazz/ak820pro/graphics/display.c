@@ -215,6 +215,13 @@ static volatile uint8_t bkl_phase = 0;
  * setting: the user's level, and its EEPROM copy, stay where they were. */
 #define BKL_NO_CAP 0xFFu
 static volatile uint8_t bkl_cap = BKL_NO_CAP;
+/* A deep sleep's wake (sleep.c, plan section 4, step 9): dark until the clock
+ * and the battery row have repainted, so the screen never lights on the slow
+ * time or the level before the sleep's debit. */
+static volatile bool bkl_wake_hold = false;
+/* rtc.c's deep-sleep recovery used the PCF this pass: no more display work in it
+ * (the budget, plan section 4). Cleared at the pass's end. */
+static bool pass_deferred = false;
 
 /* ISR context, called from pwm_tick_cb() in ak820pro.c -- the CT16B3/GPTD4 20 kHz
  * tick, which ak820pro.c owns because the indicator LEDs share it. Full and zero
@@ -223,6 +230,7 @@ static volatile uint8_t bkl_cap = BKL_NO_CAP;
 void display_backlight_tick(void) {
     uint8_t level = bkl_level;
     if (bkl_cap < level) level = bkl_cap;
+    if (bkl_wake_hold) level = 0;
     uint8_t duty = display_powered ? bkl_duty[level] : 0;
 
     if (duty >= BKL_PWM_TICKS) {
@@ -267,6 +275,7 @@ void display_set_backlight_cap(uint8_t cap) {
 uint8_t display_backlight_effective(void) {
     uint8_t level = bkl_level;
     if (bkl_cap < level) level = bkl_cap;
+    if (bkl_wake_hold) level = 0;
     return display_powered ? level : 0;
 }
 
@@ -367,6 +376,7 @@ static bool display_backlight_init(void) {
 
 // Forces a full clock+date repaint after the background is cleared.
 static bool clock_force_repaint = true;
+static uint16_t clock_gen_painted = 0;   /* rtc_clock_generation() as the clock last drew from it */
 
 static void draw_status(bool force); // CH582F status: battery + channel digit
 /* draw_status() is FOUR forced repaints in a trench coat. Stepping it as one
@@ -1203,6 +1213,7 @@ void display_bootloader_splash(void) {
 }
 
 void draw_clock(void) {
+    clock_gen_painted = rtc_clock_generation();   /* a deep sleep's repaint hold reads it */
     if (pb_active) {
         /* Leaving playback needs the band cleared of the wider/other-sized
          * glyphs before the clock is laid back down; entering needs the
@@ -1684,7 +1695,21 @@ static void draw_battery(bool force) {
      * of the slot's 78, and a redraw is one text blit per 0.1% change. */
     else if (batt <= 100 && pm < 1000u)           snprintf(txt, sizeof(txt), "%u.%u%%", pm / 10u, pm % 10u);
 #endif
-    else if (batt <= 100)                         snprintf(txt, sizeof(txt), "%u%%", batt);
+    else if (batt <= 100) {
+        /* Hours of USE beside the level once they matter: under 10 h on
+         * battery, with a mature average (plans/DEEP-SLEEP-BUILD-PLAN.md,
+         * section 7): "18% 6h", "99% <1h", at most 7 cells. Rounded down. */
+        uint16_t left = battery_time_left_min();
+        if (st == BATTERY_STATE_BATTERY && left < 600u && battery_avg_minutes() >= 60u) {
+            char wide[16];   /* the compiler cannot prove 7 fit: composed wide, then copied */
+            if (left < 60u) snprintf(wide, sizeof(wide), "%u%% <1h", batt);
+            else            snprintf(wide, sizeof(wide), "%u%% %uh", batt, (unsigned)(left / 60u));
+            memcpy(txt, wide, sizeof(txt) - 1u);
+            txt[sizeof(txt) - 1u] = '\0';
+        } else {
+            snprintf(txt, sizeof(txt), "%u%%", batt);
+        }
+    }
     /* "Charge", not "Charging": at 10 px a cell that is 80 px against the 78
      * between the icon slot and the bezel margin, and it would start inside
      * the slot that a bolt toggle clears. */
@@ -2653,6 +2678,8 @@ void display_blit_pump(void) {
     static bool     blocked       = false;
     static uint32_t last_heal     = 0;
 
+    if (pass_deferred) return;   /* a deep sleep's recovery used the PCF this pass */
+
     /* A blit given up for good left pixels unpainted that the shadows claim
      * are there (codex review, 2026-09-23, finding 13). Repaint the whole
      * dashboard through the staged, keystroke-safe Fn+D restore. At most once
@@ -2934,11 +2961,82 @@ void display_probe_fill(uint8_t page, uint8_t *out28) {
 void display_probe_reset(void) { memset(dprobe_max, 0, sizeof(dprobe_max)); }
 #endif
 
+/* --- A deep sleep's wake (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, section 4,
+ * steps 6 and 9) ---------------------------------------------------------------
+ * At the wake: host content expired (no host refreshes it while the board
+ * sleeps, and a 3 min text could otherwise come back hours later), the
+ * backlight held dark. Once the clock is set and the level debited
+ * (display_wake_corrected): both repaints scheduled, one component a pass
+ * rather than at the second's or the 10 Hz cadence, and the hold released
+ * when both are painted from the corrected state and the bus is idle (the
+ * final DMA done, not just the queue empty). With no clock to wait for (off,
+ * playback's band, Fn+D or the animation owning the panel), only the row. */
+static bool     wake_painting     = false;
+static bool     wake_clock_due    = false;
+static bool     wake_batt_due     = false;
+static uint16_t wake_clock_target = 0;
+
+void display_defer_pass(void) {
+    pass_deferred = true;
+}
+
+bool display_pass_deferred(void) {
+    return pass_deferred;
+}
+
+void display_sleep_wake(void) {
+    bkl_wake_hold = true;
+    wake_painting = false;
+    if (text_present) {
+        text_present = false;
+        text_dirty   = true;
+    }
+    if (pb_active) {
+        pb_active           = false;
+        clock_force_repaint = true;
+    }
+}
+
+void display_wake_corrected(void) {
+    wake_clock_target = rtc_clock_generation();
+    wake_clock_due    = true;
+    wake_batt_due     = true;
+    wake_painting     = true;
+}
+
+static void wake_paint_step(void) {
+    if (pass_deferred || !splash_cleared || display_paused || debug_active || debug_exit_step) return;
+    if (gq_pending() || lcd_blit_busy()) return;   /* the pump finishes what is queued first */
+    if (wake_clock_due) {
+        wake_clock_due = false;
+        draw_clock();
+        return;
+    }
+    if (wake_batt_due || batt_dirty) {
+        wake_batt_due = false;
+        draw_battery(false);   /* one component; it self-guards on what changed */
+    }
+}
+
+bool display_wake_repainted(void) {
+    bool no_clock = !splash_cleared || display_paused || debug_active || clock_mode == DISPLAY_CLOCK_OFF || pb_active;
+    bool clock_ok = no_clock || (!wake_clock_due && (int16_t)(clock_gen_painted - wake_clock_target) >= 0);
+    return clock_ok && !wake_batt_due && !batt_dirty && display_bus_idle();
+}
+
+void display_wake_release(void) {
+    bkl_wake_hold  = false;
+    wake_painting  = false;
+    wake_clock_due = wake_batt_due = false;
+}
+
 void display_pass_end(void) {
     batt_painted_this_pass = false;
+    pass_deferred          = false;
 }
 
 void display_second_edge_task(void) {
+    if (wake_painting) wake_paint_step();
     static uint32_t edge_seen = UINT32_MAX;
     uint32_t sec = rtc_get_seconds();
     if (sec != edge_seen) {
@@ -2950,6 +3048,7 @@ void display_second_edge_task(void) {
 void display_housekeeping_task(void) {
     if (!display_housekeeping_task_user())
         return;
+    if (pass_deferred) return;   /* a deep sleep's recovery used the PCF this pass */
 
     if (display_paused) return;   // animation owns the bus
     if (debug_active) { DPROBE(DP_DEBUG_PAGE, draw_debug_page()); return; }   // Fn+D owns the panel

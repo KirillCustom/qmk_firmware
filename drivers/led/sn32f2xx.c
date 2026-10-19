@@ -794,8 +794,9 @@ static void rgb_callback(PWMDriver *pwmp) {
     chSysUnlockFromISR();
 }
 
-#if defined(SN32F2XX_SLEEP_HOOKS) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
-/* Deep sleep (a board's experiment): every output off and the row ISR's
+#if (defined(SN32F2XX_DEEP_SLEEP) || defined(SN32F2XX_SLEEP_HOOKS)) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && \
+    (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+/* Deep sleep (a board's, SN32F2XX_DEEP_SLEEP): every output off and the row ISR's
  * notification off, the columns left released from PWM (inputs with their
  * pull-ups, as for a scan); then put back, the counters re-armed on one
  * boundary as the ISR's end does. I-class: called with interrupts locked, so

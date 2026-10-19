@@ -47,10 +47,37 @@ uint32_t rtc_get_period(void);
  * auto-calibration pass when one is due. Cheap no-op otherwise. Call every
  * housekeeping pass from thread context. */
 void rtc_task(void);
-/* Deep sleep: nothing in flight that a skipped second handler would break;
- * and the seconds slept, handed back with interrupts locked (I-class). */
-bool rtc_sleep_ok(void);
-void rtc_account_sleepI(uint32_t seconds);
+/* Deep sleep (plans/DEEP-SLEEP-BUILD-PLAN.md, sections 1 and 4):
+ *  - rtc_sleep_ok(): nothing in flight a skipped second handler would break,
+ *    the PCF quiet (no write pending or running, no acquisition, no recovery);
+ *  - rtc_sleep_prepare(): the PCF's "before" read, just before the lock, by
+ *    the arbiter (the display bus idle, under 10 ms into the pass). False:
+ *    not admitted this pass, so the sleep waits;
+ *  - rtc_account_sleepI(): the counted seconds, under the lock (I-class);
+ *  - rtc_wake_beginI(): a real sleep's wake, under the lock: the SOF reference
+ *    broken, the trim window restarted, the discipline suspended;
+ *  - rtc_wake_allow(): sleep.c's input gate let go; the coarse read may run;
+ *  - rtc_wake_slept(): the slept seconds once the coarse read is done (from the
+ *    PCF, or the counted ones if it failed); rtc_wake_busy(): until the
+ *    acquisition has ended;
+ *  - rtc_clock_generation(): bumped by every change to the calendar shown, so
+ *    the display can tell a paint made after the correction. */
+bool     rtc_sleep_ok(void);
+bool     rtc_sleep_prepare(void);
+void     rtc_account_sleepI(uint32_t seconds);
+void     rtc_wake_beginI(uint32_t counted_s);
+void     rtc_wake_allow(void);
+bool     rtc_wake_busy(void);
+void     rtc_wake_abandon(void);   /* sleep.c's bound: what is left ends now */
+bool     rtc_wake_slept(uint32_t *slept_s, bool *from_pcf);
+int16_t  rtc_wake_acq_step_ms(void);
+uint8_t  rtc_wake_acq_result(void);   /* the acquisition's state: 2 done, 3 aborted */
+uint16_t rtc_clock_generation(void);
+#ifdef AK820_DEV_HOOKS
+/* The acquisition's split, tested (HC_DEVHOOK op 14 sub 6): its next full read
+ * held 1 s past the bracket's edge, once. */
+void rtc_dev_delay_full_once(void);
+#endif
 
 /* How many PCF8563 transactions would have collided with a live flash->LCD DMA.
  * See the bus-guard note in rtc.c: the bit-banged I2C shares port A with the
@@ -81,6 +108,7 @@ void rtc_status_fill(uint8_t page, uint8_t *out);
 #define RTC_MIN_FIRST_MS   20      /* closer than this to a boundary: label the next one */
 #define RTC_SETF_FORCE_STEP 0x01   /* (Phase 2: bypass the slew decision) */
 #define RTC_SETF_SKIP_PCF   0x02   /* do not queue the PCF write */
+#define RTC_SETF_INTERNAL   0x80   /* the board's own (the acquisition): not a host sync */
 enum { RTC_SET_STEPPED = 0, RTC_SET_SLEWING = 1, RTC_SET_RETRY = 0xFE, RTC_SET_REJECT = 0xFF };
 
 /* "At the instant this call is made, true time is t + ms." Sets the software

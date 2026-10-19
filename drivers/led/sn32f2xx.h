@@ -101,7 +101,9 @@ void sn32f2xx_set_power_scale(uint8_t scale);
  * ISR, or the mux freezes with one row/channel driving at full duty. */
 void sn32f2xx_blank(void);
 
-/* Sleep hooks, compiled only where the board defines SN32F2XX_SLEEP_HOOKS.
+/* Sleep hooks. Scan-only is compiled only where the board defines
+ * SN32F2XX_SLEEP_HOOKS; the deep-sleep pair where it defines
+ * SN32F2XX_DEEP_SLEEP (or SN32F2XX_SLEEP_HOOKS).
  *
  * Scan-only, for a board's light sleep: while on, the row ISR drives no LED
  * and scans one key row per call at a longer period (SN32F2XX_SCAN_ONLY_TICKS),
@@ -111,7 +113,7 @@ void sn32f2xx_blank(void);
 void sn32f2xx_set_scan_only(bool on);
 bool sn32f2xx_scan_only_active(void);
 
-/* Deep sleep, for a board's experiment, with interrupts locked (I-class): every
+/* Deep sleep, for a board's, with interrupts locked (I-class): every
  * LED output off and the row ISR stopped, the key columns left as inputs with
  * pull-ups; and back. */
 void sn32f2xx_sleep_enterI(void);

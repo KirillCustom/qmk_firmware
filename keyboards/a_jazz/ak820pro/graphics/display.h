@@ -133,6 +133,17 @@ bool display_band_busy(void);
  * precondition); and the backlight pin driven low (a stopped 20 kHz tick
  * leaves it where it was). */
 bool display_bus_idle(void);
+/* A deep sleep's wake (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, section 4):
+ * host content expired and the backlight held dark at the wake; the clock and
+ * the battery row scheduled to repaint once corrected; the hold released by
+ * sleep.c when they have (or at its bound). A pass in which rtc.c's recovery
+ * used the PCF defers the rest of the display's work (display_defer_pass). */
+void display_sleep_wake(void);
+void display_wake_corrected(void);
+bool display_wake_repainted(void);
+void display_wake_release(void);
+void display_defer_pass(void);
+bool display_pass_deferred(void);
 void display_backlight_pin_off(void);
 /* Recompose the page on the next tick without waiting for the second edge, so a
  * counter reset shows its zeros immediately. No-op when the page is closed. */

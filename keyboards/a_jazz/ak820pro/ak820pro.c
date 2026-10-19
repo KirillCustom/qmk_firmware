@@ -26,7 +26,7 @@
 #include "indicators.h"
 #include "battery.h"
 #include "power.h"
-#include "sleep.h"         /* the sleep experiments (dev builds) */
+#include "sleep.h"         /* the deep sleep, and the dev builds' light-sleep bits */
 #include "loop_acct.h"     /* D1: ACCT() around each board task */
 #include "flash_stats.h"   /* C1: flash write sessions by writer */
 
@@ -625,11 +625,10 @@ void housekeeping_task_kb(void) {
     // wedged pass another full timeout and prove nothing about what follows.
     watchdog_kick();
 
-#ifdef AK820_DEV_HOOKS
-    /* The sleep experiments: after the kick, so a yield or a deep sleep
-     * starts from a fresh timeout. */
+    /* The deep sleep, the ladder's last stage, in every build (and the dev
+     * builds' light-sleep bits): after the kick, so a yield or a sleep starts
+     * from a fresh timeout, and the pass budget's mark the very last thing. */
     sleep_task();
-#endif
 }
 
 /*
