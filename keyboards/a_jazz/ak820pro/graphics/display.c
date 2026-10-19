@@ -1743,8 +1743,10 @@ static uint8_t batt_last_bulb = SLOT_NO_BULB;   /* the mode's bulb draw_battery(
 /* A bulb is up and the mode it shows has changed (Fn+B, or the low cap): the
  * 10 Hz tick calls draw_battery() for it, so the bulb follows Fn+B's overlay
  * rather than the next RTC second (codex, power-icons review, note 3). Only a
- * mode change: supply and CHRG edges keep the 1 Hz cadence they had, so an
- * unsmoothed CHRG cannot repaint the slot faster than before. */
+ * change of the lights' mode triggers it: Fn+B, or the low cap set or
+ * cleared, which a plug-in at the cap does once (codex's verify). CHRG alone
+ * never moves that mode, so an unsmoothed CHRG cannot repaint the slot faster
+ * than before; a call made for a mode change samples it as any call does. */
 static bool batt_bulb_stale(void) {
     return batt_last_bulb != SLOT_NO_BULB && (uint8_t)power_lights_mode() != batt_last_bulb;
 }
