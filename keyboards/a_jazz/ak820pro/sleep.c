@@ -9,7 +9,7 @@
 
 #ifdef AK820_DEV_HOOKS
 #    include <hal.h>
-#    include "usb_main.h"   /* restart_usb_driver, USB_DRIVER */
+#    include "usb_main.h"   /* USB_DRIVER */
 #    include "power.h"
 #    include "battery.h"   /* battery_usb_configured */
 #    include "indicators.h"
@@ -76,7 +76,10 @@ static void light_task(void) {
     if ((m & SLEEP_LS_TICK) && (display_backlight_effective() > 0 || indicators_any_lit()))
         m &= (uint8_t)~SLEEP_LS_TICK;
     if ((m ^ ls_applied) & SLEEP_LS_TICK) pwm_tick_run(!(m & SLEEP_LS_TICK));
-    if ((ls_applied & SLEEP_LS_PMU) && !(m & SLEEP_LS_PMU)) {
+    /* Leaving PMU Sleep, or the plain-WFI probe (manual p. 79 documents
+     * mode 0 only as "disable": whether a WFI there touches USB is what bit 2
+     * finds out; codex): the transceiver bit back, a no-op if it is on. */
+    if ((ls_applied & (SLEEP_LS_PMU | SLEEP_LS_WFI)) & ~m) {
         chSysLock();
         usb_phy_onI();
         chSysUnlock();
@@ -119,8 +122,8 @@ static uint32_t ds_p0_ris, ds_p2_ris;
 static bool     ds_pll_ceiling;
 static bool     ds_slept;
 static bool     ds_phy_was_off;   /* the transceiver was off after the wake */
-static bool     ds_usb_restarted; /* the 20 s fallback ran */
-static bool     ds_usb_watch;     /* waiting to see USB come back */
+static bool     ds_usb_restarted; /* USB configured again within 20 s of the wake */
+static bool     ds_usb_watch;     /* watching for it */
 static uint16_t ds_kp_before;
 static uint32_t ds_woke_at;
 static bool     ds_kp_pending;
@@ -382,9 +385,9 @@ static bool deep_sleep(void) {
     ds_strays      = strays;
     ds_slept       = slept;
     ds_phy_was_off = phy_off;
-    /* No USB restart here: its 50 ms wait would hold the main loop while the
-     * waking key is down (codex). The transceiver is back on; if the host has
-     * not configured it 20 s after the wake, deep_task() restarts it once. */
+    /* No USB restart: its 50 ms wait would hold the main loop (codex). The
+     * transceiver is back on; deep_task() records whether the host
+     * configured USB again within 20 s. */
     ds_usb_watch  = slept;
     ds_woke_at    = timer_read32();
     ds_kp_pending = true;
@@ -397,12 +400,14 @@ static void deep_task(void) {
         ds_kp_gain    = (uint16_t)(health_key_presses() - ds_kp_before);
         ds_kp_pending = false;
     }
-    if (ds_usb_watch && timer_elapsed32(ds_woke_at) >= 20000u) {
-        ds_usb_watch = false;
-        if (!battery_usb_configured()) {
-            ds_usb_restarted = true;
-            restart_usb_driver(&USB_DRIVER);   /* 50 ms, long after the waking key */
-        }
+    /* Whether the host configured USB again within 20 s of the wake, for the
+     * record. Nothing restarts it: restart_usb_driver() waits 50 ms, and a tap
+     * inside that wait is lost whenever it runs (codex). If the transceiver
+     * bit was not the whole story, the record says so and a power cycle
+     * brings USB back; the keyboard types over the radio meanwhile. */
+    if (ds_usb_watch && (battery_usb_configured() || timer_elapsed32(ds_woke_at) >= 20000u)) {
+        ds_usb_watch     = false;
+        ds_usb_restarted = battery_usb_configured();   /* the record's byte 22: USB came back */
     }
     if (ds_state != DS_ARMED) return;
     uint32_t waited = timer_elapsed32(ds_armed_at);

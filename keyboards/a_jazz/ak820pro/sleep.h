@@ -39,7 +39,7 @@ void sleep_deep_cancel(void);   /* disarm, if armed and not yet asleep */
  * u32 P0 and u32 P2 edge bits that woke it; u16 PLL lock loops; u16
  * key_presses gained across the wake (counted 1 s after); u8 the lock loops'
  * ceiling hit (1); u8 the USB transceiver was off after the wake (1); u8 the
- * 20 s USB restart ran (1). */
+ * host configured USB again within 20 s of the wake (1). */
 void sleep_deep_record(uint8_t *out24);
 
 /* Each main-loop pass, at its very end (after the watchdog kick). */

@@ -1044,10 +1044,12 @@ void ch582_task(void) {
      *                   independent (streams even while disconnected) -> never use
      *                   it as a "connected" signal. */
     static uint8_t b2 = 0, b1 = 0, b0 = 0;
+#ifdef AK820_DEV_HOOKS
     if (rx_resync_req) {
         rx_resync_req = false;
         b2 = b1 = b0 = 0;
     }
+#endif
 
     /* Cold-boot-only select retry. The mode slider is wired directly to the
      * CH582F, so once the module is up it handles advertising/reconnect itself
