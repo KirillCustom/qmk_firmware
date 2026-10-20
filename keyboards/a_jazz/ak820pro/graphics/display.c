@@ -2397,6 +2397,16 @@ void display_clear_text(void) {
     text_dirty   = true;
 }
 
+/* How long the shown title has left before its expiry, from its stamp, not
+ * from text_present: only draw_text_slot() services the expiry, and Fn+D or
+ * an animation can hold that off (codex, the play-times fixes, P2 1). 0 when
+ * nothing is shown or the lease is spent. Read-only. */
+uint32_t display_text_lease_left(void) {
+    if (!text_present) return 0;
+    uint32_t age = timer_elapsed32(text_stamp);
+    return age >= DISPLAY_TEXT_TIMEOUT_MS ? 0 : DISPLAY_TEXT_TIMEOUT_MS - age;
+}
+
 /* Read-only: what the text slot holds, for a test to compare against what it
  * sent (raw HID over the 2.4G dongle, stage 2: plans/RAWHID-24G-PLAN.md,
  * R3-6). Copies the line, NUL-terminated within max, and returns its length;

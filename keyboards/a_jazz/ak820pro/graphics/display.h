@@ -109,6 +109,8 @@ void display_clear_text(void);
 /* Read-only views of the text slot and the playback state (display.c), for
  * tests: no drawing, no state change. */
 uint8_t display_get_text_line(uint8_t line, char *out, uint8_t max, uint8_t *icon, bool *present);
+/* The shown title's lease left, in ms; 0 when none is shown or it is spent. */
+uint32_t display_text_lease_left(void);
 void    display_get_playback(bool *active, bool *ticking, uint16_t *pos, uint16_t *dur);
 
 /* Draw the bootloader notice. Called just before the MCU reset that enters the

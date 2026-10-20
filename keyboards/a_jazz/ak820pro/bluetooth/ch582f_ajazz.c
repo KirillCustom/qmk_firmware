@@ -426,14 +426,15 @@ bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scro
  * lines and the icon, playback off; type 2 a clear, playback off; type 3 the
  * shown slot's icon and the playback readout, its position advanced by the
  * frame's own anchor-to-commit time. Type 3 belongs to the title shown, so
- * with none shown it is counted rejected and changes nothing: a timer for a
- * title the board does not have, after a lost or expired type 1, would be
- * the confidently-wrong readout the expiry exists to prevent. Nor does it
- * renew the title's expiry (display_set_text_icon; codex, the play-times
- * verify, P2 1). The readout lives LOCKCHAN_PLAYBACK_MS,
- * two of the host's 60 s refreshes and a margin, since frames are lost (not a
- * guaranteed bound: codex, the play-times review). RAM state only; the band
- * paints on its own schedule. */
+ * with none shown, or its lease spent, it is counted rejected and changes
+ * nothing: a timer for a title the board does not have, after a lost or
+ * expired type 1, would be the confidently-wrong readout the expiry exists to
+ * prevent. Nor does it renew the title's expiry (display_set_text_icon;
+ * codex, the play-times verify, P2 1), and its readout ends no later than
+ * the title does (the fixes' verify, P2 1). The readout lives
+ * LOCKCHAN_PLAYBACK_MS at most, two of the host's 60 s refreshes and a
+ * margin, since frames are lost (not a guaranteed bound: codex, the
+ * play-times review). RAM state only; the band paints on its own schedule. */
 #define LOCKCHAN_LEASE_MS    10000u
 #define LOCKCHAN_PLAYBACK_MS 135000u
 static uint32_t lcm_applied, lcm_rejected, lcm_leased;
@@ -449,15 +450,14 @@ static void lockchan_media_commit(const lockchan_frame_t *f) {
         return;
     }
     if (m.type == LOCKCHAN_TYPE_TRANSPORT) {
-        bool shown = false;
-        display_get_text_line(0, NULL, 0, NULL, &shown);
-        if (!shown) {
+        uint32_t left = display_text_lease_left();
+        if (!left) {
             lcm_rejected++;
             return;
         }
         display_set_text_icon(m.icon);
         display_set_playback_for(m.state, lockchan_media_position(&m, f->anchor_ms, f->commit_ms), m.dur,
-                                 LOCKCHAN_PLAYBACK_MS);
+                                 left < LOCKCHAN_PLAYBACK_MS ? left : LOCKCHAN_PLAYBACK_MS);
     } else {
         if (m.type == LOCKCHAN_TYPE_CLEAR) {
             display_clear_text();
