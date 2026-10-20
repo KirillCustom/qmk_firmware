@@ -320,6 +320,9 @@ static void recovery_begin(uint8_t reason);
 static const uint32_t ds_flash_word = 0x5A5AA5A5u;
 
 __attribute__((section(".ramtext"), noinline, long_call)) static void ds_deep_wfi(volatile uint32_t *pmu_ctrl, const volatile uint32_t *flash) {
+    /* DIAGNOSTIC, not for merge (10-20, codex's fix review): two NOPs move
+     * this WFI from 6 to 2 mod 8, the placement that failed in the flash. */
+    __asm volatile("nop\n\tnop");
     *pmu_ctrl = 2u;   /* Deep-sleep (p. 75) */
     __DSB();
     __WFI();
