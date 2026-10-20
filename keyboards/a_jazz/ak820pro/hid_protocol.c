@@ -582,8 +582,10 @@ enum {
      *       replies dropped (slot full), ACKs inside the 91's window. arg 1:
      *       [4] state (0 idle, 1 collecting, 2 quarantine), [5] boundary,
      *       [6] reply pending, [7] ACK window open, [8..11] quarantined bytes
-     *       u32. arg 2: zero the counters, then reply as arg 0. Anything
-     *       else is unhandled.
+     *       u32, [12..13] the last commit's ms from its 81 to its sum (u16),
+     *       [14] the passes it spanned, [15] the most any commit spanned.
+     *       arg 2: zero the counters, then reply as arg 0. Anything else is
+     *       unhandled.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif

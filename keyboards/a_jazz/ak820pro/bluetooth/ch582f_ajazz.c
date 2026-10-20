@@ -664,7 +664,14 @@ static eventflags_t uart_err_poll(void) {
  * (must-fix 5). */
 #define RAW81_LEN           34u
 #define RAW81_SILENCE_MS    5u
-#define RAW81_LIFETIME_MS   15u
+/* A collection may span several passes (RAW81_DRAIN_MS), and the module was
+ * measured taking ~8-9 ms to deliver one 81's bytes (the Mac session, 10-19):
+ * 15 ms would have left ~6 of margin once the drain stopped holding the pass. */
+#define RAW81_LIFETIME_MS   40u
+/* While a collection is in progress, a drain stops after this long, so one
+ * pass never pays for a whole frame: before it, every 81 cost one pass of
+ * 13-15 ms, 8-9 of them in this drain (history/raw81-echo-20261019-mac/). */
+#define RAW81_DRAIN_MS      2u
 #define RAW91_ACK_WINDOW_MS 15u
 typedef enum { R81_IDLE, R81_COLLECT, R81_QUARANTINE } r81_state_t;
 static r81_state_t r81_state       = R81_IDLE;
@@ -678,6 +685,9 @@ static bool        r91_pending, r91_ack_window;
 static uint8_t     r91_buf[RAW81_LEN];
 static uint16_t    r91_sent_at;
 static uint32_t    r81_ok, r81_badsum, r81_lifetime, r81_taint, r81_qbytes;
+static uint8_t     r81_passes;                       /* drains the current collection has spanned */
+static uint16_t    r81_last_ms;                      /* the last commit: ms from its 81 to its sum */
+static uint8_t     r81_last_passes, r81_max_passes;  /* ... and the passes it spanned; the most */
 static uint32_t    r91_sent, r91_dropped, r91_acks;
 
 static void r81_abort(uint32_t *why) {
@@ -722,6 +732,9 @@ static void r81_commit(void) {
         return;
     }
     r81_ok++;
+    r81_last_ms     = timer_elapsed(r81_start);
+    r81_last_passes = r81_passes;
+    if (r81_passes > r81_max_passes) r81_max_passes = r81_passes;
     r81_state    = R81_IDLE;
     r81_boundary = true;
     if (!is_module_connected || usb_mode || requested_profile != CH582_PROFILE_PEER_24G) return;
@@ -754,12 +767,17 @@ void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
         out28[2] = r91_pending ? 1 : 0;
         out28[3] = r91_ack_window ? 1 : 0;
         memcpy(&out28[4], &r81_qbytes, 4);
+        memcpy(&out28[8], &r81_last_ms, 2);
+        out28[10] = r81_last_passes;
+        out28[11] = r81_max_passes;
     }
 }
 
 void ch582_raw81_clear_counters(void) {
     r81_ok = r81_badsum = r81_lifetime = r81_taint = r81_qbytes = 0;
     r91_sent = r91_dropped = r91_acks = 0;
+    r81_last_ms = 0;
+    r81_last_passes = r81_max_passes = 0;
 }
 #endif
 
@@ -930,8 +948,9 @@ static void ch582_tx_pump(void) {
 #ifdef AK820_DEV_HOOKS
         /* The reply slot goes only now, behind every keyboard frame. The link
          * is checked again: it may have moved since the 81 committed. The same
-         * blocking write as every frame; 34 bytes through the 16-byte output
-         * queue wait ~1.6 ms at most, paced by the UART. */
+         * blocking write as every frame; the output queue holds 128 bytes
+         * (SERIAL_BUFFERS_SIZE, the common halconf.h), so 34 fit without a
+         * wait unless earlier writes still fill it. */
         if (r91_pending) {
             r91_pending = false;
             if (is_module_connected && !usb_mode && requested_profile == CH582_PROFILE_PEER_24G) {
@@ -1452,6 +1471,10 @@ void ch582_task(void) {
 
     uint8_t c;
     uint8_t bytes_processed = 0;
+#ifdef AK820_DEV_HOOKS
+    const uint16_t drain_t0 = timer_read();
+    if (r81_state == R81_COLLECT && r81_passes < 255u) r81_passes++;
+#endif
     uint16_t p1 = prof ? ACCT_NOW() : 0u;
     prof_call_c5 = prof_call_ack = 0;
     prof_call_n5c = 0;
@@ -1459,6 +1482,14 @@ void ch582_task(void) {
     /* Drain the queue fully (capped to bound worst-case latency) so a connect
      * burst doesn't overflow the serial input buffer and shed bytes. */
     while (bytes_processed < 64) {
+#ifdef AK820_DEV_HOOKS
+        /* Mid-collection, the drain gives the pass back after RAW81_DRAIN_MS:
+         * the module delivers an 81 over ~8-9 ms, and draining until the queue
+         * ran dry held one pass for all of it. The rest waits in the input
+         * queue (128 bytes) for the next pass; the collection's lifetime
+         * spans the passes. */
+        if (r81_state == R81_COLLECT && timer_elapsed(drain_t0) >= RAW81_DRAIN_MS) break;
+#endif
 #ifdef WDT_TEST_HOOKS
         /* Fault injection (instrumented builds): bytes queued via
          * ch582_inject() are consumed BEFORE real UART bytes, as if received
@@ -1522,6 +1553,7 @@ void ch582_task(void) {
             r81_buf[0] = c;
             r81_len    = 1;
             r81_start  = timer_read();
+            r81_passes = 1;
             if (r81_tainted) {
                 r81_abort(&r81_taint);   /* from a burst already known corrupt */
                 continue;
