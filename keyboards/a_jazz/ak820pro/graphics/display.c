@@ -2356,6 +2356,34 @@ void display_clear_text(void) {
     text_dirty   = true;
 }
 
+/* Read-only: what the text slot holds, for a test to compare against what it
+ * sent (raw HID over the 2.4G dongle, stage 2: plans/RAWHID-24G-PLAN.md,
+ * R3-6). Copies the line, NUL-terminated within max, and returns its length;
+ * *icon and *present are the slot's. No drawing, no state change. */
+uint8_t display_get_text_line(uint8_t line, char *out, uint8_t max, uint8_t *icon, bool *present) {
+    if (icon) *icon = text_icon;
+    if (present) *present = text_present;
+    if (!out || max == 0) return 0;
+    out[0] = '\0';
+    if (line >= TEXT_LINES) return 0;
+    uint8_t n = 0;
+    while (n + 1u < max && text_buf[line][n]) {
+        out[n] = text_buf[line][n];
+        n++;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* Read-only: the playback state as last set, the position as set (not
+ * advanced by the 1 Hz tick). */
+void display_get_playback(bool *active, bool *ticking, uint16_t *pos, uint16_t *dur) {
+    if (active) *active = pb_active;
+    if (ticking) *ticking = pb_ticking;
+    if (pos) *pos = pb_pos;
+    if (dur) *dur = pb_dur;
+}
+
 // 12x12 transport glyphs from rectangles -- colour is only available here, not
 // from the font atlases (their colour is baked in and a glyph blit paints its
 // whole cell). Play is a stepped triangle, the same trick as the padlock crown.

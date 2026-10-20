@@ -143,10 +143,13 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uin
     return RAW81_V_OK;
 }
 
-void raw81_admit(raw81_rx_t *rx, uint32_t now_ms) {
+/* The identity is the reserved request's (copied at commit into the caller's
+ * request slot), never c_session/c_seq: a later frame may overwrite those
+ * before the deferred dispatch (codex, revision 3's verify, must-fix 2). */
+void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_ms) {
     rx->have_session = true;
-    rx->session      = rx->c_session;
-    rx->last_seq     = rx->c_seq;
+    rx->session      = session;
+    rx->last_seq     = seq;
     rx->admitted_ms  = now_ms;
 }
 

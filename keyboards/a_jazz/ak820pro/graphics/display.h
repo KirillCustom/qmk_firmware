@@ -104,6 +104,10 @@ void display_set_text(uint8_t icon, const char *s, uint8_t len);
  * producer cannot strand a stale second line. */
 void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t len);
 void display_clear_text(void);
+/* Read-only views of the text slot and the playback state (display.c), for
+ * tests: no drawing, no state change. */
+uint8_t display_get_text_line(uint8_t line, char *out, uint8_t max, uint8_t *icon, bool *present);
+void    display_get_playback(bool *active, bool *ticking, uint16_t *pos, uint16_t *dur);
 
 /* Draw the bootloader notice. Called just before the MCU reset that enters the
  * ROM bootloader; the panel retains the image across that reset. */

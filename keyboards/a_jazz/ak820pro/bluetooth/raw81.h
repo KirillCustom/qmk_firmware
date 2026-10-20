@@ -106,9 +106,10 @@ bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks);
 /* 34 bytes are in: check the taint, the lifetime, the sum, the envelope, the
  * session, the freshness and the allow-list. */
 raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms);
-/* The caller dispatched the committed request: it becomes the session's last
- * admitted seq (starting the session if it was new). */
-void raw81_admit(raw81_rx_t *rx, uint32_t now_ms);
+/* The caller dispatched a request: its identity (the one the caller reserved
+ * at commit) becomes the session's last admitted seq, starting the session if
+ * it was new. BUSY never refreshes the idle time; only this does. */
+void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_ms);
 
 /* The positive allow-list over a 26-byte inner command (exact bytes). */
 bool raw81_allowed(const uint8_t *inner);

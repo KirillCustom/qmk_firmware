@@ -587,7 +587,15 @@ enum {
      *       [14] the passes it spanned, [15] the most any commit spanned.
      *       arg 2: zero the counters, then reply as arg 0. Anything else is
      *       unhandled.
-     * Ops 18-19 are reserved (raw HID over 2.4G, stage 2).
+     * op 18: the text slot and playback state as stored (display.c's
+     *       read-only accessors), so a test checks what a text write left
+     *       on the board (raw HID over 2.4G, stage 2, R3-6). arg 0 or 1, a
+     *       line: [4] its length, [5] the slot's icon, [6] present (the slot
+     *       holds anything), [7..31] the line's characters (at most 24, NUL
+     *       padded). arg 2: [4] playback active, [5] ticking, [6..7] the
+     *       position as set (s, u16 LE), [8..9] the duration. Anything else
+     *       is unhandled.
+     * Op 19 is reserved (raw HID over 2.4G, stage 2).
      * Ops 20-24: the radio link's UART overruns, measured (overrun_diag.h,
      * plans/OVERRUN-CAPS-PLAN.md, step 1). Each reply is 28 bytes at [4..31].
      * op 20: the summary (od_fill_summary). arg 0 reads; 1 zeroes the counts,
@@ -1103,6 +1111,29 @@ static void health_command(uint8_t *data, uint8_t length) {
                     uint8_t sub = data[4];
                     if (sub == 2) ch582_raw81_clear_counters();
                     ch582_raw81_fill(sub == 1 ? 1 : 0, &data[4]);
+                    break;
+                }
+                case 18: {
+                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    uint8_t sub = data[4];
+                    memset(&data[4], 0, 28);
+                    if (sub < 2) {
+                        uint8_t icon = 0;
+                        bool    present = false;
+                        char    line[25];
+                        data[4] = display_get_text_line(sub, line, sizeof(line), &icon, &present);
+                        data[5] = icon;
+                        data[6] = present ? 1 : 0;
+                        memcpy(&data[7], line, data[4]);
+                    } else {
+                        bool     active = false, ticking = false;
+                        uint16_t pos = 0, dur = 0;
+                        display_get_playback(&active, &ticking, &pos, &dur);
+                        data[4] = active ? 1 : 0;
+                        data[5] = ticking ? 1 : 0;
+                        memcpy(&data[6], &pos, 2);
+                        memcpy(&data[8], &dur, 2);
+                    }
                     break;
                 }
                 case 20: {
