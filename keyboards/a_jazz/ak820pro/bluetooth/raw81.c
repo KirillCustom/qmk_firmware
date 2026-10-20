@@ -23,14 +23,14 @@ void raw81_init(raw81_rx_t *rx) {
 }
 
 void raw81_reset(raw81_rx_t *rx) {
-    rx->state     = RAW81_IDLE;
-    rx->boundary  = true;
-    rx->tainted   = false;
-    rx->have_last = false;
+    rx->state        = RAW81_IDLE;
+    rx->boundary     = true;
+    rx->tainted      = false;
+    rx->have_session = false;
 }
 
 void raw81_link_lost(raw81_rx_t *rx) {
-    rx->have_last = false;
+    rx->have_session = false;
     if (rx->state == RAW81_COLLECT) {
         rx->state    = RAW81_QUARANTINE;
         rx->boundary = false;
@@ -107,10 +107,11 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uin
         return RAW81_V_BADSUM;
     }
     const uint8_t *p = &rx->buf[1];
-    rx->seq          = p[1];
-    uint16_t crc     = raw81_crc16(p, 2, 0xFFFFu);
-    crc              = raw81_crc16(&p[4], RAW81_INNER, crc);
-    if (p[0] != RAW81_MAGIC || crc != (uint16_t)((p[2] << 8) | p[3])) {
+    rx->c_session    = p[1];
+    rx->c_seq        = (uint16_t)((p[2] << 8) | p[3]);
+    uint16_t crc     = raw81_crc16(p, 4, 0xFFFFu);
+    crc              = raw81_crc16(&p[RAW81_HEAD], RAW81_INNER, crc);
+    if (p[0] != RAW81_MAGIC || p[1] == 0 || crc != (uint16_t)((p[4] << 8) | p[5])) {
         /* A good outer sum over a bad envelope is corruption the sum missed
          * (a deletion, a truncation): no trusted boundary, quarantine. */
         abort_to(rx, &rx->badenv);
@@ -118,22 +119,35 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uin
     }
     rx->state    = RAW81_IDLE;
     rx->boundary = true;
-    if (rx->have_last) {
-        uint8_t d = (uint8_t)(rx->seq - rx->last_seq);
-        if (d == 0 || d > 127u) {
+    if (rx->have_session && rx->c_session == rx->session) {
+        /* Fresh: 1..32767 ahead of the last admitted seq, mod 2^16. */
+        uint16_t d = (uint16_t)(rx->c_seq - rx->last_seq);
+        if (d == 0 || d > 32767u) {
             rx->stale++;
             return RAW81_V_STALE;
         }
+    } else if (rx->have_session && now_ms - rx->admitted_ms < RAW81_SESSION_IDLE_MS) {
+        /* Another session while this one is live: two owners, or a packet
+         * from before a host restart. Neither may interleave. */
+        rx->busy++;
+        return RAW81_V_BUSY;
     }
-    rx->have_last = true;
-    rx->last_seq  = rx->seq;
-    if (!raw81_allowed(&p[4])) {
+    /* Otherwise a new session may start here (no session, or this one idle
+     * for RAW81_SESSION_IDLE_MS): admitting it is the caller's raw81_admit(). */
+    if (!raw81_allowed(&p[RAW81_HEAD])) {
         rx->forbidden++;
         return RAW81_V_FORBIDDEN;
     }
-    memcpy(rx->inner, &p[4], RAW81_INNER);
+    memcpy(rx->inner, &p[RAW81_HEAD], RAW81_INNER);
     rx->ok++;
     return RAW81_V_OK;
+}
+
+void raw81_admit(raw81_rx_t *rx, uint32_t now_ms) {
+    rx->have_session = true;
+    rx->session      = rx->c_session;
+    rx->last_seq     = rx->c_seq;
+    rx->admitted_ms  = now_ms;
 }
 
 bool raw81_allowed(const uint8_t *in) {
@@ -158,19 +172,26 @@ bool raw81_allowed(const uint8_t *in) {
     return false;
 }
 
-void raw81_receipt(uint8_t out[RAW81_PAYLOAD], uint8_t seq, uint8_t status, bool have_last,
-                   uint8_t last_seq, const uint8_t *reply) {
+void raw81_receipt(uint8_t out[RAW81_PAYLOAD], uint8_t session, uint16_t seq, uint8_t status,
+                   uint16_t last_seq, const uint8_t *reply) {
     memset(out, 0, RAW81_PAYLOAD);
     out[0] = RAW81_MAGIC;
-    out[1] = seq;
-    out[2] = status;
-    out[3] = have_last ? last_seq : 0;
+    out[1] = session;
+    out[2] = (uint8_t)(seq >> 8);
+    out[3] = (uint8_t)seq;
+    out[4] = status;
+    out[5] = (uint8_t)(last_seq >> 8);
+    out[6] = (uint8_t)last_seq;
     if (status == RAW81_ST_OK && reply) {
         uint16_t c = raw81_crc16(reply, RAW81_PAYLOAD, 0xFFFFu);
-        out[4]     = (uint8_t)(c >> 8);
-        out[5]     = (uint8_t)c;
+        out[7]     = (uint8_t)(c >> 8);
+        out[8]     = (uint8_t)c;
     }
-    out[6] = have_last ? 1 : 0;
+    /* The receipt's own CRC: the reply's CRC does not cover the identity and
+     * status a host trusts (codex, revision 2's verify, must-fix 2). */
+    uint16_t c = raw81_crc16(out, 9, 0xFFFFu);
+    out[9]     = (uint8_t)(c >> 8);
+    out[10]    = (uint8_t)c;
 }
 
 void raw81_frame91(uint8_t out[RAW81_FRAME_LEN], const uint8_t payload[RAW81_PAYLOAD]) {

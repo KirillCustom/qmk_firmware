@@ -2,22 +2,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 /* Raw HID over the 2.4G dongle (plans/RAWHID-24G-PLAN.md, stage 2 revision
- * 2): the module-side collector, the request envelope, the freshness rule and
- * the allow-list, as pure functions of bytes, times and flags. No hardware
- * calls, so scripts/raw81_test.py compiles this file on the host and drives
- * every split, deletion and truncation through it; ch582f_ajazz.c feeds it
- * from the UART and acts on its verdicts.
+ * 3): the module-side collector, the request envelope, sessions and
+ * freshness, the allow-list and the receipt, as pure functions of bytes,
+ * times and flags. No hardware calls, so scripts/raw81_test.py compiles this
+ * file on the host and drives every split, deletion and truncation through
+ * it; ch582f_ajazz.c feeds it from the UART and acts on its verdicts.
  *
  * On the wire, from the module: 81 <32 bytes> <sum = (0x81 + the 32) & 0xFF>.
  * The 32 bytes are the host's request:
- *   [0] 0xC7  [1] seq  [2..3] CRC-16/CCITT-FALSE, big-endian, over [0..1]
- *   and [4..31]  [4..31] the inner command (28 bytes)
- * To the module, two frames per response: the reply (91 <32> <sum>), then
- * the receipt (91 <32> <sum>):
- *   [0] 0xC7  [1] seq  [2] status  [3] the last accepted seq
- *   [4..5] CRC-16 of the reply, big-endian (status 0 only)
- *   [6] 1 if [3] is meaningful (a seq has been accepted since the reset)
- *   [7..31] 0 */
+ *   [0] 0xC7  [1] session (nonzero)  [2..3] seq, big-endian
+ *   [4..5] CRC-16/CCITT-FALSE, big-endian, over [0..3] and [6..31]
+ *   [6..31] the inner command (26 bytes)
+ * To the module, per transaction: the reply (91 <32> <sum>, status 0 only),
+ * then the receipt (91 <32> <sum>):
+ *   [0] 0xC7  [1] session  [2..3] seq  [4] status  [5..6] the last admitted
+ *   seq (0 if none)  [7..8] CRC-16 of the reply (status 0)
+ *   [9..10] CRC-16 of [0..8]  [11..31] 0 */
 #pragma once
 
 #include <stdbool.h>
@@ -25,8 +25,13 @@
 
 #define RAW81_FRAME_LEN 34u   /* 81, 32 bytes, sum */
 #define RAW81_PAYLOAD   32u
-#define RAW81_INNER     28u
+#define RAW81_HEAD      6u    /* magic, session, seq x2, CRC x2 */
+#define RAW81_INNER     26u
 #define RAW81_MAGIC     0xC7u
+/* A session changes only after this long with no admitted request: no packet
+ * the radio delayed can outlive it (the dongle forwards within milliseconds
+ * and stores nothing), and two owners cannot interleave. */
+#define RAW81_SESSION_IDLE_MS 1000u
 
 typedef enum { RAW81_IDLE = 0, RAW81_COLLECT = 1, RAW81_QUARANTINE = 2 } raw81_state_t;
 
@@ -38,42 +43,52 @@ typedef enum {
     RAW81_FRAME     = 3,   /* consumed, and 34 bytes are in: call raw81_commit() */
 } raw81_feed_t;
 
-/* raw81_commit()'s verdict. */
+/* raw81_commit()'s verdict. OK leaves freshness unchanged: the caller calls
+ * raw81_admit() only if it actually dispatches the request. */
 typedef enum {
-    RAW81_V_OK        = 0,   /* a fresh, allowed request: inner[] holds it */
-    RAW81_V_STALE     = 1,   /* well formed, seq not fresh: receipt status 3 */
+    RAW81_V_OK        = 0,   /* fresh and allowed: inner[] holds it */
+    RAW81_V_STALE     = 1,   /* well formed, seq not fresh: status 3 */
     RAW81_V_FORBIDDEN = 2,   /* well formed, not on the allow-list: status 2 */
     RAW81_V_BADENV    = 3,   /* outer sum good, magic or CRC bad: quarantined; status 1 */
     RAW81_V_BADSUM    = 4,   /* quarantined, no answer */
     RAW81_V_TAINT     = 5,   /* a UART error under the frame: quarantined, no answer */
     RAW81_V_LIFETIME  = 6,   /* older than its lifetime at commit: quarantined, no answer */
+    RAW81_V_BUSY      = 7,   /* another session inside the idle time: status 4 */
 } raw81_verdict_t;
 
 /* Receipt status bytes. */
-enum { RAW81_ST_OK = 0, RAW81_ST_BADCRC = 1, RAW81_ST_FORBIDDEN = 2, RAW81_ST_STALE = 3 };
+enum {
+    RAW81_ST_OK = 0, RAW81_ST_BADCRC = 1, RAW81_ST_FORBIDDEN = 2, RAW81_ST_STALE = 3,
+    RAW81_ST_BUSY = 4,
+};
 
 typedef struct {
     raw81_state_t state;
-    bool          boundary;   /* the next byte may start an 81 */
-    bool          tainted;    /* a UART error since the line was last silent */
+    bool          boundary;    /* the next byte may start an 81 */
+    bool          tainted;     /* a UART error since the line was last silent */
     uint8_t       buf[RAW81_FRAME_LEN];
     uint8_t       len;
-    uint32_t      start_ms;   /* when the collection began */
-    uint16_t      last_tick;  /* the last byte, in the caller's 16-bit ticks */
-    bool          have_last;  /* freshness: a seq has been accepted since the reset */
-    uint8_t       last_seq;
-    uint8_t       seq;        /* the seq of the frame just committed (verdicts OK..BADENV) */
+    uint32_t      start_ms;    /* when the collection began */
+    uint16_t      last_tick;   /* the last byte, in the caller's 16-bit ticks */
+    /* the session: none after a reset or a link change */
+    bool          have_session;
+    uint8_t       session;
+    uint16_t      last_seq;    /* the last ADMITTED seq in the session */
+    uint32_t      admitted_ms; /* when it was admitted */
+    /* the frame just committed (every verdict but BADSUM, TAINT, LIFETIME) */
+    uint8_t       c_session;
+    uint16_t      c_seq;
     uint8_t       inner[RAW81_INNER];
     /* counters */
-    uint32_t ok, stale, forbidden, badenv, badsum, taint, lifetime, qbytes;
+    uint32_t ok, stale, forbidden, badenv, badsum, taint, lifetime, qbytes, busy;
 } raw81_rx_t;
 
 uint16_t raw81_crc16(const uint8_t *p, uint8_t n, uint16_t crc);
 
 void raw81_init(raw81_rx_t *rx);
-/* A resync or a wake: nothing half-collected survives, freshness starts over. */
+/* A resync or a wake: nothing half-collected survives; the session ends. */
 void raw81_reset(raw81_rx_t *rx);
-/* The link moved: freshness starts over; a collection in progress is
+/* The link moved: the session ends; a collection in progress is
  * quarantined, so its tail cannot reach the window. */
 void raw81_link_lost(raw81_rx_t *rx);
 
@@ -88,15 +103,18 @@ void raw81_window_done(raw81_rx_t *rx, bool matched);
 /* The input queue is empty: true when that ended a quarantine (the caller
  * clears the window), after silence_ticks of no bytes. */
 bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks);
-/* 34 bytes are in: check the sum, the taint, the lifetime, the envelope, the
- * freshness and the allow-list. */
+/* 34 bytes are in: check the taint, the lifetime, the sum, the envelope, the
+ * session, the freshness and the allow-list. */
 raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms);
+/* The caller dispatched the committed request: it becomes the session's last
+ * admitted seq (starting the session if it was new). */
+void raw81_admit(raw81_rx_t *rx, uint32_t now_ms);
 
-/* The positive allow-list over a 28-byte inner command (exact bytes). */
+/* The positive allow-list over a 26-byte inner command (exact bytes). */
 bool raw81_allowed(const uint8_t *inner);
-/* Build the receipt payload (32 bytes) for a verdict; reply is the 32-byte
- * reply for status 0, NULL otherwise. */
-void raw81_receipt(uint8_t out[RAW81_PAYLOAD], uint8_t seq, uint8_t status, bool have_last,
-                   uint8_t last_seq, const uint8_t *reply);
+/* Build the receipt payload (32 bytes); reply is the 32-byte reply for
+ * status 0, NULL otherwise. */
+void raw81_receipt(uint8_t out[RAW81_PAYLOAD], uint8_t session, uint16_t seq, uint8_t status,
+                   uint16_t last_seq, const uint8_t *reply);
 /* Wrap a 32-byte payload as a 91 frame (34 bytes). */
 void raw81_frame91(uint8_t out[RAW81_FRAME_LEN], const uint8_t payload[RAW81_PAYLOAD]);
