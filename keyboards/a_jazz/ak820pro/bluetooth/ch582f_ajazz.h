@@ -100,6 +100,8 @@ bool ch582_raw81_window(int8_t on);
 /* op 17 sub 7: the lock-LED handler's frames applied, rejected (invalid) and
  * refused by the lease (raw HID active), since boot. */
 void ch582_lockchan_media_counts(uint32_t out[3]);
+/* Raw HID changed the display: drop a lock-LED frame being assembled. */
+void ch582_lockchan_rawhid(void);
 void ch582_rxtap_arm(bool armed);
 void ch582_rxtap_fill(uint8_t *out);
 bool ch582_rxtap_page(uint8_t page, uint8_t *out);

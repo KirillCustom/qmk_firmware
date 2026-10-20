@@ -315,27 +315,37 @@ static inline bool is_text_cmd(const uint8_t *data, uint8_t length) {
 }
 
 /* The lock-LED channel's lease (plans/LOCK-LED-CHANNEL-PLAN.md, R3-2): when
- * raw HID last carried an accepted media command, by USB or through the 2.4G
- * dongle (raw81 dispatches here too). Set here at the ingress, never in the
- * display's setters, which the lock-LED handler calls as well. */
+ * raw HID last carried a media command that changed the display's state, by
+ * USB or through the 2.4G dongle (raw81 dispatches here too). Stamped here at
+ * the ingress, never in the display's setters, which the lock-LED handler
+ * calls as well; dev builds only, with the channel. */
+#ifdef AK820_DEV_HOOKS
 static uint32_t rawhid_media_at;
 static bool     rawhid_media_seen;
 
 bool hid_rawhid_media_within(uint32_t now, uint32_t ms) {
-    return rawhid_media_seen && now - rawhid_media_at < ms;
+    return rawhid_media_seen && now - rawhid_media_at <= ms;
 }
+#endif
 
-static void text_command_inner(uint8_t *data, uint8_t length);
+/* True when the command reached a display setter with arguments it applies:
+ * a short report or a line past 1 renews nothing (codex, handler review, 1). */
+static bool text_command_inner(uint8_t *data, uint8_t length);
 
 static void text_command(uint8_t *data, uint8_t length) {
-    text_command_inner(data, length);
-    if (data[0] != RTC_UNHANDLED) {
+    bool applied = text_command_inner(data, length);
+#ifdef AK820_DEV_HOOKS
+    if (applied) {
         rawhid_media_at   = timer_read32();
         rawhid_media_seen = true;
+        ch582_lockchan_rawhid();   /* R4-3: no assembly straddles it */
     }
+#else
+    (void)applied;
+#endif
 }
 
-static void text_command_inner(uint8_t *data, uint8_t length) {
+static bool text_command_inner(uint8_t *data, uint8_t length) {
     switch (data[2]) {
         case TEXT_SET:
             /* data[3] = icon id, data[4..] = ASCII. Length is whatever the host
@@ -343,28 +353,31 @@ static void text_command_inner(uint8_t *data, uint8_t length) {
             if (length >= 4) {
                 display_set_text(data[3], (const char *)&data[4],
                                  (uint8_t)(length - 4));
+                return true;
             }
-            break;
+            return false;
         case TEXT_SET_LINE:
             /* data[3] = line, data[4] = icon, data[5..] = ASCII. */
-            if (length >= 5) {
+            if (length >= 5 && data[3] < 2) {
                 display_set_text_line(data[3], data[4], (const char *)&data[5],
                                       (uint8_t)(length - 5));
+                return true;
             }
-            break;
+            return false;
         case TEXT_PLAYBACK:
             if (length >= 8) {
                 display_set_playback(data[3],
                                      (uint16_t)((data[4] << 8) | data[5]),
                                      (uint16_t)((data[6] << 8) | data[7]));
+                return true;
             }
-            break;
+            return false;
         case TEXT_CLEAR:
             display_clear_text();
-            break;
+            return true;
         default:
             data[0] = RTC_UNHANDLED;
-            break;
+            return false;
     }
 }
 
