@@ -681,7 +681,14 @@ static bool        r81_boundary    = true;
 static uint8_t     r81_buf[RAW81_LEN];
 static uint8_t     r81_len;
 static uint16_t    r81_start;
-static uint16_t    rx_last_byte_at;
+/* In system ticks, not timer_read()'s ms: timer_read() converts with
+ * TIME_I2MS, a 64-bit multiply and divide in software on the M0, and two per
+ * byte (this stamp and the drain's budget) made reading an 81 cost ~250 us a
+ * byte -- the 8-9 ms drain the Mac measured, and with the budget, collections
+ * that never finished inside their lifetime (gremlin, 10-19). A tick read is
+ * a counter read; chTimeDiffX handles the wrap (32-bit, ~6.4 h at 187.5 kHz),
+ * and the TIME_MS2I bounds fold at compile time. */
+static systime_t   rx_last_byte_at;
 static bool        r81_tainted;   /* a UART error since the line was last silent */
 static bool        r91_pending, r91_ack_window;
 static uint8_t     r91_buf[RAW81_LEN];
@@ -1474,7 +1481,7 @@ void ch582_task(void) {
     uint8_t c;
     uint8_t bytes_processed = 0;
 #ifdef AK820_DEV_HOOKS
-    const uint16_t drain_t0 = timer_read();
+    const systime_t drain_t0 = chVTGetSystemTimeX();   /* ticks: see rx_last_byte_at */
     bool           rx_left  = false;   /* the drain stopped on its budget, bytes still queued */
     if (r81_state == R81_COLLECT && r81_passes < 255u) r81_passes++;
 #endif
@@ -1487,12 +1494,15 @@ void ch582_task(void) {
     while (bytes_processed < 64) {
 #ifdef AK820_DEV_HOOKS
         /* Mid-collection, the drain gives the pass back after RAW81_DRAIN_MS:
-         * draining one 81 took 8-9 ms and held one pass for all of it. The
+         * draining one 81 took 8-9 ms and held one pass for all of it (the
+         * cause turned out to be timer_read() per byte; rx_last_byte_at). With
+         * tick reads an 81 should rarely need the budget; it stays as a bound. The
          * rest waits in the input queue (128 bytes) for the next pass; the
          * collection's lifetime spans the passes. ⚠️ Bytes are left queued,
          * and an ACK among them must be consumed before the TX pump judges
          * anything, so the pump skips this pass (rx_left, below). */
-        if (r81_state == R81_COLLECT && timer_elapsed(drain_t0) >= RAW81_DRAIN_MS) {
+        if (r81_state == R81_COLLECT &&
+            chTimeDiffX(drain_t0, chVTGetSystemTimeX()) >= TIME_MS2I(RAW81_DRAIN_MS)) {
             rx_left = true;
             break;
         }
@@ -1515,7 +1525,8 @@ void ch582_task(void) {
              * line was silent that long, so a quarantine ends and the next byte
              * starts at a boundary (r81 above). A collection is left to its
              * lifetime. */
-            if (r81_state != R81_COLLECT && timer_elapsed(rx_last_byte_at) >= RAW81_SILENCE_MS) {
+            if (r81_state != R81_COLLECT &&
+                chTimeDiffX(rx_last_byte_at, chVTGetSystemTimeX()) >= TIME_MS2I(RAW81_SILENCE_MS)) {
                 /* Leaving quarantine, the window starts over too: bytes from
                  * before the abort must not pair with bytes after it into a
                  * phantom ACK or 5x (codex stage-1 review, must-fix 1). */
@@ -1541,7 +1552,7 @@ void ch582_task(void) {
         }
 #ifdef AK820_DEV_HOOKS
         /* The 81 collector (r81 above), before the window sees the byte. */
-        rx_last_byte_at = timer_read();
+        rx_last_byte_at = chVTGetSystemTimeX();
         if (r81_state == R81_QUARANTINE) {
             r81_qbytes++;
             continue;
