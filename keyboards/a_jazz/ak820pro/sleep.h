@@ -104,6 +104,13 @@ void sleep_deep_record(uint8_t *out);
 /* DIAGNOSTIC (dev, 10-20): the deep sleep's WFI sequence, op 14 sub 7
  * (sleep.c); v < 0 only reads. 0xFF on daily builds. */
 uint8_t sleep_wfi_variant(int16_t v);
+/* DIAGNOSTIC (dev, 10-20): the flash probe's tallies (WFI variants 9 and
+ * 10, sleep.c), 21 bytes, little endian: u16 wakes probed, u16 wakes with a
+ * wrong read, u16 the read positions ever wrong (bit i), u16 wrong reads
+ * equal to the word read before the sleep, u16 equal to 0xFFFFFFFF, u16
+ * equal to 0, u32 the first wrong read, u32 what it should have been, u8 its
+ * position. Zeros on daily builds. */
+void sleep_flash_probe(uint8_t *out, bool clear);
 /* Each teardown's wake, the last eight (HC_DEVHOOK op 24): the page keeps only
  * the last sleep's. Slot 0..7, 28 bytes, little endian: u16 the entry's
  * sequence number (entry n is in slot n % 8), u8 reason (SLEEP_WAKE_*), u8

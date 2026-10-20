@@ -311,8 +311,9 @@ static void recovery_begin(uint8_t reason);
  *   0xFF  the C sequence as built (the default);
  *   0-7   the sequence in asm, aligned so the WFI sits at (2k + 6) mod 16
  *         in a 16-byte line: k 5 = 0, 6 = 2, 7 = 4, 0 = 6, 1 = 8 ... 4 = 14;
- *   8     from SRAM (.ramtext, copied at boot with .data), with ~100 us of
- *         settle in SRAM before the flash is fetched again. */
+ *   8     from SRAM; held 2/2 in the sweep, then dropped for the probe's
+ *         RAM (it now refuses);
+ *   9, 10 from SRAM, the flash probe below. */
 static volatile uint8_t ds_wfi_variant = 0xFFu;
 
 uint8_t sleep_wfi_variant(int16_t v) {
@@ -320,12 +321,85 @@ uint8_t sleep_wfi_variant(int16_t v) {
     return ds_wfi_variant;
 }
 
-__attribute__((section(".ramtext"), noinline, long_call)) static void ds_wfi_ram(volatile uint32_t *ctrl) {
+/* DIAGNOSTIC (10-20, the flash probe): does the flash answer right straight
+ * after a Deep-sleep wake? The sweep above held at every placement, so this
+ * asks the flash itself, wherever the code sits. From SRAM, with no fetch
+ * from the flash until it returns: one read of a known word (the flash's
+ * last access before the sleep), the WFI, then DS_PROBE_N reads alternating
+ * between two other known words, the first 8 back to back, the rest each
+ * after a 40-pass loop of 5 cycles (~17 us at 12 MHz), so the last lands
+ * ~140 us after the wake. Variant 9 reads a word in another line first, 10 the word in the
+ * last one's 8-byte line (p. 254) first. */
+#    define DS_PROBE_N 16u
+static const uint32_t ds_probe_words[16] __attribute__((aligned(64))) = {
+    0x6B8B4567u, 0x327B23C6u, 0x643C9869u, 0x66334873u, 0x74B0DC51u, 0x19495CFFu, 0x2AE8944Au, 0x625558ECu,
+    0x238E1F29u, 0x46E87CCDu, 0x3D1B58BAu, 0x507ED7ABu, 0x2EB141F2u, 0x41B71EFBu, 0x79E2A9E3u, 0x7545E146u,
+};
+#    define DS_PROBE_LAST 0u    /* read before the WFI */
+#    define DS_PROBE_NEAR 1u    /* its 8-byte line */
+#    define DS_PROBE_FAR  15u   /* 60 bytes on: another 8-, 16- and 32-byte line */
+static struct {
+    uint16_t wakes, bad_wakes, bad_pos, as_last, as_ones, as_zero;
+    uint32_t first_bad, first_want;
+    uint8_t  first_pos;
+} ds_probe;
+
+__attribute__((section(".ramtext"), noinline, long_call)) static void ds_wfi_probe(volatile uint32_t *ctrl, const volatile uint32_t *last, const volatile uint32_t *a,
+                                                                                    const volatile uint32_t *b, volatile uint32_t *out) {
+    (void)*last;
     *ctrl = 2u;
     __DSB();
     __WFI();
     *ctrl = 0u;
-    for (volatile uint32_t d = 0; d < 300u; d++) {}   /* ~100 us at the IHRC's 12 MHz */
+    for (uint32_t i = 0; i < 8u; i += 2u) {
+        out[i]      = *a;
+        out[i + 1u] = *b;
+    }
+    for (uint32_t i = 8u; i < DS_PROBE_N; i++) {
+        for (uint32_t d = 40u; d; d--) __asm volatile("");
+        out[i] = (i & 1u) ? *b : *a;
+    }
+}
+
+/* noinline: the reads' buffer is on the stack for the call only (the
+ * diagnostic's RAM above .bss is the free store's; newlib's tzset and
+ * sscanf can take from it). */
+static __attribute__((noinline)) void ds_probe_run(bool far_first) {
+    volatile uint32_t v_[DS_PROBE_N];
+    uint32_t ia = far_first ? DS_PROBE_FAR : DS_PROBE_NEAR, ib = far_first ? DS_PROBE_NEAR : DS_PROBE_FAR;
+    ds_wfi_probe(&SN_PMU->CTRL, &ds_probe_words[DS_PROBE_LAST], &ds_probe_words[ia], &ds_probe_words[ib], v_);
+    bool bad = false;
+    for (uint32_t i = 0; i < DS_PROBE_N; i++) {
+        uint32_t v = v_[i], want = ds_probe_words[(i & 1u) ? ib : ia];
+        if (v == want) continue;
+        if (!bad && !ds_probe.bad_wakes) {
+            ds_probe.first_bad  = v;
+            ds_probe.first_want = want;
+            ds_probe.first_pos  = (uint8_t)i;
+        }
+        bad = true;
+        ds_probe.bad_pos |= (uint16_t)(1u << i);
+        if (v == ds_probe_words[DS_PROBE_LAST]) ds_probe.as_last++;
+        if (v == 0xFFFFFFFFu) ds_probe.as_ones++;
+        if (v == 0u) ds_probe.as_zero++;
+    }
+    ds_probe.wakes++;
+    if (bad) ds_probe.bad_wakes++;
+}
+
+void sleep_flash_probe(uint8_t *out, bool clear) {
+    chSysLock();
+    memcpy(&out[0], &ds_probe.wakes, 2);
+    memcpy(&out[2], &ds_probe.bad_wakes, 2);
+    memcpy(&out[4], &ds_probe.bad_pos, 2);
+    memcpy(&out[6], &ds_probe.as_last, 2);
+    memcpy(&out[8], &ds_probe.as_ones, 2);
+    memcpy(&out[10], &ds_probe.as_zero, 2);
+    memcpy(&out[12], &ds_probe.first_bad, 4);
+    memcpy(&out[16], &ds_probe.first_want, 4);
+    out[20] = ds_probe.first_pos;
+    if (clear) memset(&ds_probe, 0, sizeof ds_probe);
+    chSysUnlock();
 }
 
 #    define DS_WFI_ASM(k)                                                                          \
@@ -345,7 +419,8 @@ static inline __attribute__((always_inline)) void ds_wfi(void) {
         case 5: DS_WFI_ASM(5); break;
         case 6: DS_WFI_ASM(6); break;
         case 7: DS_WFI_ASM(7); break;
-        case 8: ds_wfi_ram(&SN_PMU->CTRL); break;
+        case 9: ds_probe_run(true); break;
+        case 10: ds_probe_run(false); break;
         default:
             SN_PMU->CTRL = 2;
             __DSB();
@@ -358,6 +433,11 @@ static inline __attribute__((always_inline)) void ds_wfi(void) {
 uint8_t sleep_wfi_variant(int16_t v) {
     (void)v;
     return 0xFFu;
+}
+
+void sleep_flash_probe(uint8_t *out, bool clear) {
+    (void)clear;
+    memset(out, 0, 21);
 }
 #endif
 
