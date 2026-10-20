@@ -417,8 +417,17 @@ static bool     pb_active = false;
 static bool     pb_ticking = false;
 static uint16_t pb_pos = 0, pb_dur = 0;
 static uint32_t pb_stamp = 0;
+static uint32_t pb_timeout = PLAYBACK_TIMEOUT_MS;   /* the last setter's */
 
 void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur) {
+    display_set_playback_for(state, pos, dur, PLAYBACK_TIMEOUT_MS);
+}
+
+/* Raw HID pushes a position every poll, so 20 s of silence means the host is
+ * gone. The lock-LED channel refreshes every 60 s and loses frames to the
+ * radio, so its readout lives longer; whichever set it last decides. */
+void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms) {
+    pb_timeout = timeout_ms;
     bool want = (state != 0);
     if (want != pb_active) {
         pb_active = want;
@@ -449,7 +458,7 @@ void display_playback_key(void) {
 
 void display_playback_tick(void) {
     if (!pb_active) return;
-    if (timer_elapsed32(pb_stamp) > PLAYBACK_TIMEOUT_MS) {
+    if (timer_elapsed32(pb_stamp) > pb_timeout) {
         pb_active = false;
         clock_force_repaint = true;
         return;

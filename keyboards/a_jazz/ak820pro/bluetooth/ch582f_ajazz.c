@@ -423,9 +423,13 @@ bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scro
  * has carried a media command within the lease, so a late Bluetooth frame
  * cannot overwrite what USB or the 2.4G dongle just showed. Only then the
  * display, through the same setters as raw HID's text channel: both lines and
- * the icon, and playback off (an absolute snapshot carries none). RAM state
- * only; the band paints on its own schedule. */
-#define LOCKCHAN_LEASE_MS 10000u
+ * the icon, and the playback readout when the frame carries one (its
+ * position advanced by the frame's own anchor-to-commit time), else off. Its
+ * readout lives LOCKCHAN_PLAYBACK_MS, two of the host's 60 s refreshes and a
+ * margin, since frames are lost. RAM state only; the band paints on its own
+ * schedule. */
+#define LOCKCHAN_LEASE_MS    10000u
+#define LOCKCHAN_PLAYBACK_MS 135000u
 static uint32_t lcm_applied, lcm_rejected, lcm_leased;
 
 static void lockchan_media_commit(const lockchan_frame_t *f) {
@@ -444,7 +448,12 @@ static void lockchan_media_commit(const lockchan_frame_t *f) {
         display_set_text_line(0, m.icon, (const char *)m.l0, m.n0);
         display_set_text_line(1, m.icon, (const char *)m.l1, m.n1);
     }
-    display_set_playback(0, 0, 0);
+    if (m.type == LOCKCHAN_TYPE_NOW_PLAYING && m.playback) {
+        display_set_playback_for(m.state, lockchan_media_position(&m, f->anchor_ms, f->commit_ms), m.dur,
+                                 LOCKCHAN_PLAYBACK_MS);
+    } else {
+        display_set_playback(0, 0, 0);
+    }
     lcm_applied++;
 }
 
