@@ -686,8 +686,12 @@ static uint16_t    r81_start;
  * byte (this stamp and the drain's budget) made reading an 81 cost ~250 us a
  * byte -- the 8-9 ms drain the Mac measured, and with the budget, collections
  * that never finished inside their lifetime (gremlin, 10-19). A tick read is
- * a counter read; chTimeDiffX handles the wrap (32-bit, ~6.4 h at 187.5 kHz),
- * and the TIME_MS2I bounds fold at compile time. */
+ * a counter read, and the TIME_MS2I bounds fold at compile time. ⚠️ The SN32
+ * port's system time is 16-bit (timer_read32 extends it by hand), so it wraps
+ * every ~0.35 s at 187.5 kHz: chTimeDiffX is right for the 2 and 5 ms spans
+ * here, and a stamp older than a wrap reads as LESS time than has passed, so
+ * the line can only look less silent than it is, never more (a boundary or a
+ * quarantine's end comes at most ~5 ms late in that case). */
 static systime_t   rx_last_byte_at;
 static bool        r81_tainted;   /* a UART error since the line was last silent */
 static bool        r91_pending, r91_ack_window;
