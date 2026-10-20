@@ -154,21 +154,26 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, u
     }
     rx->state    = RAW81_IDLE;
     rx->boundary = true;
-    if (rx->have_session && rx->c_session == rx->session) {
+    /* A session is live until idle_long passes with no admission; after
+     * that, any request starts afresh, whatever its id and seq, so a host
+     * that restarts and draws its old id is not stuck STALE (daemon plan
+     * R4-1; under the 1 s lifetime nothing older can still arrive). */
+    bool live = rx->have_session && now_long - rx->admitted_at < idle_long;
+    if (live && rx->c_session == rx->session) {
         /* Fresh: 1..32767 ahead of the last admitted seq, mod 2^16. */
         uint16_t d = (uint16_t)(rx->c_seq - rx->last_seq);
         if (d == 0 || d > 32767u) {
             rx->stale++;
             return RAW81_V_STALE;
         }
-    } else if (rx->have_session && now_long - rx->admitted_at < idle_long) {
+    } else if (live) {
         /* Another session while this one is live: two owners, or a packet
          * from before a host restart. Neither may interleave. */
         rx->busy++;
         return RAW81_V_BUSY;
     }
-    /* Otherwise a new session may start here (no session, or this one idle
-     * for idle_long): admitting it is the caller's raw81_admit(). */
+    /* Otherwise a session starts here (none live): admitting it is the
+     * caller's raw81_admit(). */
     /* Envelope v2: the inner's leading 0x07 is not sent (every allowed
      * command has it), and the other 25 bytes come masked so that no byte of
      * the frame is one an older board's window could act on

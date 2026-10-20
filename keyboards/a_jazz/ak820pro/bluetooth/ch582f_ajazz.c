@@ -719,6 +719,12 @@ static bool     r81_in_tx_drain;
 static uint8_t  r81_depth;
 static bool     rx_defer;                    /* this pass: bytes still queued, or a fresh ACK prefix */
 static uint32_t r81_drops, r81_dispatched, r91_sent_tx, r91_acks, ack_defer_overrun, r91_short_write;
+/* A response unsent this long after its dispatch is dropped, so none can
+ * wait indefinitely behind keyboard traffic: it bounds a transaction's
+ * traffic, which the host's 3 s quiet before a new session relies on
+ * (daemon plan R4-1). In r81_long ticks. */
+#define RAW81_RESP_TTL ((uint32_t)CH_CFG_ST_FREQUENCY / 4u)   /* 250 ms */
+static uint32_t r81_resp_at, r81_resp_expired;
 
 static inline void r81_ensure(void) {
     if (!r81_inited) {
@@ -757,7 +763,8 @@ static void r81_queue_receipt(uint8_t status) {
     uint8_t p[RAW81_PAYLOAD];
     raw81_receipt(p, r81.c_session, r81.c_seq, status, r81.have_session ? r81.last_seq : 0, NULL);
     raw81_frame91(r81_resp.frame[0], p);
-    r81_resp.n = 1;
+    r81_resp.n  = 1;
+    r81_resp_at = r81_long_now();
 }
 
 /* 34 bytes are in: the verdict, and the reservation (R2-3). */
@@ -805,7 +812,8 @@ static void r81_dispatch(void) {
     raw81_receipt(p, r81_req.session, r81_req.seq, RAW81_ST_OK, r81_req.seq, buf);
     raw81_frame91(r81_resp.frame[0], buf);
     raw81_frame91(r81_resp.frame[1], p);
-    r81_resp.n = 2;
+    r81_resp.n  = 2;
+    r81_resp_at = r81_long_now();
 }
 #    else
 static void r81_dispatch(void) {
@@ -823,6 +831,11 @@ static void r81_dispatch(void) {
  * what was queued ahead of them (~87 us a byte at 115200). */
 static void r81_send_response(void) {
     if (!r81_resp.n) return;
+    if (r81_long_now() - r81_resp_at > RAW81_RESP_TTL) {   /* R4-1: expired unsent */
+        r81_resp.n = 0;
+        r81_resp_expired++;
+        return;
+    }
     if (!r81_linked()) {
         r81_resp.n = 0;
         r81_drops++;
@@ -875,6 +888,7 @@ void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
         out28[7] = r81.session;
         memcpy(&out28[8], &r81.last_seq, 2);
         memcpy(&out28[10], &r91_short_write, 4);
+        memcpy(&out28[14], &r81_resp_expired, 4);
     }
 }
 
@@ -883,6 +897,7 @@ void ch582_raw81_clear_counters(void) {
     r81.ok = r81.stale = r81.forbidden = r81.badenv = r81.badsum = r81.taint = r81.lifetime = 0;
     r81.qbytes = r81.busy = 0;
     r81_drops = r81_dispatched = r91_sent_tx = r91_acks = ack_defer_overrun = r91_short_write = 0;
+    r81_resp_expired = 0;
 }
 
 /* HC_DEVHOOK op 19: the 91 ACK window on (true) or off, for the experiment

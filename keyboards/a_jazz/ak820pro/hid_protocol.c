@@ -586,7 +586,7 @@ enum {
      *       2 quarantine), [5] boundary, [6] request pending, [7] response
      *       frames pending, [8] window open, [9] window on, [10] session
      *       live, [11] session, [12..13] last admitted seq, [14..17] short
-     *       writes. arg 3: zero the counters, then reply as arg 0.
+     *       writes, [18..21] responses expired unsent (the 250 ms TTL). arg 3: zero the counters, then reply as arg 0.
      *       Anything else is unhandled.
      * op 18: the text slot and playback state as stored (display.c's
      *       read-only accessors), so a test checks what a text write left
