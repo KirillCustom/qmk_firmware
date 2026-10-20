@@ -630,167 +630,231 @@ static eventflags_t uart_err_poll(void) {
 }
 
 #ifdef AK820_DEV_HOOKS
-/* Raw HID over the 2.4G dongle, stage 1: an echo (plans/RAWHID-24G-PLAN.md,
- * "Codex's plan review and stage 1 as specified"). A 32-byte report the host
- * writes to the dongle's FF60 interface arrives from the module as
- *     81 <32 bytes> <sum = (0x81 + the 32) & 0xFF>
- * and the stock firmware answers with 91 <32 bytes> <sum> the same way. Stage 1
- * answers each committed 81 with a 91 carrying the same 32 bytes, and nothing
- * else: no dispatch, so a false commit costs a stray reply and no more.
- *
- * Receive, beside the 3-byte window:
- *   - A collection starts only on a 0x81 at a BOUNDARY, decided before the
- *     byte is consumed: after the window was cleared by a matched frame or
- *     ACK, or after measured silence. Any byte the window takes without a
- *     match clears it, so `5C 25 | 81` (37%) completes the 5C and never
- *     starts, nor does P3's `5A 81 ..` (codex plan review, must-fix 1).
- *   - Silence: a drain that finds the input queue EMPTY at least
- *     RAW81_SILENCE_MS after the last byte was read. The UART ISR queues each
- *     byte as it arrives, so an empty queue then means none came in that span
- *     (give or take the FIFO trigger and a masked ISR, both well under it).
- *   - Collecting, bytes go to the buffer, not the window (payloads can hold a
- *     valid 5x frame or 61 0D 0A). A UART error flag seen meanwhile, a bad
- *     sum, or a collection older than RAW81_LIFETIME_MS aborts it; an abort
- *     QUARANTINES the line: every byte is dropped until it has been silent
- *     RAW81_SILENCE_MS, so no tail reaches the window (must-fix 2).
- *   - Collected in every mode, so a 81's payload never reaches the window;
- *     answered only in 2.4G with the link up.
- * Transmit: one 34-byte slot, sent only when the keyboard queue is empty and
- * nothing is in flight (keys first), never retried or coalesced, dropped and
- * counted if a reply is still waiting when the next 81 commits. After a 91
- * the A-frame pump waits RAW91_ACK_WINDOW_MS: an ACK in that window is counted
- * as the 91's and pops nothing, so a late one cannot release an A1 (61 0D 0A
- * carries no sequence). That count is what says whether the module ACKs 91
- * (must-fix 5). */
-#define RAW81_LEN           34u
-#define RAW81_SILENCE_MS    5u
-/* A collection may span several passes (RAW81_DRAIN_MS), and the drain was
- * measured taking 8-9 ms over one 81's 34 bytes (the Mac session, 10-19;
- * whether that is the module's pacing or the cost per byte is open, and op
- * 17's pass count is what tells): 15 ms would leave too little margin once
- * the collection spans passes. */
-#define RAW81_LIFETIME_MS   40u
-/* While a collection is in progress, a drain stops after this long, so one
- * pass never pays for a whole frame: before it, every 81 cost one pass of
- * 13-15 ms, 8-9 of them in this drain (history/raw81-echo-20261019-mac/). */
-#define RAW81_DRAIN_MS      2u
+/* Raw HID over the 2.4G dongle, stage 2 (plans/RAWHID-24G-PLAN.md, revisions
+ * 2-4). The rules are raw81.c's, host-tested by scripts/raw81_test.py; this is
+ * the glue around them:
+ *   - every byte from the module goes to raw81_byte() before the 3-byte
+ *     window; the window starts over at a collection's start and at a
+ *     quarantine's end, and an ACK prefix it holds expires on silence (R4-1);
+ *   - at a commit, the request and its response are RESERVED together: an
+ *     OK takes the request slot only if both slots are free and the link is
+ *     2.4G and up, else it is dropped and counted (there is no way to answer);
+ *     a STALE, FORBIDDEN, BUSY or BADENV commit queues a receipt if the
+ *     response slot is free and no request holds it (R2-3);
+ *   - at most one dispatch a pass, never nested: not inside ch582_tx_drain()
+ *     and only at ch582_task()'s outermost depth (R2-2), through the board's
+ *     own raw-HID entry, via_custom_value_command_kb(); the request's own
+ *     identity is admitted (R4-2);
+ *   - the response (reply + receipt, or a receipt alone) is one immutable
+ *     transaction, sent only with nothing in flight, the keyboard queue empty
+ *     and room for all of it in the UART's output queue, so sdWrite never
+ *     waits (R4-4); then the A-frame pump holds for the ACK window (R3-4, op
+ *     19 switches it) so a late ACK cannot pop an A1;
+ *   - the pump's timeout judgment, and the window's close, wait while bytes
+ *     are still queued or the window holds a fresh ACK prefix (R4-1), capped
+ *     at RAW81_DEFER_CAP_MS past the timeout and counted.
+ * Every UART writer is in the main loop (the ACK writes, the A-frames, this
+ * pair): the single-writer rule the pair's free-space check relies on. */
+#include "raw81.h"
+#define RAW81_SILENCE_TICKS ((uint16_t)TIME_MS2I(5))    /* 938 at 187.5 kHz */
+#define RAW81_LIFETIME_TICKS ((uint16_t)TIME_MS2I(20))  /* 3x the measured 6-7 ms */
 #define RAW91_ACK_WINDOW_MS 15u
-typedef enum { R81_IDLE, R81_COLLECT, R81_QUARANTINE } r81_state_t;
-static r81_state_t r81_state       = R81_IDLE;
-static bool        r81_boundary    = true;
-static uint8_t     r81_buf[RAW81_LEN];
-static uint8_t     r81_len;
-static uint16_t    r81_start;
-/* In system ticks, not timer_read()'s ms: timer_read() converts with
- * TIME_I2MS, a 64-bit multiply and divide in software on the M0, and two per
- * byte (this stamp and the drain's budget) made reading an 81 cost ~250 us a
- * byte -- the 8-9 ms drain the Mac measured, and with the budget, collections
- * that never finished inside their lifetime (gremlin, 10-19). A tick read is
- * a counter read, and the TIME_MS2I bounds fold at compile time. ⚠️ The SN32
- * port's system time is 16-bit (timer_read32 extends it by hand), so it wraps
- * every ~0.35 s at 187.5 kHz: chTimeDiffX is right for the 2 and 5 ms spans
- * here, and a stamp older than a wrap reads as LESS time than has passed, so
- * the line can only look less silent than it is, never more (a boundary or a
- * quarantine's end comes at most ~5 ms late in that case). */
-static systime_t   rx_last_byte_at;
-static bool        r81_tainted;   /* a UART error since the line was last silent */
-static bool        r91_pending, r91_ack_window;
-static uint8_t     r91_buf[RAW81_LEN];
-static uint16_t    r91_sent_at;
-static uint32_t    r81_ok, r81_badsum, r81_lifetime, r81_taint, r81_qbytes;
-static uint8_t     r81_passes;                       /* drains the current collection has spanned */
-static uint16_t    r81_last_ms;                      /* the last commit: ms from its 81 to its sum */
-static uint8_t     r81_last_passes, r81_max_passes;  /* ... and the passes it spanned; the most */
-static uint32_t    r91_sent, r91_dropped, r91_acks;
+#define RAW81_DEFER_CAP_MS  50u
 
-static void r81_abort(uint32_t *why) {
-    (*why)++;
-    r81_state    = R81_QUARANTINE;
-    r81_boundary = false;
+static raw81_rx_t r81;
+static bool       r81_inited;
+
+typedef struct {
+    bool     full;
+    uint8_t  session;
+    uint16_t seq;
+    uint8_t  inner[RAW81_INNER];
+} r81_req_t;
+typedef struct {
+    uint8_t n;                               /* frames waiting, 0 = free */
+    uint8_t frame[2][RAW81_FRAME_LEN];
+} r81_resp_t;
+static r81_req_t  r81_req;
+static r81_resp_t r81_resp;
+
+static bool     r91_window_on = true;        /* op 19 */
+static bool     r91_ack_window;
+static uint16_t r91_window_at, r91_window_ms;
+static bool     r81_in_tx_drain;
+static uint8_t  r81_depth;
+static bool     rx_defer;                    /* this pass: bytes still queued, or a fresh ACK prefix */
+static uint32_t r81_drops, r81_dispatched, r91_sent_tx, r91_acks, ack_defer_overrun, r91_short_write;
+
+static inline void r81_ensure(void) {
+    if (!r81_inited) {
+        raw81_init(&r81);
+        r81_inited = true;
+    }
 }
 
-/* The line starts over (a resync, a sleep's wake): nothing half-collected or
- * waiting survives it. The ACK window is left to run out on its own. */
+static inline bool r81_linked(void) {
+    return is_module_connected && !usb_mode && requested_profile == CH582_PROFILE_PEER_24G;
+}
+
+/* A resync or a sleep's wake: nothing half-collected or waiting survives,
+ * and the session ends. The ACK window runs out on its own. */
 static void r81_reset(void) {
-    r81_state    = R81_IDLE;
-    r81_boundary = true;
-    r81_tainted  = false;
-    r91_pending  = false;
+    r81_ensure();
+    raw81_reset(&r81);
+    r81_req.full = false;
+    r81_resp.n   = 0;
 }
 
-/* The link moved (LOCKCHAN_LINK_LOST): the reply waiting for the old one is
- * dropped. A collection in progress is not cut loose, since its tail would
- * reach the window; it goes to quarantine, which ends at the next silence. */
+/* Every site where the link may move (LOCKCHAN_LINK_LOST): the session ends,
+ * a collection is quarantined, and neither slot survives (R2-3). */
 static void r81_link_lost(void) {
-    r91_pending = false;
-    if (r81_state == R81_COLLECT) {
-        r81_state    = R81_QUARANTINE;
-        r81_boundary = false;
+    r81_ensure();
+    raw81_link_lost(&r81);
+    r81_req.full = false;
+    r81_resp.n   = 0;
+}
+
+static void r81_queue_receipt(uint8_t status) {
+    if (!r81_linked() || r81_resp.n || r81_req.full) {   /* no path, or the slot is spoken for */
+        r81_drops++;
+        return;
+    }
+    uint8_t p[RAW81_PAYLOAD];
+    raw81_receipt(p, r81.c_session, r81.c_seq, status, r81.have_session ? r81.last_seq : 0, NULL);
+    raw81_frame91(r81_resp.frame[0], p);
+    r81_resp.n = 1;
+}
+
+/* 34 bytes are in: the verdict, and the reservation (R2-3). */
+static void r81_on_frame(void) {
+    raw81_verdict_t v = raw81_commit(&r81, uart_err_poll() != 0, (uint16_t)chVTGetSystemTimeX(),
+                                     RAW81_LIFETIME_TICKS, timer_read32());
+    switch (v) {
+        case RAW81_V_OK:
+            if (!r81_linked() || r81_req.full || r81_resp.n) {
+                r81_drops++;
+                break;
+            }
+            r81_req.full    = true;
+            r81_req.session = r81.c_session;
+            r81_req.seq     = r81.c_seq;
+            memcpy(r81_req.inner, r81.inner, RAW81_INNER);
+            break;
+        case RAW81_V_STALE:     r81_queue_receipt(RAW81_ST_STALE); break;
+        case RAW81_V_FORBIDDEN: r81_queue_receipt(RAW81_ST_FORBIDDEN); break;
+        case RAW81_V_BUSY:      r81_queue_receipt(RAW81_ST_BUSY); break;
+        case RAW81_V_BADENV:    r81_queue_receipt(RAW81_ST_BADCRC); break;
+        default:                break;   /* BADSUM, TAINT, LIFETIME: quarantined, no answer */
     }
 }
 
-static void r81_commit(void) {
-    if (uart_err_poll() || r81_tainted) {   /* an error during this drain, before the commit */
-        r81_abort(&r81_taint);
+#    if defined(VIA_ENABLE)
+void via_custom_value_command_kb(uint8_t *data, uint8_t length);   /* hid_protocol.c */
+
+/* At most one a pass, never nested (R2-2); the reply never leaves over USB
+ * (no raw_hid_send), and a USB request never replies here (R2, note 7). */
+static void r81_dispatch(void) {
+    if (!r81_req.full || r81_in_tx_drain || r81_depth != 1) return;
+    r81_req.full = false;
+    if (!r81_linked()) {
+        r81_drops++;
         return;
     }
-    if (timer_elapsed(r81_start) >= RAW81_LIFETIME_MS) {   /* crossed it mid-drain (should-fix 3) */
-        r81_abort(&r81_lifetime);
+    uint8_t buf[RAW81_PAYLOAD];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, r81_req.inner, RAW81_INNER);
+    via_custom_value_command_kb(buf, RAW81_PAYLOAD);
+    raw81_admit(&r81, r81_req.session, r81_req.seq, timer_read32());
+    r81_dispatched++;
+    uint8_t p[RAW81_PAYLOAD];
+    raw81_receipt(p, r81_req.session, r81_req.seq, RAW81_ST_OK, r81_req.seq, buf);
+    raw81_frame91(r81_resp.frame[0], buf);
+    raw81_frame91(r81_resp.frame[1], p);
+    r81_resp.n = 2;
+}
+#    else
+static void r81_dispatch(void) {
+    if (r81_req.full) {
+        r81_req.full = false;
+        r81_drops++;
+    }
+}
+#    endif
+
+/* The response transaction, from the pump's idle branch: only with nothing
+ * in flight and the keyboard queue empty (the caller), and room for all of
+ * it in the output queue (R4-4). The window covers the module's chance to
+ * ACK after actually receiving the frames: 15 ms plus their wire time plus
+ * what was queued ahead of them (~87 us a byte at 115200). */
+static void r81_send_response(void) {
+    if (!r81_resp.n) return;
+    if (!r81_linked()) {
+        r81_resp.n = 0;
+        r81_drops++;
         return;
     }
-    uint8_t s = 0;
-    for (uint8_t i = 0; i < RAW81_LEN - 1u; i++) s += r81_buf[i];
-    if (s != r81_buf[RAW81_LEN - 1u]) {
-        r81_abort(&r81_badsum);
-        return;
+    size_t need = (size_t)r81_resp.n * RAW81_FRAME_LEN;
+    osalSysLock();
+    size_t room = oqGetEmptyI(&(CH582_SERIAL_DRIVER).oqueue);
+    size_t full = oqGetFullI(&(CH582_SERIAL_DRIVER).oqueue);
+    osalSysUnlock();
+    if (room < need) return;   /* next pass */
+    for (uint8_t i = 0; i < r81_resp.n; i++) {
+        if (sdWrite(&CH582_SERIAL_DRIVER, r81_resp.frame[i], RAW81_FRAME_LEN) != RAW81_FRAME_LEN) r91_short_write++;
+        r91_sent_tx++;
     }
-    r81_ok++;
-    r81_last_ms     = timer_elapsed(r81_start);
-    r81_last_passes = r81_passes;
-    if (r81_passes > r81_max_passes) r81_max_passes = r81_passes;
-    r81_state    = R81_IDLE;
-    r81_boundary = true;
-    if (!is_module_connected || usb_mode || requested_profile != CH582_PROFILE_PEER_24G) return;
-    if (r91_pending) {
-        r91_dropped++;
-        return;
+    r81_resp.n = 0;
+    if (r91_window_on) {
+        r91_ack_window = true;
+        r91_window_at  = timer_read();
+        /* R5-3: plus the UART's 16-byte hardware FIFO, which the software
+         * queue no longer counts, rounded up, plus 1 ms. */
+        r91_window_ms = (uint16_t)(RAW91_ACK_WINDOW_MS + ((need + full + 16u) * 87u + 999u) / 1000u + 1u);
     }
-    s          = 0x91;
-    r91_buf[0] = 0x91;
-    for (uint8_t i = 1; i < RAW81_LEN - 1u; i++) {
-        r91_buf[i] = r81_buf[i];
-        s += r81_buf[i];
-    }
-    r91_buf[RAW81_LEN - 1u] = s;
-    r91_pending             = true;
 }
 
-/* HC_DEVHOOK op 17 (hid_protocol.c). page 0: commits, bad sums, lifetime
- * aborts, UART-taint aborts, 91s sent, replies dropped, ACKs in the window
- * (u32 each, 28 bytes). page 1: [state][boundary][pending][ack window]
- * [quarantined bytes u32]. */
+/* HC_DEVHOOK op 17 (hid_protocol.c). page 0: committed OK, stale, forbidden,
+ * bad envelope, bad sum, taint, lifetime (u32 each). page 1: busy,
+ * quarantined bytes, drops, dispatched, 91 frames sent, ACKs in the window,
+ * deferred timeouts past the cap (u32 each). page 2: [0] state, [1] boundary,
+ * [2] request pending, [3] response frames pending, [4] window open, [5]
+ * window switched on, [6] session live, [7] session, [8..9] last admitted
+ * seq, [10..13] short writes. */
 void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
+    r81_ensure();
     memset(out28, 0, 28);
     if (page == 0) {
-        const uint32_t v[7] = {r81_ok, r81_badsum, r81_lifetime, r81_taint, r91_sent, r91_dropped, r91_acks};
+        const uint32_t v[7] = {r81.ok, r81.stale, r81.forbidden, r81.badenv, r81.badsum, r81.taint, r81.lifetime};
+        memcpy(out28, v, sizeof(v));
+    } else if (page == 1) {
+        const uint32_t v[7] = {r81.busy, r81.qbytes, r81_drops, r81_dispatched, r91_sent_tx, r91_acks, ack_defer_overrun};
         memcpy(out28, v, sizeof(v));
     } else {
-        out28[0] = (uint8_t)r81_state;
-        out28[1] = r81_boundary ? 1 : 0;
-        out28[2] = r91_pending ? 1 : 0;
-        out28[3] = r91_ack_window ? 1 : 0;
-        memcpy(&out28[4], &r81_qbytes, 4);
-        memcpy(&out28[8], &r81_last_ms, 2);
-        out28[10] = r81_last_passes;
-        out28[11] = r81_max_passes;
+        out28[0] = (uint8_t)r81.state;
+        out28[1] = r81.boundary ? 1 : 0;
+        out28[2] = r81_req.full ? 1 : 0;
+        out28[3] = r81_resp.n;
+        out28[4] = r91_ack_window ? 1 : 0;
+        out28[5] = r91_window_on ? 1 : 0;
+        out28[6] = r81.have_session ? 1 : 0;
+        out28[7] = r81.session;
+        memcpy(&out28[8], &r81.last_seq, 2);
+        memcpy(&out28[10], &r91_short_write, 4);
     }
 }
 
 void ch582_raw81_clear_counters(void) {
-    r81_ok = r81_badsum = r81_lifetime = r81_taint = r81_qbytes = 0;
-    r91_sent = r91_dropped = r91_acks = 0;
-    r81_last_ms = 0;
-    r81_last_passes = r81_max_passes = 0;
+    r81_ensure();
+    r81.ok = r81.stale = r81.forbidden = r81.badenv = r81.badsum = r81.taint = r81.lifetime = 0;
+    r81.qbytes = r81.busy = 0;
+    r81_drops = r81_dispatched = r91_sent_tx = r91_acks = ack_defer_overrun = r91_short_write = 0;
+}
+
+/* HC_DEVHOOK op 19: the 91 ACK window on (true) or off, for the experiment
+ * that would justify removing it (R3-4). Returns the state. */
+bool ch582_raw81_window(int8_t on) {
+    if (on >= 0) r91_window_on = on != 0;
+    return r91_window_on;
 }
 #endif
 
@@ -936,16 +1000,29 @@ static inline void tx_link_change_check(const ch582_tx_frame_t *f) {
  * honoured with fine granularity. */
 static void ch582_tx_pump(void) {
 #ifdef AK820_DEV_HOOKS
-    /* After a 91, hold the A-frames until its ACK, if any, has had time to
-     * come (r81 above): one arriving now must not pop an A1. Nothing is in
-     * flight here, since a 91 only goes when the queue is idle. */
+    /* After a response, hold the A-frames until its ACK, if any, has had time
+     * to come (r81 above): one arriving now must not pop an A1. Nothing is in
+     * flight here, since a response only goes when the queue is idle. The
+     * window does not close while an ACK may still be unread (R4-1). */
     if (r91_ack_window) {
-        if (timer_elapsed(r91_sent_at) < RAW91_ACK_WINDOW_MS) return;
+        if (timer_elapsed(r91_window_at) < r91_window_ms) return;
+        if (rx_defer && timer_elapsed(r91_window_at) < r91_window_ms + RAW81_DEFER_CAP_MS) return;
         r91_ack_window = false;
     }
 #endif
     if (tx_in_flight) {
         if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS) return;   /* still waiting for ACK */
+#ifdef AK820_DEV_HOOKS
+        /* R4-1: no timeout judgment while this frame's ACK may still be
+         * unread (bytes left queued at the drain's cap, or a fresh `61` /
+         * `61 0D` in the window): a retransmit now would draw a second ACK
+         * that releases the NEXT frame unsent. Capped, and counted past it,
+         * so keyboard TX is never starved. */
+        if (rx_defer) {
+            if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS + RAW81_DEFER_CAP_MS) return;
+            ack_defer_overrun++;
+        }
+#endif
         tx_stat_timeout++;
         if (++tx_retries > CH582_TX_MAX_RETRIES) {                          /* give up, move on */
             tx_stat_giveup++;
@@ -959,23 +1036,29 @@ static void ch582_tx_pump(void) {
     }
     if (tx_head == tx_tail) {                                                /* queue empty */
 #ifdef AK820_DEV_HOOKS
-        /* The reply slot goes only now, behind every keyboard frame. The link
-         * is checked again: it may have moved since the 81 committed. The same
-         * blocking write as every frame; the output queue holds 128 bytes
-         * (SERIAL_BUFFERS_SIZE, the common halconf.h), so 34 fit without a
-         * wait unless earlier writes still fill it. */
-        if (r91_pending) {
-            r91_pending = false;
-            if (is_module_connected && !usb_mode && requested_profile == CH582_PROFILE_PEER_24G) {
-                sdWrite(&CH582_SERIAL_DRIVER, r91_buf, RAW81_LEN);
-                r91_sent++;
-                r91_sent_at    = timer_read();
-                r91_ack_window = true;
-            }
-        }
+        /* The response goes only now, behind every keyboard frame (R4-4). */
+        r81_send_response();
 #endif
         return;
     }
+#ifdef AK820_DEV_HOOKS
+    /* R5-1: no new frame either while an ACK may still be unread: a second
+     * ACK for a retransmitted frame, still queued, would pop this one unsent.
+     * The same cap past the moment it would have started, counted. */
+    {
+        static bool     start_held;
+        static uint16_t start_held_at;
+        if (rx_defer) {
+            if (!start_held) {
+                start_held    = true;
+                start_held_at = timer_read();
+            }
+            if (timer_elapsed(start_held_at) < RAW81_DEFER_CAP_MS) return;
+            ack_defer_overrun++;
+        }
+        start_held = false;
+    }
+#endif
     tx_link_change_check(&tx_q[tx_head]);
     sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len);
     tx_sent_time = timer_read();
@@ -997,7 +1080,8 @@ void ch582_rx_resync(void) {
 
 bool ch582_tx_idle(void) {
 #ifdef AK820_DEV_HOOKS
-    if (r91_pending || r91_ack_window) return false;   /* sleep admission waits for a reply too */
+    /* Sleep admission waits for a request, a response and its window too. */
+    if (r81_req.full || r81_resp.n || r91_ack_window) return false;
 #endif
     return !tx_in_flight && tx_head == tx_tail;
 }
@@ -1031,11 +1115,25 @@ bool ch582_tx_drain(uint16_t timeout_ms) {
      * fails the drain. */
     uint32_t giveups = tx_stat_giveup, drops = tx_stat_drop;
     uint16_t t0      = timer_read();
+    bool     ok      = true;
+#ifdef AK820_DEV_HOOKS
+    /* No radio dispatch inside a drain: the caller is a USB raw-HID handler
+     * (the bootloader jump), so a dispatch here would nest one handler in
+     * another (stage 2, R2-2). Restored on every exit. */
+    bool was_in = r81_in_tx_drain;
+    r81_in_tx_drain = true;
+#endif
     while (tx_in_flight || tx_head != tx_tail) {
-        if (timer_elapsed(t0) >= timeout_ms) return false;
+        if (timer_elapsed(t0) >= timeout_ms) {
+            ok = false;
+            break;
+        }
         ch582_task();
     }
-    return tx_stat_giveup == giveups && tx_stat_drop == drops;
+#ifdef AK820_DEV_HOOKS
+    r81_in_tx_drain = was_in;
+#endif
+    return ok && tx_stat_giveup == giveups && tx_stat_drop == drops;
 }
 
 bool ch582_send_releases(void) {
@@ -1315,6 +1413,14 @@ void ch582_task(void) {
     WDT_SCOPE(WDT_SITE_WIRELESS);
     const bool prof = loop_acct_on;   /* D2's profile: see prof_end() */
     uint16_t   p0   = prof ? ACCT_NOW() : 0u;
+#ifdef AK820_DEV_HOOKS
+    /* Depth 1 is the main loop's call; ch582_tx_drain() re-enters from inside
+     * a USB handler, and r81_dispatch() runs only at depth 1 and outside a
+     * drain (stage 2, R2-2). Paired with the decrement at the end: this
+     * function has no early return. */
+    r81_ensure();
+    r81_depth++;
+#endif
     /* Rolling 3-byte window over the RX stream. The module interleaves two frame
      * formats with no length prefix, and the stream can drop bytes on a burst, so
      * a fixed [type,data,cksum] state machine desyncs permanently. Matching on a
@@ -1467,16 +1573,9 @@ void ch582_task(void) {
     {
         eventflags_t f = uart_err_poll();
 #ifdef AK820_DEV_HOOKS
-        /* A byte lost under a collection, or one older than its lifetime:
-         * abort before another byte is taken (r81 above). */
-        /* Remembered in every state until the line is next silent: an error
-         * from a burst whose 81 is still in the queue must taint the
-         * collection it starts (codex stage-1 review, should-fix 2). */
-        if (f) r81_tainted = true;
-        if (r81_state == R81_COLLECT) {
-            if (f) r81_abort(&r81_taint);
-            else if (timer_elapsed(r81_start) >= RAW81_LIFETIME_MS) r81_abort(&r81_lifetime);
-        }
+        /* An error latches in raw81 until the line is silent, and aborts a
+         * collection under way; so does a collection past its lifetime. */
+        raw81_poll(&r81, f != 0, (uint16_t)chVTGetSystemTimeX(), RAW81_LIFETIME_TICKS);
 #else
         (void)f;
 #endif
@@ -1484,33 +1583,16 @@ void ch582_task(void) {
 
     uint8_t c;
     uint8_t bytes_processed = 0;
-#ifdef AK820_DEV_HOOKS
-    const systime_t drain_t0 = chVTGetSystemTimeX();   /* ticks: see rx_last_byte_at */
-    bool           rx_left  = false;   /* the drain stopped on its budget, bytes still queued */
-    if (r81_state == R81_COLLECT && r81_passes < 255u) r81_passes++;
-#endif
     uint16_t p1 = prof ? ACCT_NOW() : 0u;
     prof_call_c5 = prof_call_ack = 0;
     prof_call_n5c = 0;
+#ifdef AK820_DEV_HOOKS
+    bool drained = false;   /* the drain reached an empty queue (not the 64-byte cap) */
+#endif
 
     /* Drain the queue fully (capped to bound worst-case latency) so a connect
      * burst doesn't overflow the serial input buffer and shed bytes. */
     while (bytes_processed < 64) {
-#ifdef AK820_DEV_HOOKS
-        /* Mid-collection, the drain gives the pass back after RAW81_DRAIN_MS:
-         * draining one 81 took 8-9 ms and held one pass for all of it (the
-         * cause turned out to be timer_read() per byte; rx_last_byte_at). With
-         * tick reads an 81 should rarely need the budget; it stays as a bound. The
-         * rest waits in the input queue (128 bytes) for the next pass; the
-         * collection's lifetime spans the passes. ⚠️ Bytes are left queued,
-         * and an ACK among them must be consumed before the TX pump judges
-         * anything, so the pump skips this pass (rx_left, below). */
-        if (r81_state == R81_COLLECT &&
-            chTimeDiffX(drain_t0, chVTGetSystemTimeX()) >= TIME_MS2I(RAW81_DRAIN_MS)) {
-            rx_left = true;
-            break;
-        }
-#endif
 #ifdef WDT_TEST_HOOKS
         /* Fault injection (instrumented builds): bytes queued via
          * ch582_inject() are consumed BEFORE real UART bytes, as if received
@@ -1525,19 +1607,17 @@ void ch582_task(void) {
 #endif
         if (chnReadTimeout(&CH582_SERIAL_DRIVER, &c, 1, TIME_IMMEDIATE) == 0) {
 #ifdef AK820_DEV_HOOKS
-            /* The queue is empty: if nothing has come for RAW81_SILENCE_MS, the
-             * line was silent that long, so a quarantine ends and the next byte
-             * starts at a boundary (r81 above). A collection is left to its
-             * lifetime. */
-            if (r81_state != R81_COLLECT &&
-                chTimeDiffX(rx_last_byte_at, chVTGetSystemTimeX()) >= TIME_MS2I(RAW81_SILENCE_MS)) {
-                /* Leaving quarantine, the window starts over too: bytes from
-                 * before the abort must not pair with bytes after it into a
-                 * phantom ACK or 5x (codex stage-1 review, must-fix 1). */
-                if (r81_state == R81_QUARANTINE) b2 = b1 = b0 = 0;
-                r81_state    = R81_IDLE;
-                r81_boundary = true;
-                r81_tainted  = false;
+            /* The queue is empty. After RAW81_SILENCE_TICKS with no byte the
+             * line was silent that long: a quarantine ends (the window starts
+             * over with it), and an ACK prefix left in the window is expired
+             * too, so it cannot hold the pump's judgment forever (R4-1, R5-1). */
+            drained         = true;
+            uint16_t now_tk = (uint16_t)chVTGetSystemTimeX();
+            if (raw81_empty(&r81, now_tk, RAW81_SILENCE_TICKS)) {
+                b2 = b1 = b0 = 0;
+            } else if ((b0 == 0x61 || (b1 == 0x61 && b0 == 0x0D)) && r81.state != RAW81_COLLECT &&
+                       (uint16_t)(now_tk - r81.last_tick) >= RAW81_SILENCE_TICKS) {
+                b2 = b1 = b0 = 0;
             }
 #endif
             break;
@@ -1555,33 +1635,22 @@ void ch582_task(void) {
 #endif
         }
 #ifdef AK820_DEV_HOOKS
-        /* The 81 collector (r81 above), before the window sees the byte. */
-        rx_last_byte_at = chVTGetSystemTimeX();
-        if (r81_state == R81_QUARANTINE) {
-            r81_qbytes++;
-            continue;
-        }
-        if (r81_state == R81_COLLECT) {
-            r81_buf[r81_len++] = c;
-            if (r81_len == RAW81_LEN) r81_commit();
-            continue;
-        }
-        if (r81_boundary && c == 0x81) {
-            /* The window starts over at a collection: a pending `61 0D` (after
-             * a silence) must not meet a `0A` that follows the whole 81 and
-             * forge an ACK, which could release an A1 (codex stage-1 review,
-             * must-fix 1). */
-            b2 = b1 = b0 = 0;
-            r81_buf[0] = c;
-            r81_len    = 1;
-            r81_start  = timer_read();
-            r81_passes = 1;
-            if (r81_tainted) {
-                r81_abort(&r81_taint);   /* from a burst already known corrupt */
+        /* The 81 collector (raw81.c), before the window sees the byte. A tick,
+         * not a millisecond read: see RAW81_SILENCE_TICKS. */
+        {
+            raw81_feed_t fed = raw81_byte(&r81, c, (uint16_t)chVTGetSystemTimeX());
+            if (fed == RAW81_STARTED) {
+                /* The window starts over at a collection: a pending `61 0D`
+                 * must not meet a `0A` that follows the whole 81 and forge an
+                 * ACK (codex stage-1 review, must-fix 1). */
+                b2 = b1 = b0 = 0;
                 continue;
             }
-            r81_state = R81_COLLECT;
-            continue;
+            if (fed == RAW81_FRAME) {
+                r81_on_frame();
+                continue;
+            }
+            if (fed == RAW81_TAKEN) continue;
         }
 #endif
 
@@ -1786,7 +1855,7 @@ void ch582_task(void) {
         }
 #ifdef AK820_DEV_HOOKS
         /* A boundary only right after a frame or ACK the window completed. */
-        r81_boundary = matched;
+        raw81_window_done(&r81, matched);
 #endif
     }
 
@@ -1799,17 +1868,17 @@ void ch582_task(void) {
      * carries no sequence number. */
     uint16_t p2 = prof ? ACCT_NOW() : 0u;
 #ifdef AK820_DEV_HOOKS
-    /* An ACK may still be queued behind the collection's tail: judging the
-     * in-flight frame now could retransmit it, and that copy's later ACK would
-     * release the NEXT frame unsent (wireless.md; codex raw81 drain review,
-     * must-fix 1). Likewise the 91's window must not close with its ACK
-     * unread. So the pump waits for a drain that reached the queue's end:
-     * the next pass, ~3 ms on. */
-    if (!rx_left)
+    /* R4-1/R5-1: an ACK may still be unread -- bytes left queued at the
+     * 64-byte cap, or a fresh `61` / `61 0D` in the window (an old one was
+     * expired on silence above). The pump then neither judges a timeout nor
+     * starts a new frame (capped and counted inside it). */
+    rx_defer = !drained || b0 == 0x61 || (b1 == 0x61 && b0 == 0x0D);
+    r81_dispatch();   /* at most one a pass; never nested (R2-2) */
 #endif
     ch582_tx_pump();
 #ifdef AK820_DEV_HOOKS
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
+    r81_depth--;
 #endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);
 }

@@ -577,16 +577,17 @@ enum {
      *       slots arg*26 .. arg*26+25 at [6..31]; byte n is in slot n % ring
      *       size. Op 15 (arg 0), the pages, then op 15 again, is a consistent
      *       read only if the count did not move between them.
-     * op 17: raw HID over the 2.4G dongle, stage 1's echo (ch582f_ajazz.c,
-     *       plans/RAWHID-24G-PLAN.md). arg 0: [4..31] seven u32 -- 81s
-     *       committed, bad sums, lifetime aborts, UART-taint aborts, 91s sent,
-     *       replies dropped (slot full), ACKs inside the 91's window. arg 1:
-     *       [4] state (0 idle, 1 collecting, 2 quarantine), [5] boundary,
-     *       [6] reply pending, [7] ACK window open, [8..11] quarantined bytes
-     *       u32, [12..13] the last commit's ms from its 81 to its sum (u16),
-     *       [14] the passes it spanned, [15] the most any commit spanned.
-     *       arg 2: zero the counters, then reply as arg 0. Anything else is
-     *       unhandled.
+     * op 17: raw HID over the 2.4G dongle, stage 2's counters (ch582f_ajazz.c,
+     *       raw81.c, plans/RAWHID-24G-PLAN.md). Seven u32 at [4..31]: page
+     *       arg 0: committed OK, stale, forbidden, bad envelope, bad sum,
+     *       taint, lifetime; arg 1: busy, quarantined bytes, drops,
+     *       dispatched, 91 frames sent, ACKs in the window, deferred
+     *       timeouts past the cap. arg 2: [4] state (0 idle, 1 collecting,
+     *       2 quarantine), [5] boundary, [6] request pending, [7] response
+     *       frames pending, [8] window open, [9] window on, [10] session
+     *       live, [11] session, [12..13] last admitted seq, [14..17] short
+     *       writes. arg 3: zero the counters, then reply as arg 0.
+     *       Anything else is unhandled.
      * op 18: the text slot and playback state as stored (display.c's
      *       read-only accessors), so a test checks what a text write left
      *       on the board (raw HID over 2.4G, stage 2, R3-6). arg 0 or 1, a
@@ -595,7 +596,8 @@ enum {
      *       padded). arg 2: [4] playback active, [5] ticking, [6..7] the
      *       position as set (s, u16 LE), [8..9] the duration. Anything else
      *       is unhandled.
-     * Op 19 is reserved (raw HID over 2.4G, stage 2).
+     * op 19: stage 2's 91 ACK window (R3-4): arg 0 reads, 1 on, 2 off (RAM
+ *       only; a reset boots on). Replies [4] 1 if on.
      * Ops 20-24: the radio link's UART overruns, measured (overrun_diag.h,
      * plans/OVERRUN-CAPS-PLAN.md, step 1). Each reply is 28 bytes at [4..31].
      * op 20: the summary (od_fill_summary). arg 0 reads; 1 zeroes the counts,
@@ -1107,10 +1109,10 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 17: {
-                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    if (length < 32 || data[4] > 3) { data[0] = RTC_UNHANDLED; break; }
                     uint8_t sub = data[4];
-                    if (sub == 2) ch582_raw81_clear_counters();
-                    ch582_raw81_fill(sub == 1 ? 1 : 0, &data[4]);
+                    if (sub == 3) ch582_raw81_clear_counters();
+                    ch582_raw81_fill(sub == 3 ? 0 : sub, &data[4]);
                     break;
                 }
                 case 18: {
@@ -1134,6 +1136,13 @@ static void health_command(uint8_t *data, uint8_t length) {
                         memcpy(&data[6], &pos, 2);
                         memcpy(&data[8], &dur, 2);
                     }
+                    break;
+                }
+                case 19: {
+                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    bool on = ch582_raw81_window(data[4] == 0 ? -1 : (int8_t)(data[4] == 1));
+                    memset(&data[4], 0, 28);
+                    data[4] = on ? 1 : 0;
                     break;
                 }
                 case 20: {

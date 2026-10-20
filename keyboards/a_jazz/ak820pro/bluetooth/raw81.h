@@ -68,7 +68,7 @@ typedef struct {
     bool          tainted;     /* a UART error since the line was last silent */
     uint8_t       buf[RAW81_FRAME_LEN];
     uint8_t       len;
-    uint32_t      start_ms;    /* when the collection began */
+    uint16_t      start_tick;  /* when the collection began, in the caller's 16-bit ticks */
     uint16_t      last_tick;   /* the last byte, in the caller's 16-bit ticks */
     /* the session: none after a reset or a link change */
     bool          have_session;
@@ -93,10 +93,12 @@ void raw81_reset(raw81_rx_t *rx);
 void raw81_link_lost(raw81_rx_t *rx);
 
 /* At a drain's start: latch a UART error (any state) and abort a collection
- * that saw one or outlived lifetime_ms. */
-void raw81_poll(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms);
+ * that saw one or outlived lifetime_ticks. Ticks, not ms: the caller's
+ * millisecond clock is a software 64-bit divide on the M0, and this runs every
+ * pass; the 16-bit tick's wrap (~0.35 s) is far past any lifetime here. */
+void raw81_poll(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks);
 /* One byte from the module, before the window sees it. */
-raw81_feed_t raw81_byte(raw81_rx_t *rx, uint8_t c, uint16_t now_tick, uint32_t now_ms);
+raw81_feed_t raw81_byte(raw81_rx_t *rx, uint8_t c, uint16_t now_tick);
 /* After the window processed a byte raw81_byte() returned TO_WINDOW for:
  * a boundary only right after a frame or ACK it completed. */
 void raw81_window_done(raw81_rx_t *rx, bool matched);
@@ -105,7 +107,9 @@ void raw81_window_done(raw81_rx_t *rx, bool matched);
 bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks);
 /* 34 bytes are in: check the taint, the lifetime, the sum, the envelope, the
  * session, the freshness and the allow-list. */
-raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms);
+/* now_ms is used only for the session's 1 s idle (once per committed frame). */
+raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks,
+                             uint32_t now_ms);
 /* The caller dispatched a request: its identity (the one the caller reserved
  * at commit) becomes the session's last admitted seq, starting the session if
  * it was new. BUSY never refreshes the idle time; only this does. */

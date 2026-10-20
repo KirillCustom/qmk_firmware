@@ -91,6 +91,8 @@ void ch582_led5a_reset(void);
  * state, 28 bytes. */
 void ch582_raw81_fill(uint8_t page, uint8_t *out28);
 void ch582_raw81_clear_counters(void);
+/* Stage 2's 91 ACK window: on >= 0 sets it (non-zero on), -1 only reads. */
+bool ch582_raw81_window(int8_t on);
 void ch582_rxtap_arm(bool armed);
 void ch582_rxtap_fill(uint8_t *out);
 bool ch582_rxtap_page(uint8_t page, uint8_t *out);

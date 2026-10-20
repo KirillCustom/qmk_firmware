@@ -43,14 +43,14 @@ static void abort_to(raw81_rx_t *rx, uint32_t *why) {
     rx->boundary = false;
 }
 
-void raw81_poll(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms) {
+void raw81_poll(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks) {
     if (uart_err) rx->tainted = true;   /* remembered until the line is silent */
     if (rx->state != RAW81_COLLECT) return;
     if (uart_err) abort_to(rx, &rx->taint);
-    else if (now_ms - rx->start_ms >= lifetime_ms) abort_to(rx, &rx->lifetime);
+    else if ((uint16_t)(now_tick - rx->start_tick) >= lifetime_ticks) abort_to(rx, &rx->lifetime);
 }
 
-raw81_feed_t raw81_byte(raw81_rx_t *rx, uint8_t c, uint16_t now_tick, uint32_t now_ms) {
+raw81_feed_t raw81_byte(raw81_rx_t *rx, uint8_t c, uint16_t now_tick) {
     rx->last_tick = now_tick;
     if (rx->state == RAW81_QUARANTINE) {
         rx->qbytes++;
@@ -66,7 +66,7 @@ raw81_feed_t raw81_byte(raw81_rx_t *rx, uint8_t c, uint16_t now_tick, uint32_t n
          * pending `61 0D` must not meet a `0A` after the frame). */
         rx->buf[0]   = c;
         rx->len      = 1;
-        rx->start_ms = now_ms;
+        rx->start_tick = now_tick;
         if (rx->tainted) abort_to(rx, &rx->taint);   /* a burst already known corrupt */
         else rx->state = RAW81_COLLECT;
         return RAW81_STARTED;
@@ -90,13 +90,14 @@ bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks) {
     return ended;
 }
 
-raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint32_t now_ms, uint32_t lifetime_ms) {
+raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks,
+                             uint32_t now_ms) {
     if (uart_err) rx->tainted = true;
     if (rx->tainted) {
         abort_to(rx, &rx->taint);
         return RAW81_V_TAINT;
     }
-    if (now_ms - rx->start_ms >= lifetime_ms) {
+    if ((uint16_t)(now_tick - rx->start_tick) >= lifetime_ticks) {
         abort_to(rx, &rx->lifetime);
         return RAW81_V_LIFETIME;
     }
