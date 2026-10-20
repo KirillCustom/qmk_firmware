@@ -9,10 +9,13 @@
  * it; ch582f_ajazz.c feeds it from the UART and acts on its verdicts.
  *
  * On the wire, from the module: 81 <32 bytes> <sum = (0x81 + the 32) & 0xFF>.
- * The 32 bytes are the host's request:
- *   [0] 0xC7  [1] session (nonzero)  [2..3] seq, big-endian
+ * The 32 bytes are the host's request, envelope v2:
+ *   [0] 0xC6  [1] session (nonzero)  [2..3] seq, big-endian
  *   [4..5] CRC-16/CCITT-FALSE, big-endian, over [0..3] and [6..31]
- *   [6..31] the inner command (26 bytes)
+ *   [6] mask  [7..31] the inner command's bytes 1..25, XOR mask
+ * The inner's byte 0 is always 0x07 and is not sent. The host picks the
+ * mask so no byte of the frame is 0x5A/0x5B/0x5C/0x61 (an older board's
+ * window cannot act on it; plans/RAWHID-24G-DAEMON-PLAN.md, R3-1).
  * To the module, per transaction: the reply (91 <32> <sum>, status 0 only),
  * then the receipt (91 <32> <sum>):
  *   [0] 0xC7  [1] session  [2..3] seq  [4] status  [5..6] the last admitted
@@ -27,7 +30,8 @@
 #define RAW81_PAYLOAD   32u
 #define RAW81_HEAD      6u    /* magic, session, seq x2, CRC x2 */
 #define RAW81_INNER     26u
-#define RAW81_MAGIC     0xC7u
+#define RAW81_MAGIC     0xC7u   /* the receipt's */
+#define RAW81_MAGIC_REQ 0xC6u   /* a request's, envelope v2 (masked) */
 /* A session changes only after this long with no admitted request: no packet
  * the radio delayed can outlive it (the dongle forwards within milliseconds
  * and stores nothing), and two owners cannot interleave. */

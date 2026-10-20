@@ -146,7 +146,7 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, u
     rx->c_seq        = (uint16_t)((p[2] << 8) | p[3]);
     uint16_t crc     = raw81_crc16(p, 4, 0xFFFFu);
     crc              = raw81_crc16(&p[RAW81_HEAD], RAW81_INNER, crc);
-    if (p[0] != RAW81_MAGIC || p[1] == 0 || crc != (uint16_t)((p[4] << 8) | p[5])) {
+    if (p[0] != RAW81_MAGIC_REQ || p[1] == 0 || crc != (uint16_t)((p[4] << 8) | p[5])) {
         /* A good outer sum over a bad envelope is corruption the sum missed
          * (a deletion, a truncation): no trusted boundary, quarantine. */
         abort_to(rx, &rx->badenv);
@@ -169,11 +169,17 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, u
     }
     /* Otherwise a new session may start here (no session, or this one idle
      * for idle_long): admitting it is the caller's raw81_admit(). */
-    if (!raw81_allowed(&p[RAW81_HEAD])) {
+    /* Envelope v2: the inner's leading 0x07 is not sent (every allowed
+     * command has it), and the other 25 bytes come masked so that no byte of
+     * the frame is one an older board's window could act on
+     * (RAWHID-24G-DAEMON-PLAN, R3-1). Restore both before anything reads
+     * them; the CRC above covered the masked bytes as sent. */
+    rx->inner[0] = 0x07;
+    for (uint8_t i = 1; i < RAW81_INNER; i++) rx->inner[i] = (uint8_t)(p[RAW81_HEAD + i] ^ p[RAW81_HEAD]);
+    if (!raw81_allowed(rx->inner)) {
         rx->forbidden++;
         return RAW81_V_FORBIDDEN;
     }
-    memcpy(rx->inner, &p[RAW81_HEAD], RAW81_INNER);
     rx->ok++;
     return RAW81_V_OK;
 }
