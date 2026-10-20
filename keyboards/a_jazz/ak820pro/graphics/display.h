@@ -158,6 +158,9 @@ void display_debug_refresh(void);
  * The firmware advances pos itself once per second, so the host only has to
  * re-assert it occasionally -- see display_playback_tick(). */
 void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur);
+/* The same with its own expiry: the lock-LED channel's, which refreshes far
+ * less often than raw HID's poll (ch582f_ajazz.c). */
+void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms);
 void display_playback_tick(void);
 void display_playback_key(void);
 
