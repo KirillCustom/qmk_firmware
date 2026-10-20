@@ -765,6 +765,7 @@ static uint32_t r81_drops, r81_dispatched, r91_sent_tx, r91_acks, ack_defer_over
  * (daemon plan R4-1). In r81_long ticks. */
 #define RAW81_RESP_TTL ((uint32_t)CH_CFG_ST_FREQUENCY / 4u)   /* 250 ms */
 static uint32_t r81_resp_at, r81_resp_expired;
+static bool     r81_hold_resp;   /* op 17 sub 5; the TTL still drops what it holds */
 
 static inline void r81_ensure(void) {
     if (!r81_inited) {
@@ -877,6 +878,7 @@ static void r81_send_response(void) {
         r81_resp_expired++;
         return;
     }
+    if (r81_hold_resp) return;   /* op 17 sub 5: the expiry regression's hold, after the check */
     if (!r81_linked()) {
         r81_resp.n = 0;
         r81_drops++;
@@ -952,6 +954,15 @@ uint32_t ch582_raw81_stall(uint16_t ms) {
     uint32_t a = r81_long_now();
     wait_ms(ms);
     return r81_long_now() - a;
+}
+
+/* op 17 sub 5: responses held in the pump (true) or not, for the expiry
+ * regression: a response held through a stall must expire, never go out
+ * late. The expiry check runs ahead of the hold, so nothing is held past
+ * the TTL. Returns the state. */
+bool ch582_raw81_hold(int8_t on) {
+    if (on >= 0) r81_hold_resp = on != 0;
+    return r81_hold_resp;
 }
 
 /* HC_DEVHOOK op 19: the 91 ACK window on (true) or off, for the experiment

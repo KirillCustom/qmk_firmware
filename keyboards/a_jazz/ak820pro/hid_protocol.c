@@ -1109,11 +1109,21 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 17: {
-                    if (length < 32 || data[4] > 4 || (data[4] == 4 && (data[5] == 0 || data[5] > 50))) {
+                    if (length < 32 || data[4] > 5 || (data[4] == 4 && (data[5] == 0 || data[5] > 50)) ||
+                        (data[4] == 5 && data[5] > 2)) {
                         data[0] = RTC_UNHANDLED;
                         break;
                     }
                     uint8_t sub = data[4];
+                    if (sub == 5) {
+                        /* Responses held in the pump: [5] 1 on, 2 off, 0
+                         * reads. Reply: 5, the state. */
+                        bool on = ch582_raw81_hold(data[5] == 0 ? -1 : (int8_t)(data[5] == 1));
+                        memset(&data[4], 0, 28);
+                        data[4] = 5;
+                        data[5] = on ? 1 : 0;
+                        break;
+                    }
                     if (sub == 4) {
                         /* The long clock across a stall of [5] x 100 ms (at
                          * most 5 s). Reply: 4, the ticks it moved (u32), the
