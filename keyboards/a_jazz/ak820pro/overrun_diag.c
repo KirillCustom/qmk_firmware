@@ -5,6 +5,7 @@
 
 #include "quantum.h"
 #include "overrun_diag.h"
+#include "rtc/rtc.h"   /* rtc_seconds_since_boot */
 
 #ifdef AK820_DEV_HOOKS
 
@@ -26,7 +27,6 @@ static volatile uint16_t mask_t0;         /* the current locked stretch's start 
 static volatile uint16_t mask_last;       /* the last finished stretch's length */
 static volatile uint16_t mask_max_cur;    /* the transaction's longest stretch */
 static volatile uint16_t pcf_t0;          /* the transaction's start */
-static volatile uint32_t ms_now;          /* uptime ms, published by the main loop for the ISR */
 
 typedef struct {
     uint32_t count, n_ge1, n_ge14, spans;
@@ -40,7 +40,8 @@ static volatile uint16_t usb_t0, st_t0, usb_max, st_max, usb_max_since, st_max_s
 
 typedef struct __attribute__((packed)) {
     uint16_t seq;
-    uint32_t ms;
+    uint32_t secs;       /* the RTC's seconds since boot (never timer_read32: a
+                          * 64-bit software divide, ~250 us under the row ISR) */
     uint8_t  act;
     uint8_t  flags;      /* bits 0-1 the PCF kind, 6 in the drain, 7 byte mode */
     uint16_t span;       /* the last masked I2C stretch, ticks */
@@ -76,7 +77,7 @@ static void oe_seen(uint8_t in_drain) {
     if (!act) ctx_none++;
     od_entry_t *e = &ring[ring_seq % OD_RING];
     e->seq     = ring_seq;
-    e->ms      = ms_now;
+    e->secs    = rtc_seconds_since_boot();
     e->act     = act;
     e->flags   = (uint8_t)((pcf_kind & 3u) | (in_drain ? 0x40u : 0u) | (od_i2c_byte_mode ? 0x80u : 0u));
     e->span    = mask_last;
@@ -106,7 +107,6 @@ void od_rx_off(void) { rx_off++; }
 /* ---- The main loop's side ------------------------------------------------ */
 
 void od_activity_set(uint8_t bits) {
-    ms_now = timer_read32();
     chSysLock();
     activity |= bits;
     chSysUnlock();
@@ -118,7 +118,6 @@ void od_activity_clear(uint8_t bits) {
 }
 
 void od_pcf_begin(uint8_t kind) {
-    ms_now = timer_read32();
     chSysLock();
     pcf_kind     = kind < OD_PCF_KINDS ? kind : 0;
     mask_max_cur = 0;
@@ -192,8 +191,9 @@ bool od_fill_ring(uint8_t page, uint8_t *out) {
 /* Op 22, kind 0..3: [0..3] transactions, [4..5] failures, [6..7] the longest
  * masked stretch, [8..9] the longest whole call (ticks), [10..13] stretches
  * of 1.0 ms or more, [14..17] of 1.4 ms or more, [18..21] stretches in all.
- * Kind 0xFF: [0..1] OEs seen during a deep sleep's teardown or wake, and the
- * tick rate u32 at [2..5]. */
+ * Kind 0xFF: [0..1] OEs seen during a deep sleep's teardown or wake, the
+ * tick rate u32 at [2..5], and the RTC's seconds since boot now at [6..9]
+ * (the ring's entries are stamped in the same seconds). */
 bool od_fill_kind(uint8_t kind, uint8_t *out) {
     memset(out, 0, 28);
     if (kind == 0xFFu) {
@@ -201,6 +201,7 @@ bool od_fill_kind(uint8_t kind, uint8_t *out) {
         put16(&out[0], ctx_sleep);
         chSysUnlock();
         put32(&out[2], CH_CFG_ST_FREQUENCY);
+        put32(&out[6], rtc_seconds_since_boot());
         return true;
     }
     if (kind >= OD_PCF_KINDS) return false;

@@ -1673,6 +1673,11 @@ void rtc_wake_gauge_taken(void)
     wk_gauge_taken = true;
 }
 
+uint32_t rtc_seconds_since_boot(void)
+{
+    return rtc_seconds_count;
+}
+
 bool rtc_pass_used_bus(void)
 {
     return pcf_xfers != pcf_xfers_mark;
@@ -1798,9 +1803,15 @@ static bool wake_step(void)
  * recovery owns the PCF (rtc_fast_task returns before it), and the reference
  * check and the deep sleep wait for it. The gaps are random, so it cannot
  * lock to the echo's period or the loop's. */
-static uint16_t bu_left, bu_done, bu_failed, bu_skipped;
-static uint8_t  bu_lo = 40, bu_hi = 80;
-static uint32_t bu_next_ms, bu_first_ms, bu_last_ms, bu_rng = 0x2545F491u;
+static uint16_t      bu_left, bu_done, bu_failed, bu_skipped;
+static uint8_t       bu_lo = 40, bu_hi = 80;
+static uint32_t      bu_first_ms, bu_last_ms, bu_rng = 0x2545F491u;
+/* The gaps run on the system tick, checked every pass (timer_read32 is a
+ * 64-bit software divide here, ~250 us under the row ISR); `due` latches,
+ * so a wait that outlasts the 16-bit tick's ~349 ms wrap stays due. */
+static systime_t     bu_t0;
+static sysinterval_t bu_wait;
+static bool          bu_due;
 
 static uint32_t bu_gap(void)
 {
@@ -1822,8 +1833,10 @@ bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms)
     bu_done = bu_failed = bu_skipped = 0;
     bu_first_ms = bu_last_ms = 0;
     bu_rng ^= timer_read32() | 1u;
-    bu_next_ms = timer_read32() + bu_gap();
-    bu_left    = n;
+    bu_t0   = chVTGetSystemTimeX();
+    bu_wait = TIME_MS2I(bu_gap());
+    bu_due  = false;
+    bu_left = n;
     return true;
 }
 
@@ -1835,7 +1848,11 @@ void rtc_burst_stop(void)
 /* True if it read this pass. */
 static bool burst_step(void)
 {
-    if (!bu_left || (int32_t)(timer_read32() - bu_next_ms) < 0) return false;
+    if (!bu_left) return false;
+    if (!bu_due) {
+        if (chTimeDiffX(bu_t0, chVTGetSystemTimeX()) < bu_wait) return false;
+        bu_due = true;
+    }
     if (rtc_pass_used_bus() || !bus_admit()) {
         if (bu_skipped < 0xFFFFu) bu_skipped++;
         return false;
@@ -1851,7 +1868,9 @@ static bool burst_step(void)
     if (ok) bu_done++;
     else if (bu_failed < 0xFFFFu) bu_failed++;
     bu_left--;
-    bu_next_ms = now + bu_gap();
+    bu_t0   = chVTGetSystemTimeX();
+    bu_wait = TIME_MS2I(bu_gap());
+    bu_due  = false;
     return true;
 }
 

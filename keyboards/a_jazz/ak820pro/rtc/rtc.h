@@ -76,6 +76,9 @@ void     rtc_wake_abandon(void);   /* sleep.c's bound: what is left ends now */
 bool     rtc_wake_slept(uint32_t *slept_s, bool *from_pcf);
 void     rtc_wake_gauge_taken(void);
 bool     rtc_pass_used_bus(void);
+/* The RTC's seconds since boot, slept ones included: one volatile read, so
+ * cheap and ISR-safe (QMK's timer_read32 is a 64-bit software divide here). */
+uint32_t rtc_seconds_since_boot(void);
 void     rtc_pass_mark(void);
 int16_t  rtc_wake_acq_step_ms(void);
 uint8_t  rtc_wake_acq_result(void);   /* the acquisition's state: 2 done, 3 aborted */
