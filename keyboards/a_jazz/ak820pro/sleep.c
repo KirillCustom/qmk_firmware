@@ -355,7 +355,40 @@ static void wake_ring_put(uint32_t counted) {
     e->strays  = ds_strays;
 }
 
+/* The last sleep with a stray (plans/BACKLOG.md, "A stray-wake storm"): what
+ * was pending when a WFI first returned with no wake pin and no second, and
+ * how many strays more came within that counted second (a storm, or sparse
+ * returns). Op 24's slot 8. Read registers only: no side effects. */
+typedef struct __attribute__((packed)) {
+    uint16_t seq;               /* the ring entry this sleep will write */
+    uint16_t same_s;            /* strays within the first one's counted second */
+    uint32_t first_s;           /* the counted second of the first */
+    uint32_t ris0, ris1, ris2;  /* each port's whole RIS, not the wake mask's */
+    uint32_t ispr;              /* NVIC->ISPR[0] */
+    uint32_t icsr;              /* SCB->ICSR: VECTPENDING, PENDSVSET, PENDSTSET */
+} stray_diag_t;
+_Static_assert(sizeof(stray_diag_t) == 28, "op 24's slot 8 is 28 bytes");
+static stray_diag_t stray_diag;
+
+static inline void stray_note(uint32_t strays, uint32_t secs) {
+    if (strays == 0) {
+        stray_diag.seq     = wake_seq;
+        stray_diag.same_s  = 0;
+        stray_diag.first_s = secs;
+        stray_diag.ris0    = SN_GPIO0->RIS;
+        stray_diag.ris1    = SN_GPIO1->RIS;
+        stray_diag.ris2    = SN_GPIO2->RIS;
+        stray_diag.ispr    = NVIC->ISPR[0];
+        stray_diag.icsr    = SCB->ICSR;
+    }
+    if (secs == stray_diag.first_s && stray_diag.same_s < 0xFFFFu) stray_diag.same_s++;
+}
+
 bool sleep_wake_ring_fill(uint8_t slot, uint8_t *out) {
+    if (slot == 8u) {
+        memcpy(out, &stray_diag, sizeof(stray_diag));
+        return true;
+    }
     if (slot >= 8u) return false;
     memcpy(out, &wake_ring[slot], sizeof(wake_entry_t));
     memcpy(&out[26], &wake_seq, 2);
@@ -493,6 +526,9 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
                 break;
             }
             if (second) continue;   /* a second is not a stray */
+#ifdef AK820_DEV_HOOKS
+            stray_note(strays, secs);
+#endif
             if (++strays >= DS_STRAYS_MAX) {
                 ds_reason = SLEEP_WAKE_STRAYS;
                 break;

@@ -418,19 +418,34 @@ static void draw_conn_row(void);      // three-transport strip, top row
  * the band last showed. */
 static playback_t pb     = {.timeout = PLAYBACK_TIMEOUT_MS};
 static uint16_t   pb_pos = 0;
-
-void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur) {
-    display_set_playback_for(state, pos, dur, PLAYBACK_TIMEOUT_MS);
-}
+/* Set with a title (the lock-LED channel's type 3): it ends with that title,
+ * cleared by anyone or expired (codex, the lease verify, P2 1 and P3 2).
+ * Raw HID's readout keeps its own 20 s lease, apart from the text. */
+static bool       pb_titled = false;
 
 /* Raw HID pushes a position every poll, so 20 s of silence means the host is
  * gone. The lock-LED channel refreshes every 60 s and loses frames to the
  * radio, so its readout lives longer; whichever set it last decides. A host
  * word ends any media key's optimistic freeze. */
-void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms) {
+static void set_playback(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms, bool titled) {
     uint32_t now = timer_read32();
     if (playback_set(&pb, state, pos, dur, timeout_ms, now)) clock_force_repaint = true;   // band changes owner: repaint it whole
-    pb_pos = playback_shown(&pb, now);
+    pb_pos    = playback_shown(&pb, now);
+    pb_titled = titled && pb.active;
+}
+
+void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur) {
+    set_playback(state, pos, dur, PLAYBACK_TIMEOUT_MS, false);
+}
+
+void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms) {
+    set_playback(state, pos, dur, timeout_ms, true);
+}
+
+/* The title went, cleared or expired: a readout set with it goes too. */
+static void playback_title_gone(void) {
+    if (pb_titled && playback_off(&pb)) clock_force_repaint = true;
+    pb_titled = false;
 }
 
 /* Freeze/unfreeze on the media key, the same optimistic trick the transport
@@ -2389,6 +2404,7 @@ void display_set_text_icon(uint8_t icon) {
 }
 
 void display_clear_text(void) {
+    playback_title_gone();
     text_buf[0][0] = '\0';
     text_buf[1][0] = '\0';
     icon_guessed = false;
@@ -3135,6 +3151,7 @@ static void draw_text_slot(bool force) {
     if (text_present && timer_elapsed32(text_stamp) > DISPLAY_TEXT_TIMEOUT_MS) {
         text_present = false;
         text_dirty   = true;
+        playback_title_gone();
     }
     icon_guess_expire(timer_read32());
     if (!force && !text_dirty) return;
@@ -3269,6 +3286,7 @@ void display_sleep_wake(void) {
         text_dirty   = true;
     }
     if (playback_off(&pb)) clock_force_repaint = true;
+    pb_titled = false;
 }
 
 void display_wake_corrected(void) {
