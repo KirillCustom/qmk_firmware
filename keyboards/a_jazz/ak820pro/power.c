@@ -1,7 +1,9 @@
 // Copyright 2026 JD Lien
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* The power caps: the idle ladder and its modes, and the low-battery lights
- * cut. See power.h; the design is plans/PHASE2-BUILD-PLAN.md, section 4.
+ * cut. See power.h; the design is plans/PHASE2-BUILD-PLAN.md, section 4, and
+ * the timings and Power saver's typing ceiling are
+ * plans/POWER-MODES-REVISION-PLAN.md's.
  *
  * Why: nothing ever turned anything off. The RGB matrix and the LCD backlight
  * ran at the user's settings for as long as the board had power, touched or
@@ -10,14 +12,14 @@
  * keyboard sits idle ~88% of the time.
  *
  * Every stage is a CAP below the user's settings, never a change to them: the
- * dim through a ceiling on the lighting's own value (rgb_matrix_hsv_to_rgb,
- * below), the off stages through the driver's power scale
- * (sn32f2xx_set_power_scale), the screen through a backlight ceiling
- * (display_set_backlight_cap). So nothing reaches the EEPROM, VIA's view of
- * the lighting is unchanged, and the parameter overlay -- which polls the
- * rgb_matrix config -- does not fire. It is also why the low-battery cut lives
- * here: as a cap, the user's own RGB toggle cannot turn the lights back on
- * underneath it, which rgb_matrix_disable_noeeprom() allowed.
+ * dim, and Power saver while typing, through a ceiling on the lighting's own
+ * value (rgb_matrix_hsv_to_rgb, below), the off stages through the driver's
+ * power scale (sn32f2xx_set_power_scale), the screen through a backlight
+ * ceiling (display_set_backlight_cap). So nothing reaches the EEPROM, VIA's
+ * view of the lighting is unchanged, and the parameter overlay -- which polls
+ * the rgb_matrix config -- does not fire. It is also why the low-battery cut
+ * lives here: as a cap, the user's own RGB toggle cannot turn the lights back
+ * on underneath it, which rgb_matrix_disable_noeeprom() allowed.
  *
  * Battery only (battery_on_battery): with the cable in, every mode is Always
  * on. The wake is the keypress itself (or the knob), which also types as
@@ -37,19 +39,30 @@
 
 /* Each mode's idle times, ms: the RGB to the dim cap, the RGB off with the
  * screen capped at SCREEN_DIM_LEVEL, the screen's backlight off, and the deep
- * sleep (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, section 1: SLEEP-PLAN.md's
- * first draft, to tune in use). The screen goes off when the board sleeps:
- * its dim level needs the 20 kHz tick, which a sleep stops. */
+ * sleep (sleep.c; plans/DEEP-SLEEP-BUILD-PLAN.md, section 1); then the
+ * lighting's value ceiling while typing (ACTIVE).
+ *
+ * Round times and two steps at most (plans/POWER-MODES-REVISION-PLAN.md):
+ * the RGB goes off with the screen, so stage_for() returns SCREEN_OFF before
+ * LIGHTS_OFF and no mode reaches LIGHTS_OFF. It stays for the bench to force:
+ * the stage numbers are on the wire. The screen goes off when the board
+ * sleeps: its dim level needs the 20 kHz tick, which a sleep stops. */
 typedef struct {
     uint32_t dim_ms, lights_off_ms, screen_off_ms, sleep_ms;
+    uint8_t  active_val;
 } ladder_t;
 
+/* Power saver's ceiling while typing: about half as bright to the eye under
+ * QMK's CIE curve, a quarter of the LED power. A ceiling, not a halving, so a
+ * board already this dim keeps its colours. */
+#define SAVER_VAL 128u
+
 static const ladder_t ladders[POWER_MODE_COUNT] = {
-    [POWER_MODE_FULL]   = {NEVER, NEVER, NEVER, NEVER},
-    [POWER_MODE_NORMAL] = {60000u, 300000u, 420000u, 420000u},    /* 1, 5, 7 min; asleep at 7 */
-    [POWER_MODE_SAVER]  = {30000u, 120000u, 180000u, 180000u},    /* 30 s, 2, 3 min; asleep at 3 */
-    [POWER_MODE_MINIMAL] = {0u, 0u, 0u, 30000u},                  /* dark at once, even typing; asleep
-                                                                   * after a 30 s pause */
+    [POWER_MODE_FULL]   = {NEVER, NEVER, NEVER, NEVER, 255u},
+    [POWER_MODE_NORMAL] = {600000u, 1200000u, 1200000u, 1200000u, 255u},   /* dim 10 min; dark and asleep at 20 */
+    [POWER_MODE_SAVER]  = {60000u, 180000u, 180000u, 180000u, SAVER_VAL}, /* dim 1 min; dark and asleep at 3 */
+    [POWER_MODE_MINIMAL] = {0u, 0u, 0u, 60000u, 255u},                    /* dark at once, even typing; asleep
+                                                                           * after a 1 min pause */
 };
 
 /* Minimal mode's dark screen lights, at the user's level, for this long after
@@ -82,7 +95,8 @@ static bool          low_owed   = false;   /* ... and waiting for a lit screen *
 static uint16_t      low_sessions = 0;     /* battery_session_count() when it was noted */
 static bool          announce   = false;
 static bool          wake_owed  = false;   /* a long sleep's "6h use left", for a free band */
-static uint8_t       val_cap    = 255;
+static uint8_t       want_val   = 255;     /* the ceiling ACTIVE takes: the mode's, Saver's when low */
+static uint8_t       val_cap    = 255;     /* the ceiling applied, the stage's */
 #ifdef AK820_DEV_HOOKS
 static uint8_t  forced      = 0xFF;   /* HC_DEVHOOK op 14: a stage held, 0xFF none */
 static uint32_t bench_sleep = 0;      /* HC_DEVHOOK: a short sleep time for the bench, 0 none */
@@ -104,6 +118,7 @@ static void apply(void) {
     uint8_t scale = 255, cap = BACKLIGHT_NO_CAP, vcap = 255;
     switch (stage) {
         case POWER_STAGE_ACTIVE:
+            vcap = want_val;
             break;
         case POWER_STAGE_DIM:
             vcap = DIM_VAL;
@@ -137,10 +152,11 @@ static void apply(void) {
     if (repaint) rgb_matrix_reinit_effect();
 }
 
-/* The dim stage's ceiling on every colour the effects convert, QMK's weak hook
+/* The ceiling on every colour the effects convert, QMK's weak hook
  * (quantum/rgb_matrix/rgb_matrix.c). Every effect this board enables goes
- * through it, directly or through effect_runner_i; DRIFT's cached palette
- * keys on power_val_cap() so it rebuilds when the cap moves. */
+ * through it, directly or through effect_runner_i, but DRIFT: its palette is
+ * built uncapped, and it caps its own value knob with power_val_cap()
+ * (rgb_matrix_kb.inc). */
 rgb_t rgb_matrix_hsv_to_rgb(hsv_t hsv) {
     if (hsv.v > val_cap) hsv.v = val_cap;
     return hsv_to_rgb(hsv);
@@ -189,15 +205,18 @@ void power_task(void) {
         display_set_param_status(mode_names[mode]);
     }
     power_stage_t want  = POWER_STAGE_ACTIVE;
+    uint8_t       wval  = 255;
     bool          low   = false;
     uint16_t      level = battery_level_permille();
     if (battery_on_battery()) {
         uint32_t idle = last_input_activity_elapsed();
         low           = level <= LOW_CAP_PM;   /* LEVEL_UNKNOWN (0xFFFF) is not low */
         want          = stage_for(&ladders[mode], idle);
+        wval          = ladders[mode].active_val;
         if (low) {
             power_stage_t saver = stage_for(&ladders[POWER_MODE_SAVER], idle);
             if (saver > want) want = saver;
+            if (wval > SAVER_VAL) wval = SAVER_VAL;
         }
     }
     low_now = low;
@@ -214,13 +233,22 @@ void power_task(void) {
     }
     if (!low) low_owed = false;
 #ifdef AK820_DEV_HOOKS
-    if (forced != 0xFF) want = (power_stage_t)forced;
+    if (forced != 0xFF) {
+        want = (power_stage_t)forced;
+        /* A held stage ignores the supply, and so does its ceiling, so the
+         * bench can measure Saver's on USB. */
+        if (!battery_on_battery()) wval = ladders[mode].active_val;
+    }
 #endif
     bool lit = mode == POWER_MODE_MINIMAL &&
                (display_message_recent(MESSAGE_WAKE_MS) || display_debug_active());
-    if (want != stage || lit != shown_lit) {
+    /* The ceiling moves without a stage change too (Fn+B into or out of Saver,
+     * the cable, the low cap), and apply() repaints only when what it applies
+     * changes: under the dim, a new want_val changes nothing. */
+    if (want != stage || lit != shown_lit || wval != want_val) {
         stage     = want;
         shown_lit = lit;
+        want_val  = wval;
         apply();
     }
     /* A wake after a long sleep: time left in hours of use, once it matters
