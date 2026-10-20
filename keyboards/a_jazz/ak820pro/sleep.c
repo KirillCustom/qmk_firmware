@@ -28,7 +28,7 @@
  * multiple of 4; never executed) ahead of this file's code move all of it
  * by exactly that much, with nothing else changed: no instruction, and no
  * RAM. "R" (SHF_GNU_RETAIN) keeps the section from --gc-sections. */
-#define DS_PAD 64
+#define DS_PAD 228
 #define DS_STR_(x) #x
 #define DS_STR(x)  DS_STR_(x)
 __asm__(".pushsection .text.ak820_ds_pad, \"axR\", %progbits\n\t"
