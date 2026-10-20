@@ -31,10 +31,10 @@
 /* A session changes only after this long with no admitted request: no packet
  * the radio delayed can outlive it (the dongle forwards within milliseconds
  * and stores nothing), and two owners cannot interleave. */
-/* In whole seconds of the caller's seconds count (rtc_seconds_since_boot:
- * one volatile read, where a millisecond read is a software 64-bit divide).
- * Two counts guarantee at least one full second; the host waits 2 s. */
-#define RAW81_SESSION_IDLE_S 2u
+/* The session's idle is the caller's: an elapsed-time count that no clock
+ * adjustment moves (ch582f_ajazz.c extends the 16-bit system tick; the
+ * RTC's seconds count is NOT elapsed time: a phase set or a wake correction
+ * moves it, codex's latency review). The plan's minimum is 1 s. */
 
 typedef enum { RAW81_IDLE = 0, RAW81_COLLECT = 1, RAW81_QUARANTINE = 2 } raw81_state_t;
 
@@ -77,7 +77,7 @@ typedef struct {
     bool          have_session;
     uint8_t       session;
     uint16_t      last_seq;    /* the last ADMITTED seq in the session */
-    uint32_t      admitted_s;  /* when it was admitted, in the caller's seconds */
+    uint32_t      admitted_at; /* when it was admitted, in the caller's long count */
     /* the frame just committed (every verdict but BADSUM, TAINT, LIFETIME) */
     uint8_t       c_session;
     uint16_t      c_seq;
@@ -110,13 +110,15 @@ void raw81_window_done(raw81_rx_t *rx, bool matched);
 bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks);
 /* 34 bytes are in: check the taint, the lifetime, the sum, the envelope, the
  * session, the freshness and the allow-list. */
-/* now_s is used only for the session's idle (RAW81_SESSION_IDLE_S). */
+/* now_long and idle_long are the caller's elapsed-time count, used only for
+ * the session's idle: another session waits until idle_long has passed since
+ * the last admission. */
 raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks,
-                             uint32_t now_s);
+                             uint32_t now_long, uint32_t idle_long);
 /* The caller dispatched a request: its identity (the one the caller reserved
  * at commit) becomes the session's last admitted seq, starting the session if
  * it was new. BUSY never refreshes the idle time; only this does. */
-void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_s);
+void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_long);
 
 /* The positive allow-list over a 26-byte inner command (exact bytes). */
 bool raw81_allowed(const uint8_t *inner);

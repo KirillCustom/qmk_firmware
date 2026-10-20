@@ -656,7 +656,6 @@ static eventflags_t uart_err_poll(void) {
  * Every UART writer is in the main loop (the ACK writes, the A-frames, this
  * pair): the single-writer rule the pair's free-space check relies on. */
 #include "raw81.h"
-#include "rtc/rtc.h"   /* rtc_seconds_since_boot: the session idle, without a ms read */
 #define RAW81_SILENCE_TICKS ((uint16_t)TIME_MS2I(5))    /* 938 at 187.5 kHz */
 #define RAW81_LIFETIME_TICKS ((uint16_t)TIME_MS2I(20))  /* 3x the measured 6-7 ms */
 #define RAW91_ACK_WINDOW_MS 15u
@@ -664,6 +663,23 @@ static eventflags_t uart_err_poll(void) {
 
 static raw81_rx_t r81;
 static bool       r81_inited;
+
+/* Elapsed time for the session idle (R4-2): the 16-bit system tick, extended
+ * here by adding each pass's delta. A counter read and an add, where
+ * timer_read32() is a software 64-bit divide; and unlike the RTC's seconds
+ * count, no clock adjustment moves it (codex's latency review). A pass
+ * longer than the tick's wrap (~0.35 s) or a deep sleep (the tick stands
+ * still) only under-counts, which keeps a session busy longer: the safe
+ * direction; and a wake ends the session anyway (r81_reset). */
+#define RAW81_SESSION_IDLE_LONG ((uint32_t)CH_CFG_ST_FREQUENCY)   /* 1 s */
+static uint32_t  r81_long;
+static systime_t r81_long_last;
+static inline uint32_t r81_long_now(void) {
+    systime_t now = chVTGetSystemTimeX();
+    r81_long += (uint32_t)chTimeDiffX(r81_long_last, now);
+    r81_long_last = now;
+    return r81_long;
+}
 
 /* The drain's bulk read (ch582_task): one chnReadTimeout refills a local
  * buffer, never with more than the drain's cap still allows. Returns 1 with
@@ -747,7 +763,7 @@ static void r81_queue_receipt(uint8_t status) {
 /* 34 bytes are in: the verdict, and the reservation (R2-3). */
 static void r81_on_frame(void) {
     raw81_verdict_t v = raw81_commit(&r81, uart_err_poll() != 0, (uint16_t)chVTGetSystemTimeX(),
-                                     RAW81_LIFETIME_TICKS, rtc_seconds_since_boot());
+                                     RAW81_LIFETIME_TICKS, r81_long_now(), RAW81_SESSION_IDLE_LONG);
     switch (v) {
         case RAW81_V_OK:
             if (!r81_linked() || r81_req.full || r81_resp.n) {
@@ -783,7 +799,7 @@ static void r81_dispatch(void) {
     memset(buf, 0, sizeof(buf));
     memcpy(buf, r81_req.inner, RAW81_INNER);
     via_custom_value_command_kb(buf, RAW81_PAYLOAD);
-    raw81_admit(&r81, r81_req.session, r81_req.seq, rtc_seconds_since_boot());
+    raw81_admit(&r81, r81_req.session, r81_req.seq, r81_long_now());
     r81_dispatched++;
     uint8_t p[RAW81_PAYLOAD];
     raw81_receipt(p, r81_req.session, r81_req.seq, RAW81_ST_OK, r81_req.seq, buf);
@@ -1442,6 +1458,7 @@ void ch582_task(void) {
      * function has no early return. */
     r81_ensure();
     r81_depth++;
+    (void)r81_long_now();   /* every pass, so no gap reaches the tick's wrap */
 #endif
     /* Rolling 3-byte window over the RX stream. The module interleaves two frame
      * formats with no length prefix, and the stream can drop bytes on a burst, so

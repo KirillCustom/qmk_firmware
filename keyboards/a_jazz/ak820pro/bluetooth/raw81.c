@@ -125,7 +125,7 @@ bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks) {
 }
 
 raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks,
-                             uint32_t now_s) {
+                             uint32_t now_long, uint32_t idle_long) {
     if (uart_err) rx->tainted = true;
     if (rx->tainted) {
         abort_to(rx, &rx->taint);
@@ -161,14 +161,14 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, u
             rx->stale++;
             return RAW81_V_STALE;
         }
-    } else if (rx->have_session && now_s - rx->admitted_s < RAW81_SESSION_IDLE_S) {
+    } else if (rx->have_session && now_long - rx->admitted_at < idle_long) {
         /* Another session while this one is live: two owners, or a packet
          * from before a host restart. Neither may interleave. */
         rx->busy++;
         return RAW81_V_BUSY;
     }
     /* Otherwise a new session may start here (no session, or this one idle
-     * for RAW81_SESSION_IDLE_S): admitting it is the caller's raw81_admit(). */
+     * for idle_long): admitting it is the caller's raw81_admit(). */
     if (!raw81_allowed(&p[RAW81_HEAD])) {
         rx->forbidden++;
         return RAW81_V_FORBIDDEN;
@@ -181,11 +181,11 @@ raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, u
 /* The identity is the reserved request's (copied at commit into the caller's
  * request slot), never c_session/c_seq: a later frame may overwrite those
  * before the deferred dispatch (codex, revision 3's verify, must-fix 2). */
-void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_s) {
+void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_long) {
     rx->have_session = true;
     rx->session      = session;
     rx->last_seq     = seq;
-    rx->admitted_s   = now_s;
+    rx->admitted_at  = now_long;
 }
 
 bool raw81_allowed(const uint8_t *in) {
