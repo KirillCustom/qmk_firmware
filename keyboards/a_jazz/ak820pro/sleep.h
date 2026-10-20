@@ -3,6 +3,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <ch.h>
 
 /* The deep sleep: the idle ladder's last stage, in every build
  * (plans/DEEP-SLEEP-BUILD-PLAN.md). power.c says when it is wanted
@@ -17,10 +18,14 @@
  * recovery's steps, the sleep itself, and the pass budget's mark. */
 void sleep_task(void);
 
-/* The pass budget (plan section 4, "The budget"): microseconds since the
+/* The pass budget (plan section 4, "The budget"): system ticks since the
  * pass began. Marked at the end of each pass, so the next pass's count
- * includes its keyboard and raw-HID work, which run before housekeeping. */
-uint32_t sleep_pass_us(void);
+ * includes its keyboard and raw-HID work, which run before housekeeping.
+ * Compare with TIME_US2I() of a constant, which folds at compile time:
+ * converting the count instead (TIME_I2US) is a 64-bit software divide on
+ * this M0, ~250 us under the row ISR, and rtc_fast_task asks every pass
+ * (Gremlin's 10-20 ge10 count, +39 against +11 per 1000 requests). */
+sysinterval_t sleep_pass_ticks(void);
 
 /* A wake's recovery is under way: no sleep, and deferred flash writes wait. */
 bool sleep_recovering(void);

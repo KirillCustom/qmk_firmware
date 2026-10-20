@@ -1654,7 +1654,7 @@ static bool rtc_time_epoch(const rtc_time_t *t, time_t *e)
 
 static bool bus_admit(void)
 {
-    return display_bus_idle() && sleep_pass_us() < RTC_ADMIT_US;
+    return display_bus_idle() && sleep_pass_ticks() < TIME_US2I(RTC_ADMIT_US);
 }
 
 #ifdef AK820_DEV_HOOKS
@@ -2016,7 +2016,7 @@ void rtc_fast_task(void)
         display_defer_pass();
         return;
     }
-    if (sleep_pass_us() >= RTC_ADMIT_US) return;   /* a late pass: the transaction waits a pass */
+    if (sleep_pass_ticks() >= TIME_US2I(RTC_ADMIT_US)) return;   /* a late pass: the transaction waits a pass */
     uint32_t n0 = pcf_xfers;
     if (acq_state == ACQ_WAIT_SPLASH || acq_active()) acquisition_step();
 #ifdef AK820_DEV_HOOKS

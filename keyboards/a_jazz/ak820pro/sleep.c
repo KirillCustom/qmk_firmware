@@ -35,8 +35,8 @@ void last_encoder_activity_trigger(void);
  * one starts: QMK's keyboard and raw-HID work run before housekeeping. */
 static systime_t pass_t0;
 
-uint32_t sleep_pass_us(void) {
-    return (uint32_t)TIME_I2US((sysinterval_t)(systime_t)(chVTGetSystemTimeX() - pass_t0));
+sysinterval_t sleep_pass_ticks(void) {
+    return (sysinterval_t)(systime_t)(chVTGetSystemTimeX() - pass_t0);
 }
 
 /* ---- USB presence ------------------------------------------------------------
