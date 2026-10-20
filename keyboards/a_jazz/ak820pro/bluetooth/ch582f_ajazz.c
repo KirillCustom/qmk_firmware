@@ -414,7 +414,11 @@ void ch582_lockchan_clear(void) { lockchan_clear_stats(&lockchan); }
 /* Only while the radio is the active host: in cable mode the LED state the
  * band shows is USB's, which a radio frame must not hold (codex, flash 2h). */
 bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scroll(&lockchan); }
-#    define LOCKCHAN_LINK_LOST() lockchan_link_lost(&lockchan)
+/* Every site where the link may move also drops stage 1's pending echo, so a
+ * reply cannot leave on a link other than its request's (r81 below; codex
+ * stage-1 review, should-fix 4). */
+static void r81_link_lost(void);
+#    define LOCKCHAN_LINK_LOST() do { lockchan_link_lost(&lockchan); r81_link_lost(); } while (0)
 #else
 #    define LOCKCHAN_LINK_LOST() ((void)0)
 #endif
@@ -669,6 +673,7 @@ static uint8_t     r81_buf[RAW81_LEN];
 static uint8_t     r81_len;
 static uint16_t    r81_start;
 static uint16_t    rx_last_byte_at;
+static bool        r81_tainted;   /* a UART error since the line was last silent */
 static bool        r91_pending, r91_ack_window;
 static uint8_t     r91_buf[RAW81_LEN];
 static uint16_t    r91_sent_at;
@@ -686,12 +691,28 @@ static void r81_abort(uint32_t *why) {
 static void r81_reset(void) {
     r81_state    = R81_IDLE;
     r81_boundary = true;
+    r81_tainted  = false;
     r91_pending  = false;
 }
 
+/* The link moved (LOCKCHAN_LINK_LOST): the reply waiting for the old one is
+ * dropped. A collection in progress is not cut loose, since its tail would
+ * reach the window; it goes to quarantine, which ends at the next silence. */
+static void r81_link_lost(void) {
+    r91_pending = false;
+    if (r81_state == R81_COLLECT) {
+        r81_state    = R81_QUARANTINE;
+        r81_boundary = false;
+    }
+}
+
 static void r81_commit(void) {
-    if (uart_err_poll()) {   /* an error during this drain, before the commit */
+    if (uart_err_poll() || r81_tainted) {   /* an error during this drain, before the commit */
         r81_abort(&r81_taint);
+        return;
+    }
+    if (timer_elapsed(r81_start) >= RAW81_LIFETIME_MS) {   /* crossed it mid-drain (should-fix 3) */
+        r81_abort(&r81_lifetime);
         return;
     }
     uint8_t s = 0;
@@ -1416,6 +1437,10 @@ void ch582_task(void) {
 #ifdef AK820_DEV_HOOKS
         /* A byte lost under a collection, or one older than its lifetime:
          * abort before another byte is taken (r81 above). */
+        /* Remembered in every state until the line is next silent: an error
+         * from a burst whose 81 is still in the queue must taint the
+         * collection it starts (codex stage-1 review, should-fix 2). */
+        if (f) r81_tainted = true;
         if (r81_state == R81_COLLECT) {
             if (f) r81_abort(&r81_taint);
             else if (timer_elapsed(r81_start) >= RAW81_LIFETIME_MS) r81_abort(&r81_lifetime);
@@ -1453,8 +1478,13 @@ void ch582_task(void) {
              * starts at a boundary (r81 above). A collection is left to its
              * lifetime. */
             if (r81_state != R81_COLLECT && timer_elapsed(rx_last_byte_at) >= RAW81_SILENCE_MS) {
+                /* Leaving quarantine, the window starts over too: bytes from
+                 * before the abort must not pair with bytes after it into a
+                 * phantom ACK or 5x (codex stage-1 review, must-fix 1). */
+                if (r81_state == R81_QUARANTINE) b2 = b1 = b0 = 0;
                 r81_state    = R81_IDLE;
                 r81_boundary = true;
+                r81_tainted  = false;
             }
 #endif
             break;
@@ -1484,10 +1514,19 @@ void ch582_task(void) {
             continue;
         }
         if (r81_boundary && c == 0x81) {
-            r81_state  = R81_COLLECT;
+            /* The window starts over at a collection: a pending `61 0D` (after
+             * a silence) must not meet a `0A` that follows the whole 81 and
+             * forge an ACK, which could release an A1 (codex stage-1 review,
+             * must-fix 1). */
+            b2 = b1 = b0 = 0;
             r81_buf[0] = c;
             r81_len    = 1;
             r81_start  = timer_read();
+            if (r81_tainted) {
+                r81_abort(&r81_taint);   /* from a burst already known corrupt */
+                continue;
+            }
+            r81_state = R81_COLLECT;
             continue;
         }
 #endif
