@@ -1006,7 +1006,10 @@ static void ch582_tx_pump(void) {
      * window does not close while an ACK may still be unread (R4-1). */
     if (r91_ack_window) {
         if (timer_elapsed(r91_window_at) < r91_window_ms) return;
-        if (rx_defer && timer_elapsed(r91_window_at) < r91_window_ms + RAW81_DEFER_CAP_MS) return;
+        if (rx_defer) {
+            if (timer_elapsed(r91_window_at) < r91_window_ms + RAW81_DEFER_CAP_MS) return;
+            ack_defer_overrun++;   /* forced closed past the cap, as the other overrides */
+        }
         r91_ack_window = false;
     }
 #endif
@@ -1873,10 +1876,14 @@ void ch582_task(void) {
      * expired on silence above). The pump then neither judges a timeout nor
      * starts a new frame (capped and counted inside it). */
     rx_defer = !drained || b0 == 0x61 || (b1 == 0x61 && b0 == 0x0D);
-    r81_dispatch();   /* at most one a pass; never nested (R2-2) */
 #endif
     ch582_tx_pump();
 #ifdef AK820_DEV_HOOKS
+    /* After the pump, not before: a select or pair it sends this pass calls
+     * LOCKCHAN_LINK_LOST, which cancels the reserved request BEFORE its text
+     * effect runs (codex, stage-2 implementation review, 3). At most one a
+     * pass; never nested (R2-2). Its response goes on a later pass. */
+    r81_dispatch();
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
     r81_depth--;
 #endif
