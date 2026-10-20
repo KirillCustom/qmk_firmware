@@ -303,6 +303,31 @@ static uint8_t  rc_timed_out;
 
 static void recovery_begin(uint8_t reason);
 
+/* The Deep-sleep itself, run from SRAM (.ramtext, copied at boot with .data;
+ * plans/DEEP-SLEEP-REGRESSION-2026-10-20.md). On b2a07e0d37 every deep sleep
+ * ended after one counted second. Its WFI was the second half of the first
+ * word in an 8-byte flash block, with straight-line code after it, and which
+ * builds failed followed only where the linker put the WFI: at 2 mod 8 with
+ * no branch after it, it failed every time; so any change anywhere could
+ * bring it back. The evidence fits the next block's fetch after the wake
+ * returning the stale one (the DSB's tail, the WFI and the CTRL write): the
+ * core ran 0x8f4f as `ldrh r7, [r1, #58]` (r7 = 0xbf30 sent the wake's store
+ * astray) and skipped the masks' loads. That is a hypothesis, not measured.
+ * From SRAM, nothing is fetched from the flash until ~1,300 cycles have
+ * passed and one flash word has been read and dropped. How long the flash
+ * needs is not measured either: do not shorten the wait without measuring
+ * it. noinline and long_call: the call from the flash is a blx to SRAM. */
+static const uint32_t ds_flash_word = 0x5A5AA5A5u;
+
+__attribute__((section(".ramtext"), noinline, long_call)) static void ds_deep_wfi(volatile uint32_t *pmu_ctrl, const volatile uint32_t *flash) {
+    *pmu_ctrl = 2u;   /* Deep-sleep (p. 75) */
+    __DSB();
+    __WFI();
+    *pmu_ctrl = 0u;
+    for (uint32_t d = 260u; d; d--) __asm volatile("");   /* ~5 cycles a pass: ~108 us at the IHRC's 12 MHz */
+    (void)*flash;
+}
+
 #ifdef AK820_DEV_HOOKS
 /* Each teardown's wake, the last eight (sleep.h), since the page keeps only
  * the last sleep's reason: on 10-19 a ~3 s wake an hour in, with no key,
@@ -447,10 +472,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
         /* Asleep. PRIMASK is set: a pending wake source ends the WFI, but no
          * handler runs; these vectors have none. */
         for (;;) {
-            SN_PMU->CTRL = 2;   /* Deep-sleep (p. 75) */
-            __DSB();
-            __WFI();
-            SN_PMU->CTRL = 0;
+            ds_deep_wfi(&SN_PMU->CTRL, &ds_flash_word);   /* from SRAM, see above */
             uint32_t r0 = SN_GPIO0->RIS & p0w, r1 = SN_GPIO1->RIS & p1w, r2 = SN_GPIO2->RIS & p2w;
             bool second = take_second();
             if (second) {
