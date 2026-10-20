@@ -13,7 +13,7 @@
 
 typedef enum {
     POWER_STAGE_ACTIVE = 0,   /* typing: the mode's ceiling (Power saver's 128) */
-    POWER_STAGE_DIM,          /* RGB at a quarter of its value */
+    POWER_STAGE_DIM,          /* RGB's value capped at 64, a quarter of full */
     POWER_STAGE_LIGHTS_OFF,   /* RGB dark, screen dimmed: only when the bench holds it */
     POWER_STAGE_SCREEN_OFF,   /* RGB dark, screen backlight off */
 } power_stage_t;

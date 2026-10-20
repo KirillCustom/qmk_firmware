@@ -51,7 +51,7 @@ VPATH += bluetooth
 VPATH += graphics
 VPATH += rtc
 
-# Board-local RGB effects (rgb_matrix_kb.inc): RAINFALL
+# Board-local RGB effects (rgb_matrix_kb.inc): RAINFALL and DRIFT
 RGB_MATRIX_CUSTOM_KB = yes
 
 # Debounce: per-key deferred. NOT the QMK default (sym_defer_g), NOT eager.

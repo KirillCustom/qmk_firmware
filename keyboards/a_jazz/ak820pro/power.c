@@ -7,7 +7,8 @@
  *
  * Why: nothing ever turned anything off. The RGB matrix and the LCD backlight
  * ran at the user's settings for as long as the board had power, touched or
- * not, and the MCU never sleeps (config.h, CORTEX_ENABLE_WFI_IDLE). Measured
+ * not, and the MCU never slept (config.h, CORTEX_ENABLE_WFI_IDLE) until the
+ * deep sleep below. Measured
  * at JD's settings (R1, 10-15): the RGB is 189 of the board's 306 mW, and the
  * keyboard sits idle ~88% of the time.
  *
@@ -53,8 +54,9 @@ typedef struct {
 } ladder_t;
 
 /* Power saver's ceiling while typing: about half as bright to the eye under
- * QMK's CIE curve, a quarter of the LED power. A ceiling, not a halving, so a
- * board already this dim keeps its colours. */
+ * QMK's CIE curve, a quarter of the LED power (about half on DRIFT, which caps
+ * its value knob after the curve). A ceiling, not a halving, so a board
+ * already this dim keeps its colours. */
 #define SAVER_VAL 128u
 
 static const ladder_t ladders[POWER_MODE_COUNT] = {
