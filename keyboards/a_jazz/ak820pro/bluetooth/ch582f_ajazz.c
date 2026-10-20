@@ -664,21 +664,61 @@ static eventflags_t uart_err_poll(void) {
 static raw81_rx_t r81;
 static bool       r81_inited;
 
-/* Elapsed time for the session idle (R4-2): the 16-bit system tick, extended
- * here by adding each pass's delta. A counter read and an add, where
- * timer_read32() is a software 64-bit divide; and unlike the RTC's seconds
- * count, no clock adjustment moves it (codex's latency review). A pass
- * longer than the tick's wrap (~0.35 s) or a deep sleep (the tick stands
- * still) only under-counts, which keeps a session busy longer: the safe
- * direction; and a wake ends the session anyway (r81_reset). */
+/* Elapsed time for the session idle and the response TTL (R4-1): the 16-bit
+ * system tick, extended by adding each delta. A counter read and an add,
+ * where timer_read32() is a software 64-bit divide; and unlike the RTC's
+ * seconds count, no clock adjustment moves it (codex's latency review).
+ * ⚠️ The extension must not depend on the main loop: a stall longer than
+ * the tick's wrap (~0.35 s; this board has recoverable stalls of seconds,
+ * watchdog.c) would lose whole wraps, and a response held through one
+ * would look fresh after the host's 3 s quiet (codex, v2 implementation
+ * review). So a virtual timer, run from the tick's interrupt, extends it
+ * every half wrap, as QMK's timer.c does for its own high bits; both
+ * paths extend under the lock. A deep sleep (the tick stands still) only
+ * under-counts, and a wake ends the session and the response anyway
+ * (r81_reset). */
 #define RAW81_SESSION_IDLE_LONG ((uint32_t)CH_CFG_ST_FREQUENCY)   /* 1 s */
-static uint32_t  r81_long;
-static systime_t r81_long_last;
-static inline uint32_t r81_long_now(void) {
+#if CH_CFG_ST_RESOLUTION < 32
+#    define RAW81_LONG_UPDATE ((sysinterval_t)1 << (CH_CFG_ST_RESOLUTION - 1))
+#endif
+static uint32_t         r81_long;
+static systime_t        r81_long_last;
+static virtual_timer_t  r81_long_vt;
+
+/* Under the lock. */
+static inline uint32_t r81_long_extend(void) {
     systime_t now = chVTGetSystemTimeX();
     r81_long += (uint32_t)chTimeDiffX(r81_long_last, now);
     r81_long_last = now;
     return r81_long;
+}
+
+static inline uint32_t r81_long_now(void) {
+    syssts_t sts = chSysGetStatusAndLockX();
+    uint32_t v   = r81_long_extend();
+    chSysRestoreStatusX(sts);
+    return v;
+}
+
+#if CH_CFG_ST_RESOLUTION < 32
+static void r81_long_tick(virtual_timer_t *vt, void *arg) {
+    (void)arg;
+    chSysLockFromISR();
+    r81_long_extend();
+    chVTSetI(vt, RAW81_LONG_UPDATE, r81_long_tick, NULL);
+    chSysUnlockFromISR();
+}
+#endif
+
+/* Thread context, once (r81_ensure). */
+static void r81_long_start(void) {
+    chSysLock();
+    r81_long_last = chVTGetSystemTimeX();
+    chSysUnlock();
+#if CH_CFG_ST_RESOLUTION < 32
+    chVTObjectInit(&r81_long_vt);
+    chVTSet(&r81_long_vt, RAW81_LONG_UPDATE, r81_long_tick, NULL);
+#endif
 }
 
 /* The drain's bulk read (ch582_task): one chnReadTimeout refills a local
@@ -729,6 +769,7 @@ static uint32_t r81_resp_at, r81_resp_expired;
 static inline void r81_ensure(void) {
     if (!r81_inited) {
         raw81_init(&r81);
+        r81_long_start();
         r81_inited = true;
     }
 }
@@ -866,8 +907,9 @@ static void r81_send_response(void) {
  * quarantined bytes, drops, dispatched, 91 frames sent, ACKs in the window,
  * deferred timeouts past the cap (u32 each). page 2: [0] state, [1] boundary,
  * [2] request pending, [3] response frames pending, [4] window open, [5]
- * window switched on, [6] session live, [7] session, [8..9] last admitted
- * seq, [10..13] short writes. */
+ * window switched on, [6] session live (admitted within the idle), [7]
+ * session, [8..9] last admitted seq, [10..13] short writes, [14..17]
+ * responses expired unsent. */
 void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
     r81_ensure();
     memset(out28, 0, 28);
@@ -884,7 +926,7 @@ void ch582_raw81_fill(uint8_t page, uint8_t *out28) {
         out28[3] = r81_resp.n;
         out28[4] = r91_ack_window ? 1 : 0;
         out28[5] = r91_window_on ? 1 : 0;
-        out28[6] = r81.have_session ? 1 : 0;
+        out28[6] = r81.have_session && r81_long_now() - r81.admitted_at < RAW81_SESSION_IDLE_LONG ? 1 : 0;
         out28[7] = r81.session;
         memcpy(&out28[8], &r81.last_seq, 2);
         memcpy(&out28[10], &r91_short_write, 4);
@@ -898,6 +940,18 @@ void ch582_raw81_clear_counters(void) {
     r81.qbytes = r81.busy = 0;
     r81_drops = r81_dispatched = r91_sent_tx = r91_acks = ack_defer_overrun = r91_short_write = 0;
     r81_resp_expired = 0;
+}
+
+/* The long clock's regression (HC_DEVHOOK op 17 sub 4): the main loop held
+ * for `ms` (a dev hook's deliberate stall, inside the HID handler; the
+ * watchdog's 12 s is far off), returning how far r81_long moved across it.
+ * With the virtual timer it is the whole stall; extended only by the main
+ * loop it would be the stall modulo the tick's wrap. */
+uint32_t ch582_raw81_stall(uint16_t ms) {
+    r81_ensure();
+    uint32_t a = r81_long_now();
+    wait_ms(ms);
+    return r81_long_now() - a;
 }
 
 /* HC_DEVHOOK op 19: the 91 ACK window on (true) or off, for the experiment
@@ -1473,7 +1527,7 @@ void ch582_task(void) {
      * function has no early return. */
     r81_ensure();
     r81_depth++;
-    (void)r81_long_now();   /* every pass, so no gap reaches the tick's wrap */
+    (void)r81_long_now();   /* the virtual timer keeps it; this is only a cheap refresh */
 #endif
     /* Rolling 3-byte window over the RX stream. The module interleaves two frame
      * formats with no length prefix, and the stream can drop bytes on a burst, so

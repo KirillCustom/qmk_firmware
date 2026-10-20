@@ -1109,8 +1109,23 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 17: {
-                    if (length < 32 || data[4] > 3) { data[0] = RTC_UNHANDLED; break; }
+                    if (length < 32 || data[4] > 4 || (data[4] == 4 && (data[5] == 0 || data[5] > 50))) {
+                        data[0] = RTC_UNHANDLED;
+                        break;
+                    }
                     uint8_t sub = data[4];
+                    if (sub == 4) {
+                        /* The long clock across a stall of [5] x 100 ms (at
+                         * most 5 s). Reply: 4, the ticks it moved (u32), the
+                         * ticks a second (u32). */
+                        uint16_t ms = (uint16_t)(data[5] * 100u);
+                        uint32_t d  = ch582_raw81_stall(ms), hz = CH_CFG_ST_FREQUENCY;
+                        memset(&data[4], 0, 28);
+                        data[4] = 4;
+                        memcpy(&data[5], &d, 4);
+                        memcpy(&data[9], &hz, 4);
+                        break;
+                    }
                     if (sub == 3) ch582_raw81_clear_counters();
                     ch582_raw81_fill(sub == 3 ? 0 : sub, &data[4]);
                     break;
