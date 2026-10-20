@@ -410,14 +410,31 @@ static void draw_conn_row(void);      // three-transport strip, top row
  * It expires on its own (PLAYBACK_TIMEOUT_MS). A stuck timer counting up
  * forever after the agent dies or the machine sleeps is exactly the kind of
  * confidently-wrong readout the text slot's expiry exists to prevent.  */
-#define PLAYBACK_TIMEOUT_MS 20000u
-#define PLAYBACK_MAX        24
+#define PLAYBACK_TIMEOUT_MS  20000u
+#define PLAYBACK_KEY_HOLD_MS 15000u   /* a media key's optimistic freeze, at most */
+#define PLAYBACK_MAX         24
 
 static bool     pb_active = false;
-static bool     pb_ticking = false;
-static uint16_t pb_pos = 0, pb_dur = 0;
-static uint32_t pb_stamp = 0;
+static bool     pb_ticking = false;  /* the host's word: advancing */
+static uint16_t pb_pos = 0, pb_dur = 0;   /* pb_pos: what the band shows */
+static uint16_t pb_base = 0;         /* the position at pb_base_ms ... */
+static uint32_t pb_base_ms = 0;      /* ... from which it advances by elapsed time */
+static uint32_t pb_stamp = 0;        /* the last setter's, for the expiry */
 static uint32_t pb_timeout = PLAYBACK_TIMEOUT_MS;   /* the last setter's */
+static bool     pb_held = false;     /* a media key froze it at pb_held_pos */
+static uint16_t pb_held_pos = 0;
+static uint32_t pb_held_ms = 0;
+
+/* The position at `now`: the base advanced by the whole seconds since, never
+ * past a known duration or 0xFFFF. From elapsed time, not a count of serviced
+ * ticks, so a stretch without housekeeping (Fn+D, an animation) costs nothing
+ * (codex, the play-times review, P2 5). */
+static uint16_t pb_at(uint32_t now) {
+    uint32_t p = pb_base;
+    if (pb_ticking) p += (now - pb_base_ms) / 1000u;
+    if (pb_dur && p > pb_dur) p = pb_dur;
+    return p > 0xFFFFu ? 0xFFFFu : (uint16_t)p;
+}
 
 void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur) {
     display_set_playback_for(state, pos, dur, PLAYBACK_TIMEOUT_MS);
@@ -425,7 +442,8 @@ void display_set_playback(uint8_t state, uint16_t pos, uint16_t dur) {
 
 /* Raw HID pushes a position every poll, so 20 s of silence means the host is
  * gone. The lock-LED channel refreshes every 60 s and loses frames to the
- * radio, so its readout lives longer; whichever set it last decides. */
+ * radio, so its readout lives longer; whichever set it last decides. A host
+ * word ends any media key's optimistic freeze. */
 void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms) {
     pb_timeout = timeout_ms;
     bool want = (state != 0);
@@ -433,10 +451,13 @@ void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_
         pb_active = want;
         clock_force_repaint = true;     // band changes owner: repaint it whole
     }
+    pb_base    = pos;
+    pb_base_ms = timer_read32();
     pb_pos     = pos;
     pb_dur     = dur;
     pb_ticking = want;      // the host only reports a position while PLAYING
-    pb_stamp   = timer_read32();
+    pb_held    = false;
+    pb_stamp   = pb_base_ms;
 }
 
 /* Freeze/unfreeze on the media key, the same optimistic trick the transport
@@ -452,28 +473,42 @@ void display_set_playback_for(uint8_t state, uint16_t pos, uint16_t dur, uint32_
  * cannot see, in which case the player is still going and the host will re-
  * assert it -- a frozen timer that resumes is a much smaller lie than the clock
  * flashing up and being replaced. */
+/* The freeze has a deadline of its own, PLAYBACK_KEY_HOLD_MS: a host that
+ * polls corrects it within a poll, but the lock lights send nothing when the
+ * player ignored the key (nothing changed), so the freeze would otherwise last
+ * the readout's whole 135 s (codex, the play-times review, P2 6). Past the
+ * deadline it is as if the key had not been pressed. */
 void display_playback_key(void) {
-    if (pb_active) pb_ticking = !pb_ticking;
+    if (!pb_active) return;
+    uint32_t now = timer_read32();
+    if (!pb_held) {             // freeze where it is
+        pb_held_pos = pb_at(now);
+        pb_held_ms  = now;
+        pb_held     = true;
+        pb_pos      = pb_held_pos;
+    } else {                    // resume from where it froze
+        pb_base    = pb_held_pos;
+        pb_base_ms = now;
+        pb_held    = false;
+        pb_pos     = pb_at(now);
+    }
 }
 
+/* Once a second, from housekeeping: the expiry, the freeze's deadline, and
+ * the position recomputed. It does not run past the end (at a track boundary
+ * the host's next word is a poll or a frame away, and a timer beyond the
+ * duration looks broken) and saturates rather than wraps (with dur == 0, a
+ * live stream, it would otherwise roll 65535 -> 0 after 18h12m). */
 void display_playback_tick(void) {
     if (!pb_active) return;
-    if (timer_elapsed32(pb_stamp) > pb_timeout) {
+    uint32_t now = timer_read32();
+    if (now - pb_stamp > pb_timeout) {
         pb_active = false;
         clock_force_repaint = true;
         return;
     }
-    if (!pb_ticking) return;    // paused: hold the value, do not advance it
-    /* Do not run past the end: at a track boundary the host's next push is up
-     * to a poll away, and a timer reading beyond the duration looks broken. */
-    /* Saturate rather than wrap. With dur == 0 (a live stream, no known length)
-     * the position would otherwise roll 65535 -> 0 after 18h12m and the timer
-     * would silently restart at 0:00. */
-    if (pb_dur) {
-        if (pb_pos < pb_dur) pb_pos++;
-    } else if (pb_pos < 0xFFFFu) {
-        pb_pos++;
-    }
+    if (pb_held && now - pb_held_ms > PLAYBACK_KEY_HOLD_MS) pb_held = false;
+    pb_pos = pb_held ? pb_held_pos : pb_at(now);
 }
 
 static uint8_t fmt_hms(char *out, uint16_t sec) {
@@ -2343,6 +2378,22 @@ void display_toggle_play_icon(void) {
     band_gen[BAND_TEXT]++;
 }
 
+/* The text slot's icon alone, keeping its lines: the lock-LED channel's
+ * transport frame (type 3), which carries a play/pause without resending the
+ * title. A no-op when no text is shown, since an icon alone brings nothing
+ * back. It is a host's word that the slot is current, so the slot's expiry
+ * restarts. */
+void display_set_text_icon(uint8_t icon) {
+    if (!text_present) return;
+    uint8_t new_icon = (icon <= DISPLAY_ICON_STOP) ? icon : DISPLAY_ICON_NONE;
+    text_stamp = timer_read32();
+    if (new_icon == text_icon) return;
+    text_icon    = new_icon;
+    text_present = text_buf[0][0] || text_buf[1][0] || (text_icon != DISPLAY_ICON_NONE);
+    text_dirty   = true;
+    band_gen[BAND_TEXT]++;
+}
+
 void display_clear_text(void) {
     text_buf[0][0] = '\0';
     text_buf[1][0] = '\0';
@@ -2374,7 +2425,7 @@ uint8_t display_get_text_line(uint8_t line, char *out, uint8_t max, uint8_t *ico
  * advanced by the 1 Hz tick). */
 void display_get_playback(bool *active, bool *ticking, uint16_t *pos, uint16_t *dur) {
     if (active) *active = pb_active;
-    if (ticking) *ticking = pb_ticking;
+    if (ticking) *ticking = pb_ticking && !pb_held;
     if (pos) *pos = pb_pos;
     if (dur) *dur = pb_dur;
 }

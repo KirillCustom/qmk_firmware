@@ -103,6 +103,8 @@ void display_set_text(uint8_t icon, const char *s, uint8_t len);
  * Setting line 0 via display_set_text() clears line 1, so a single-line
  * producer cannot strand a stale second line. */
 void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t len);
+/* The slot's icon alone, its lines kept; a no-op when no text is shown. */
+void display_set_text_icon(uint8_t icon);
 void display_clear_text(void);
 /* Read-only views of the text slot and the playback state (display.c), for
  * tests: no drawing, no state change. */

@@ -15,32 +15,33 @@ bool lockchan_media_parse(const lockchan_frame_t *f, lockchan_media_t *m) {
         *m = (lockchan_media_t){.type = LOCKCHAN_TYPE_CLEAR};
         return true;
     }
+    if (f->type == LOCKCHAN_TYPE_TRANSPORT) {
+        const uint8_t *p = f->payload;
+        if (f->len != LOCKCHAN_TRANSPORT_LEN || p[0] > 3 || p[1] > 1) return false;
+        *m = (lockchan_media_t){
+            .type  = LOCKCHAN_TYPE_TRANSPORT,
+            .icon  = p[0],
+            .state = p[1],
+            .pos   = (uint16_t)((p[2] << 8) | p[3]),
+            .dur   = (uint16_t)((p[4] << 8) | p[5]),
+        };
+        return true;
+    }
     if (f->type != LOCKCHAN_TYPE_NOW_PLAYING) return false;
-    if (f->len < 2) return false;
+    if (f->len < 2 || f->len > 2 + LOCKCHAN_MEDIA_MAX_L0 + LOCKCHAN_MEDIA_MAX_L1) return false;
     uint8_t icon = f->payload[0], n0 = f->payload[1];
-    bool    pb   = (icon & LOCKCHAN_MEDIA_PLAYBACK) != 0;
-    uint8_t tail = pb ? LOCKCHAN_MEDIA_PB_LEN : 0;
-    icon &= (uint8_t)~LOCKCHAN_MEDIA_PLAYBACK;
-    if (icon > 3) return false;                         /* any bit but 7 */
-    if (f->len < 2 + tail || f->len > 2 + LOCKCHAN_MEDIA_MAX_L0 + LOCKCHAN_MEDIA_MAX_L1 + tail) return false;
-    uint8_t text = (uint8_t)(f->len - 2 - tail);        /* both lines */
-    if (n0 > LOCKCHAN_MEDIA_MAX_L0 || n0 > text) return false;
-    uint8_t n1 = (uint8_t)(text - n0);
+    if (icon > 3) return false;                         /* any bit beyond 0-3 */
+    if (n0 > LOCKCHAN_MEDIA_MAX_L0 || n0 > f->len - 2) return false;
+    uint8_t n1 = (uint8_t)(f->len - 2 - n0);
     if (n1 > LOCKCHAN_MEDIA_MAX_L1) return false;
-    if (!printable(&f->payload[2], text)) return false;
-    const uint8_t *t = &f->payload[2 + text];           /* the playback bytes, if any */
-    if (pb && t[0] > 1) return false;                   /* state 0 or 1 */
+    if (!printable(&f->payload[2], (uint8_t)(n0 + n1))) return false;
     *m = (lockchan_media_t){
-        .type     = LOCKCHAN_TYPE_NOW_PLAYING,
-        .icon     = icon,
-        .n0       = n0,
-        .n1       = n1,
-        .l0       = &f->payload[2],
-        .l1       = &f->payload[2 + n0],
-        .playback = pb,
-        .state    = pb ? t[0] : 0,
-        .pos      = pb ? (uint16_t)((t[1] << 8) | t[2]) : 0,
-        .dur      = pb ? (uint16_t)((t[3] << 8) | t[4]) : 0,
+        .type = LOCKCHAN_TYPE_NOW_PLAYING,
+        .icon = icon,
+        .n0   = n0,
+        .n1   = n1,
+        .l0   = &f->payload[2],
+        .l1   = &f->payload[2 + n0],
     };
     return true;
 }
