@@ -656,6 +656,7 @@ static eventflags_t uart_err_poll(void) {
  * Every UART writer is in the main loop (the ACK writes, the A-frames, this
  * pair): the single-writer rule the pair's free-space check relies on. */
 #include "raw81.h"
+#include "rtc/rtc.h"   /* rtc_seconds_since_boot: the session idle, without a ms read */
 #define RAW81_SILENCE_TICKS ((uint16_t)TIME_MS2I(5))    /* 938 at 187.5 kHz */
 #define RAW81_LIFETIME_TICKS ((uint16_t)TIME_MS2I(20))  /* 3x the measured 6-7 ms */
 #define RAW91_ACK_WINDOW_MS 15u
@@ -663,6 +664,24 @@ static eventflags_t uart_err_poll(void) {
 
 static raw81_rx_t r81;
 static bool       r81_inited;
+
+/* The drain's bulk read (ch582_task): one chnReadTimeout refills a local
+ * buffer, never with more than the drain's cap still allows. Returns 1 with
+ * a byte, 0 when the queue is empty. */
+typedef struct {
+    uint8_t b[64];
+    size_t  n, i;
+} rx_buf_t;
+
+static inline size_t rx_take(rx_buf_t *r, uint8_t *c, size_t cap) {
+    if (r->i >= r->n) {
+        r->i = 0;
+        r->n = chnReadTimeout(&CH582_SERIAL_DRIVER, r->b, cap > sizeof(r->b) ? sizeof(r->b) : cap, TIME_IMMEDIATE);
+        if (r->n == 0) return 0;
+    }
+    *c = r->b[r->i++];
+    return 1;
+}
 
 typedef struct {
     bool     full;
@@ -728,7 +747,7 @@ static void r81_queue_receipt(uint8_t status) {
 /* 34 bytes are in: the verdict, and the reservation (R2-3). */
 static void r81_on_frame(void) {
     raw81_verdict_t v = raw81_commit(&r81, uart_err_poll() != 0, (uint16_t)chVTGetSystemTimeX(),
-                                     RAW81_LIFETIME_TICKS, timer_read32());
+                                     RAW81_LIFETIME_TICKS, rtc_seconds_since_boot());
     switch (v) {
         case RAW81_V_OK:
             if (!r81_linked() || r81_req.full || r81_resp.n) {
@@ -764,7 +783,7 @@ static void r81_dispatch(void) {
     memset(buf, 0, sizeof(buf));
     memcpy(buf, r81_req.inner, RAW81_INNER);
     via_custom_value_command_kb(buf, RAW81_PAYLOAD);
-    raw81_admit(&r81, r81_req.session, r81_req.seq, timer_read32());
+    raw81_admit(&r81, r81_req.session, r81_req.seq, rtc_seconds_since_boot());
     r81_dispatched++;
     uint8_t p[RAW81_PAYLOAD];
     raw81_receipt(p, r81_req.session, r81_req.seq, RAW81_ST_OK, r81_req.seq, buf);
@@ -1592,6 +1611,16 @@ void ch582_task(void) {
 #ifdef AK820_DEV_HOOKS
     bool drained = false;   /* the drain reached an empty queue (not the 64-byte cap) */
 #endif
+#ifdef AK820_DEV_HOOKS
+    /* One bulk read refills a local buffer, instead of a lock round trip
+     * per byte: draining a 34-byte request byte by byte cost ~3.4 ms of the
+     * pass (stage 2's follow-up). Never more than the cap still allows, so
+     * every byte taken is processed in this drain. */
+    rx_buf_t rxb = {.n = 0, .i = 0};
+#    define RX_TAKE(cp) rx_take(&rxb, (cp), (size_t)(64u - bytes_processed))
+#else
+#    define RX_TAKE(cp) chnReadTimeout(&CH582_SERIAL_DRIVER, (cp), 1, TIME_IMMEDIATE)
+#endif
 
     /* Drain the queue fully (capped to bound worst-case latency) so a connect
      * burst doesn't overflow the serial input buffer and shed bytes. */
@@ -1608,7 +1637,7 @@ void ch582_task(void) {
             bytes_processed++;
         } else
 #endif
-        if (chnReadTimeout(&CH582_SERIAL_DRIVER, &c, 1, TIME_IMMEDIATE) == 0) {
+        if (RX_TAKE(&c) == 0) {
 #ifdef AK820_DEV_HOOKS
             /* The queue is empty. After RAW81_SILENCE_TICKS with no byte the
              * line was silent that long: a quarantine ends (the window starts

@@ -31,7 +31,10 @@
 /* A session changes only after this long with no admitted request: no packet
  * the radio delayed can outlive it (the dongle forwards within milliseconds
  * and stores nothing), and two owners cannot interleave. */
-#define RAW81_SESSION_IDLE_MS 1000u
+/* In whole seconds of the caller's seconds count (rtc_seconds_since_boot:
+ * one volatile read, where a millisecond read is a software 64-bit divide).
+ * Two counts guarantee at least one full second; the host waits 2 s. */
+#define RAW81_SESSION_IDLE_S 2u
 
 typedef enum { RAW81_IDLE = 0, RAW81_COLLECT = 1, RAW81_QUARANTINE = 2 } raw81_state_t;
 
@@ -74,7 +77,7 @@ typedef struct {
     bool          have_session;
     uint8_t       session;
     uint16_t      last_seq;    /* the last ADMITTED seq in the session */
-    uint32_t      admitted_ms; /* when it was admitted */
+    uint32_t      admitted_s;  /* when it was admitted, in the caller's seconds */
     /* the frame just committed (every verdict but BADSUM, TAINT, LIFETIME) */
     uint8_t       c_session;
     uint16_t      c_seq;
@@ -107,13 +110,13 @@ void raw81_window_done(raw81_rx_t *rx, bool matched);
 bool raw81_empty(raw81_rx_t *rx, uint16_t now_tick, uint16_t silence_ticks);
 /* 34 bytes are in: check the taint, the lifetime, the sum, the envelope, the
  * session, the freshness and the allow-list. */
-/* now_ms is used only for the session's 1 s idle (once per committed frame). */
+/* now_s is used only for the session's idle (RAW81_SESSION_IDLE_S). */
 raw81_verdict_t raw81_commit(raw81_rx_t *rx, bool uart_err, uint16_t now_tick, uint16_t lifetime_ticks,
-                             uint32_t now_ms);
+                             uint32_t now_s);
 /* The caller dispatched a request: its identity (the one the caller reserved
  * at commit) becomes the session's last admitted seq, starting the session if
  * it was new. BUSY never refreshes the idle time; only this does. */
-void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_ms);
+void raw81_admit(raw81_rx_t *rx, uint8_t session, uint16_t seq, uint32_t now_s);
 
 /* The positive allow-list over a 26-byte inner command (exact bytes). */
 bool raw81_allowed(const uint8_t *inner);
