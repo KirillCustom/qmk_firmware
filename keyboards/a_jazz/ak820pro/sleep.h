@@ -96,3 +96,10 @@ void sleep_deep_cancel(void);   /* disarm, if armed and not yet asleep */
  * 1's last byte). */
 #define SLEEP_RECORD_SIZE 27u
 void sleep_deep_record(uint8_t *out);
+/* Each teardown's wake, the last eight (HC_DEVHOOK op 24): the page keeps only
+ * the last sleep's. Slot 0..7, 28 bytes, little endian: u16 the entry's
+ * sequence number (entry n is in slot n % 8), u8 reason (SLEEP_WAKE_*), u8
+ * flags (SLEEP_V_*), u32 counted seconds, u32 the P0, P1 and P2 bits that
+ * woke it, u32 the uptime ms after the wake, u16 strays; [26..27] entries
+ * written. False for a slot past 7. */
+bool sleep_wake_ring_fill(uint8_t slot, uint8_t *out28);

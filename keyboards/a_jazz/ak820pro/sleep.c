@@ -20,6 +20,7 @@
 #include "watchdog.h"
 #include "health.h"
 #include "drivers/led/sn32f2xx.h"
+#include "overrun_diag.h"   /* dev: a UART overrun's context */
 
 /* The encoder driver's decoder state, read only (drivers/encoder/
  * encoder_quadrature.c, a local accessor): A in bit 0, B in bit 1. */
@@ -302,6 +303,41 @@ static uint8_t  rc_timed_out;
 
 static void recovery_begin(uint8_t reason);
 
+#ifdef AK820_DEV_HOOKS
+/* Each teardown's wake, the last eight (sleep.h), since the page keeps only
+ * the last sleep's reason: on 10-19 a ~3 s wake an hour in, with no key,
+ * went unnamed because the rig's tap woke the next sleep. */
+typedef struct __attribute__((packed)) {
+    uint16_t seq;
+    uint8_t  reason, flags;
+    uint32_t counted, p0, p1, p2, ms;
+    uint16_t strays;
+} wake_entry_t;
+_Static_assert(sizeof(wake_entry_t) == 26, "an entry and the count fill 28 bytes");
+static wake_entry_t wake_ring[8];
+static uint16_t     wake_seq;
+
+static void wake_ring_put(uint32_t counted) {
+    wake_entry_t *e = &wake_ring[wake_seq % 8u];
+    e->seq     = wake_seq++;
+    e->reason  = ds_reason;
+    e->flags   = ds_flags;
+    e->counted = counted;
+    e->p0      = ds_p0_ris;
+    e->p1      = ds_p1_ris;
+    e->p2      = ds_p2_ris;
+    e->ms      = timer_read32();
+    e->strays  = ds_strays;
+}
+
+bool sleep_wake_ring_fill(uint8_t slot, uint8_t *out) {
+    if (slot >= 8u) return false;
+    memcpy(out, &wake_ring[slot], sizeof(wake_entry_t));
+    memcpy(&out[26], &wake_seq, 2);
+    return true;
+}
+#endif
+
 /* The sleep: false if it unwound before the teardown (a host's frame, the
  * radio busy), true otherwise, whether it slept (ds_flags) or a source was
  * already active. It wakes after `cap_s` counted seconds, counting from
@@ -318,6 +354,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
     wake_pins(&w);
     uint32_t p0w = w.col0 | w.knob0, p1w = w.knob1 | w.chrg1, p2w = w.col2;
     ds_kp_before = health_key_presses();
+    OD_ACTIVITY_SET(OD_ACT_SLEEP);   /* dev: an overrun seen across it is the sleep's */
 
     /* Everything from here to the unlock is lock-free (I-class calls and
      * register writes): a lock call would unlock on its way out, and a wake
@@ -327,6 +364,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
      * radio, or a host's frames come, between the check and the teardown. */
     if ((uint16_t)(SN_USB->FRMNO & 0x7FFu) != usb_fn_last || !tx_quietI()) {
         chSysUnlock();
+        OD_ACTIVITY_CLEAR(OD_ACT_SLEEP);
         return false;
     }
     /* Outputs off: the LED matrix, the 20 kHz tick with the pins it drives. */
@@ -336,6 +374,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
      * enabled, so its line idles high); the ADC off (~100 uA, p. 96). */
     uint32_t uart_ctrl = SN_UART2->CTRL;
     SN_UART2->CTRL     = uart_ctrl & ~UART_CTRL_RXEN;
+    OD_RX_OFF();   /* dev: what arrives now is lost by design, counted apart */
     uint32_t adm       = SN_ADC->ADM & ~(ADC_ADM_EOC | ADC_ADM_ADS);
     SN_ADC->ADM        = adm & ~ADC_ADM_ADENB;
     /* Every key row low, every column an input with its pull-up, so a press
@@ -494,6 +533,10 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
     ds_secs   = counted;
     ds_strays = (uint16_t)(strays > 0xFFFFu ? 0xFFFFu : strays);
     ds_flags  = (uint8_t)((slept ? SLEEP_V_SLEPT : 0u) | (pll_ceiling ? SLEEP_V_PLL_CEIL : 0u));
+    OD_ACTIVITY_CLEAR(OD_ACT_SLEEP);
+#ifdef AK820_DEV_HOOKS
+    wake_ring_put(counted);
+#endif
     (void)phy_off;
     if (slept) recovery_begin(ds_reason);
     return true;

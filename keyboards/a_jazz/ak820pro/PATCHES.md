@@ -27,6 +27,20 @@ tip. The branch carries:
   deep sleep calls under the lock to hand the RTC driver's calendar the
   seconds it counted asleep with their interrupts cleared unserved
   (`sleep.c` through `rtc_account_sleepI`).
+- one from 2026-10-19 (plans/OVERRUN-CAPS-PLAN.md):
+  - **the fallback I2C driver releases the system lock at each byte
+    boundary** (`SW_I2C_BYTE_PREEMPT`, with a run-time switch,
+    `SW_I2C_BYTE_PREEMPT_ENABLED()`). HAL holds the lock for a whole
+    transaction, and with the busy-wait delay every interrupt waited up to
+    ~3 ms, longer than UART2's FIFO lasts. Off by default for other boards;
+  - **`i2c_write_restart()` returns the START's error** instead of falling
+    through to another byte;
+  - **diagnostic hooks** that default to nothing:
+    - `SW_I2C_MASK_BEGIN/END` around each locked stretch;
+    - the serial LLD's `SN32_SERIAL_OE_HOOK` (each LS snapshot with OE,
+      the drain's re-reads included) and `SN32_SERIAL_RXDROP_HOOK` (each byte
+      the input queue refused);
+    - entry and exit hooks on the USB and system-timer handlers.
 
 `git submodule update` can no longer silently destroy them — it will detach
 to the pinned (patched) commit instead.
@@ -45,6 +59,7 @@ hardware_pwm -> i2c_fallback -> rtc_lld -> spi_fifo_pump
              -> (2026-09-23: serial load(), SPI0 lost completion, USB start_in)
              -> (2026-09-24: EFL erased check, serial hardware overrun)
              -> (2026-10-18: RTC add_secondsI)
+             -> (2026-10-19: I2C byte preemption, restart error, overrun hooks)
 ```
 
 `spi_fifo_pump` / `spi_flash_dma` / `spi_dma_abort` touch the same SPI LLD

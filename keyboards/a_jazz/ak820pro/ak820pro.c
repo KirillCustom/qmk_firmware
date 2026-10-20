@@ -29,6 +29,7 @@
 #include "sleep.h"         /* the deep sleep, and the dev builds' light-sleep bits */
 #include "loop_acct.h"     /* D1: ACCT() around each board task */
 #include "flash_stats.h"   /* C1: flash write sessions by writer */
+#include "overrun_diag.h"  /* dev: the UART overruns' context */
 
 void early_hardware_init_post(void) {
     // Configure SPI0 pins for the LCD panel. SEL0 is left UNMUXED: our bare-metal bus
@@ -746,7 +747,9 @@ static uint32_t efl_saved_path;
 void backing_store_operation_begin(bool erase) {
     efl_saved_path = watchdog_record_enter(erase ? WDT_SITE_EFL_ERASE : WDT_SITE_EFL_WRITE);
     flash_stats_op(erase);
+    OD_ACTIVITY_SET(erase ? OD_ACT_FLASH_ERASE : OD_ACT_FLASH_PROG);   /* dev: an overrun's context */
 }
 void backing_store_operation_end(void) {
+    OD_ACTIVITY_CLEAR(OD_ACT_FLASH_ERASE | OD_ACT_FLASH_PROG);
     watchdog_record_leave(&efl_saved_path);
 }

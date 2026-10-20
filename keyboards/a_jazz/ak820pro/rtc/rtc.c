@@ -13,6 +13,7 @@
 #include "../graphics/display.h"   /* display_splash_done() */
 #include "../ak820pro.h"
 #include "../sleep.h"              /* the deep sleep's pass budget */
+#include "../overrun_diag.h"       /* dev: each transaction's kind and spans */
 
 #include <time.h>
 
@@ -236,6 +237,27 @@ static void i2c_note(msg_t r, uint32_t sc0, uint32_t c0) {
     if (r != MSG_OK && i2c_fail_count < 0xFFFF) i2c_fail_count++;
 }
 
+/* Every PCF transaction, one I2C call: its accounting, and after a failure
+ * the driver's restart. The fallback driver reports every error (a NACK, a
+ * lost arbitration, the deadline) as MSG_TIMEOUT, which leaves I2CD1 in
+ * I2C_LOCKED, and nothing else ever restarted it: the next call ran on a
+ * locked driver, unnoticed only because the HAL's assertions are compiled
+ * out. The restart repairs the driver's state; it sends no clocks to free a
+ * stuck bus. The caller's failure, retries and back-off stand. */
+static msg_t pcf_xfer(uint8_t kind, const uint8_t *tx, size_t ntx, uint8_t *rx, size_t nrx)
+{
+    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
+    OD_PCF_BEGIN(kind);
+    msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, tx, ntx, rx, nrx, PCF8563_I2C_TIMEOUT);
+    OD_PCF_END(kind, r == MSG_OK);
+    i2c_note(r, sc0, c0);
+    if (r != MSG_OK) {
+        i2cStop(&I2CD1);
+        i2cStart(&I2CD1, &i2ccfg);
+    }
+    return r;
+}
+
 static void rtc_bus_guard(void) {
     /* Outermost mark wins -- see lcd_bus.c; this calls lcd_blit_wait() too. */
     if (loop_stall_mark == LOOP_MARK_NONE) loop_stall_mark = LOOP_MARK_I2C;
@@ -255,15 +277,7 @@ static bool pcf_read_raw(rtc_time_t *out)
     uint8_t buf[7];
 
 
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1,
-                                 PCF8563_ADDR,
-                                 &reg,
-                                 1,
-                                 buf,
-                                 sizeof(buf),
-                                 PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
+    msg_t r = pcf_xfer(OD_PCF_R7, &reg, 1, buf, sizeof(buf));
     if (r != MSG_OK) {
         if (pcf_avail_fail < 255) pcf_avail_fail++;
         return false;
@@ -325,16 +339,7 @@ static bool pcf_write_raw(const rtc_time_t *t)
     };
 
 
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1,
-                                    PCF8563_ADDR,
-                                    buf,
-                                    sizeof(buf),
-                                    NULL,
-                                    0,
-                                    PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
-    return r == MSG_OK;
+    return pcf_xfer(OD_PCF_W8, buf, sizeof(buf), NULL, 0) == MSG_OK;
 }
 
 /* Legacy path (rtc_set_time, the trim): guarded, synchronous. */
@@ -352,19 +357,13 @@ static bool pcf_write(const rtc_time_t *t)
 static bool pcf_reg_read(uint8_t reg, uint8_t *v) {
     WDT_SCOPE(WDT_SITE_I2C_READ);
     rtc_bus_guard();
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, &reg, 1, v, 1, PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
-    return r == MSG_OK;
+    return pcf_xfer(OD_PCF_R1, &reg, 1, v, 1) == MSG_OK;
 }
 static bool pcf_reg_write(uint8_t reg, uint8_t v) {
     WDT_SCOPE(WDT_SITE_I2C_WRITE);
     rtc_bus_guard();
     uint8_t buf[2] = { reg, v };
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, buf, 2, NULL, 0, PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
-    return r == MSG_OK;
+    return pcf_xfer(OD_PCF_W1, buf, 2, NULL, 0) == MSG_OK;
 }
 #endif /* WDT_TEST_HOOKS */
 
@@ -1271,19 +1270,14 @@ static bool board_ms_now(int64_t *ms)
 /* Un-guarded single-register access for the fast task (the caller has
  * already checked lcd_blit_busy()). */
 static bool pcf_reg_read_raw(uint8_t reg, uint8_t *v) {
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, &reg, 1, v, 1, PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
+    msg_t r = pcf_xfer(OD_PCF_R1, &reg, 1, v, 1);
     if (r != MSG_OK) { if (pcf_avail_fail < 255) pcf_avail_fail++; return false; }
     pcf_avail_fail = 0;
     return true;
 }
 static bool pcf_reg_write_raw(uint8_t reg, uint8_t v) {
     uint8_t buf[2] = { reg, v };
-    uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
-    msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, buf, 2, NULL, 0, PCF8563_I2C_TIMEOUT);
-    i2c_note(r, sc0, c0);
-    return r == MSG_OK;
+    return pcf_xfer(OD_PCF_W1, buf, 2, NULL, 0) == MSG_OK;
 }
 
 #define PCF_CTL_STOP        0x20
@@ -1621,8 +1615,15 @@ static bool bus_admit(void)
     return display_bus_idle() && sleep_pass_us() < RTC_ADMIT_US;
 }
 
+#ifdef AK820_DEV_HOOKS
+static bool burst_active(void);
+#endif
+
 bool rtc_sleep_ok(void)
 {
+#ifdef AK820_DEV_HOOKS
+    if (burst_active()) return false;   /* a bench burst of PCF reads holds the board awake */
+#endif
     /* Nothing in flight that a skipped second handler would break (a slew, a
      * reload), and the PCF quiet: no write pending or running (its verify and
      * STOP recovery included), no acquisition, no recovery unfinished. An
@@ -1787,6 +1788,90 @@ static bool wake_step(void)
     return acquisition_step();
 }
 
+#ifdef AK820_DEV_HOOKS
+/* A burst of 7-byte PCF reads on demand (HC_DEVHOOK op 23): the overrun
+ * A/B's load on the I2C (plans/OVERRUN-CAPS-PLAN.md, step 1, item 3). Into a
+ * scratch buffer, so it sets no clock and moves no state machine, but a good
+ * read resets pcf_avail_fail like any other. One read a pass at most, and
+ * only in a pass with no PCF transaction yet, with the deep sleep's recovery
+ * admission and its short deadline; never while a sync, an acquisition or a
+ * recovery owns the PCF (rtc_fast_task returns before it), and the reference
+ * check and the deep sleep wait for it. The gaps are random, so it cannot
+ * lock to the echo's period or the loop's. */
+static uint16_t bu_left, bu_done, bu_failed, bu_skipped;
+static uint8_t  bu_lo = 40, bu_hi = 80;
+static uint32_t bu_next_ms, bu_first_ms, bu_last_ms, bu_rng = 0x2545F491u;
+
+static uint32_t bu_gap(void)
+{
+    bu_rng ^= bu_rng << 13;
+    bu_rng ^= bu_rng >> 17;
+    bu_rng ^= bu_rng << 5;
+    return bu_lo + (bu_rng % (uint32_t)(bu_hi - bu_lo + 1u));
+}
+
+static bool burst_active(void)
+{
+    return bu_left != 0;
+}
+
+bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms)
+{
+    if (n == 0 || n > 2000u || lo_ms < 20u || hi_ms < lo_ms) return false;
+    bu_lo = lo_ms; bu_hi = hi_ms;
+    bu_done = bu_failed = bu_skipped = 0;
+    bu_first_ms = bu_last_ms = 0;
+    bu_rng ^= timer_read32() | 1u;
+    bu_next_ms = timer_read32() + bu_gap();
+    bu_left    = n;
+    return true;
+}
+
+void rtc_burst_stop(void)
+{
+    bu_left = 0;
+}
+
+/* True if it read this pass. */
+static bool burst_step(void)
+{
+    if (!bu_left || (int32_t)(timer_read32() - bu_next_ms) < 0) return false;
+    if (rtc_pass_used_bus() || !bus_admit()) {
+        if (bu_skipped < 0xFFFFu) bu_skipped++;
+        return false;
+    }
+    rtc_time_t scratch;
+    pcf_short_timeout = true;
+    bool ok = pcf_read_raw(&scratch);
+    pcf_short_timeout = false;
+    display_defer_pass();
+    uint32_t now = timer_read32();
+    if (!bu_done && !bu_failed) bu_first_ms = now;
+    bu_last_ms = now;
+    if (ok) bu_done++;
+    else if (bu_failed < 0xFFFFu) bu_failed++;
+    bu_left--;
+    bu_next_ms = now + bu_gap();
+    return true;
+}
+
+/* Op 23's reply: [0..1] reads left, [2..3] done, [4..5] failed, [6..9] ms
+ * from the first read to the last, [10] active, [11] 0, [12..13] due passes
+ * skipped (the bus used or not admitted), [14] the gap's low, [15] high. */
+void rtc_burst_fill(uint8_t *out)
+{
+    memset(out, 0, 28);
+    put16(&out[0], bu_left);
+    put16(&out[2], bu_done);
+    put16(&out[4], bu_failed);
+    put32(&out[6], bu_last_ms - bu_first_ms);
+    out[10] = burst_active() ? 1 : 0;
+    put16(&out[12], bu_skipped);
+    out[14] = bu_lo;
+    out[15] = bu_hi;
+}
+#endif /* AK820_DEV_HOOKS */
+
 /* Per main-loop pass, BEFORE display_blit_pump() (R4). At most one PCF
  * transaction, only when no blit is in flight; never the bus guard. */
 void rtc_fast_task(void)
@@ -1814,6 +1899,9 @@ void rtc_fast_task(void)
         return;
     }
     if (acq_state == ACQ_WAIT_SPLASH || acq_active()) { acquisition_step(); return; }
+#ifdef AK820_DEV_HOOKS
+    if (!pcf_pending && ps_state == PS_IDLE && burst_step()) return;
+#endif
     pcf_machine_step();
 }
 
@@ -1851,6 +1939,9 @@ void rtc_task(void)
      * 1). The check stays due and runs once the write is done. */
     if (wk_state != WK_IDLE || sleep_recovering()) return;
     if (pcf_pending || ps_state != PS_IDLE) return;
+#ifdef AK820_DEV_HOOKS
+    if (burst_active()) return;   /* the check stays due; one PCF transaction a pass */
+#endif
     if (rtc_check_seconds < RTC_CHECK_INTERVAL_S) {
         return;
     }

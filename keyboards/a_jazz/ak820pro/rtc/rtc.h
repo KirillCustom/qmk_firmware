@@ -84,6 +84,11 @@ uint16_t rtc_clock_generation(void);
 /* The acquisition's split, tested (HC_DEVHOOK op 14 sub 6): its next full read
  * held 1 s past the bracket's edge, once. */
 void rtc_dev_delay_full_once(void);
+/* The overrun A/B's burst of PCF reads (HC_DEVHOOK op 23): n (1..2000) reads,
+ * random gaps of lo_ms..hi_ms (lo >= 20); false if refused. */
+bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms);
+void rtc_burst_stop(void);
+void rtc_burst_fill(uint8_t *out28);
 #endif
 
 /* How many PCF8563 transactions would have collided with a live flash->LCD DMA.

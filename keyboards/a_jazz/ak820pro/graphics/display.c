@@ -478,6 +478,9 @@ static void queue_line(uint8_t slot, uint16_t font, uint16_t x, uint16_t y,
                        const char *str);
 static void band_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 static bool gq_pending(void);
+static bool lq_pending(void);
+static void lq_reset(void);
+static void locks_forget(void);
 static void display_queue_discard(void);
 static void shadow_mark_empty(uint8_t slot, uint16_t font, uint16_t x, uint16_t y);
 static void retire_line(uint8_t slot);
@@ -2063,6 +2066,48 @@ _Static_assert(LOCK_Y + LOCK_TXT_H <= STATUS_Y, "lock band text cells must not r
 static bool        shown_pad = false, shown_caps = false, shown_gui = false;
 static const char *shown_sl3 = NULL;
 
+/* The labels' own queue, which the pump serves ahead of the text queue: a
+ * label's four synchronous glyphs (~10 ms) on the same 10 Hz tick as the
+ * band's other owners made a Caps press's pass reach 25 ms (10-19, once in
+ * ~600 toggles; plans/OVERRUN-CAPS-PLAN.md, part 2). Ten entries hold every
+ * label at once (4 + 3 + 3). A label goes in whole or not at all, and
+ * housekeeping waits for this queue as for the text queue, so a batch never
+ * builds up behind another: a refused label leaves shown_* as it was, and the
+ * next tick's diff tries again, with nothing of it on the panel. Served first
+ * so the label follows its padlock within a few passes, never behind a
+ * line of queued text. */
+#define LQ_MAX 10u
+static struct { uint16_t x; char c; } lq[LQ_MAX];   /* FONT_STATUS, at LOCK_Y */
+static uint8_t  lq_n = 0, lq_i = 0;
+static uint16_t lq_refused = 0;   /* labels refused for room: never expected */
+
+static void lq_reset(void) { lq_n = lq_i = 0; }
+static bool lq_pending(void) { return lq_i < lq_n; }
+
+static bool lq_push_label(uint16_t x, const char *s) {
+    uint16_t adv = lcd_font_advance(FONT_STATUS);
+    uint8_t  n   = (uint8_t)strlen(s);
+    if (!adv || lq_n + n > LQ_MAX) {
+        if (lq_refused < 0xFFFFu) lq_refused++;
+        return false;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        lq[lq_n].x = (uint16_t)(x + i * adv);
+        lq[lq_n].c = s[i];
+        lq_n++;
+    }
+    return true;
+}
+
+/* A label: queued on the normal path; painted at once in the Fn+D restore,
+ * which already stages the band one component a pass and runs while the pump
+ * serves no queue. False if the queue had no room: nothing was queued. */
+static bool lock_label(uint16_t x, const char *s, bool queued) {
+    if (queued) return lq_push_label(x, s);
+    lcd_draw_flash_text(FONT_STATUS, x, LOCK_Y, s);
+    return true;
+}
+
 /* The band has just been cleared: nothing of ours is on it. */
 static void locks_forget(void) {
     shown_pad = shown_caps = shown_gui = false;
@@ -2072,8 +2117,10 @@ static void locks_forget(void) {
 /* Paint whatever differs from what is on the panel. With `one` set, stop after
  * the first component painted, so a caller stepping the Fn+D restore never
  * spends more than one label -- up to four synchronous glyphs, ~10 ms -- in a
- * single main-loop pass. Returns true if anything was painted. */
-static bool draw_locks_diff(bool one) {
+ * single main-loop pass. `queued`: labels through the lock queue (the normal
+ * path), else painted now (the restore). Returns true if anything was painted
+ * or queued. */
+static bool draw_locks_diff(bool one, bool queued) {
     bool caps = lock_state_caps();
     bool gui  = lock_state_gui();
     bool fn   = lock_state_fn();
@@ -2100,14 +2147,14 @@ static bool draw_locks_diff(bool one) {
         if (one) return true;
     }
     if (caps != shown_caps) {
-        if (caps) lcd_draw_flash_text(FONT_STATUS, LOCK_CAP_X, LOCK_Y, "CAPS");
+        if (caps) { if (!lock_label(LOCK_CAP_X, "CAPS", queued)) return did; }
         else      lcd_clear_rect(LOCK_CAP_X, LOCK_Y, LOCK_CAP_W, LOCK_TXT_H);
         shown_caps = caps;
         did = true;
         if (one) return true;
     }
     if (gui != shown_gui) {
-        if (gui) lcd_draw_flash_text(FONT_STATUS, LOCK_WIN_X, LOCK_Y, "WIN");
+        if (gui) { if (!lock_label(LOCK_WIN_X, "WIN", queued)) return did; }
         else     lcd_clear_rect(LOCK_WIN_X, LOCK_Y, LOCK_WIN_W, LOCK_TXT_H);
         shown_gui = gui;
         did = true;
@@ -2115,11 +2162,13 @@ static bool draw_locks_diff(bool one) {
     }
     if (slot3 != shown_sl3) {
         /* Clear first: "SCR" -> "FN" would otherwise strand the third glyph,
-         * since a glyph blit only paints its own cell. */
+         * since a glyph blit only paints its own cell. The slot is blank
+         * from here, whether or not its new label fits the queue. */
         lcd_clear_rect(LOCK_SLOT3_X, LOCK_Y, LOCK_SL3_W, LOCK_TXT_H);
-        if (slot3) lcd_draw_flash_text(FONT_STATUS, LOCK_SLOT3_X, LOCK_Y, slot3);
-        shown_sl3 = slot3;
+        shown_sl3 = NULL;
         did = true;
+        if (slot3 && !lock_label(LOCK_SLOT3_X, slot3, queued)) return true;
+        shown_sl3 = slot3;
     }
     return did;
 }
@@ -2129,14 +2178,14 @@ static bool draw_locks_diff(bool one) {
  * the caller has just cleared the screen and nothing is drawn. */
 static void draw_locks(bool force) {
     if (force) locks_forget();
-    draw_locks_diff(false);
+    draw_locks_diff(false, true);
 }
 
 /* Fn+D restore: ONE component per call; `first` forgets the freshly cleared
  * band. Returns true while a call painted something -- keep calling. */
 static bool draw_locks_staged(bool first) {
     if (first) locks_forget();
-    return draw_locks_diff(true);
+    return draw_locks_diff(true, false);
 }
 
 
@@ -2746,7 +2795,7 @@ static void gq_reset(void) { gq_n = gq_i = 0; }
 static bool gq_pending(void) { return gq_i < gq_n; }
 
 bool display_bus_idle(void) {
-    return !gq_pending() && !debug_exit_step && !lcd_blit_busy();
+    return !gq_pending() && !lq_pending() && !debug_exit_step && !lcd_blit_busy();
 }
 
 static void shadow_invalidate(void) {
@@ -2755,10 +2804,19 @@ static void shadow_invalidate(void) {
     ampm.shown      = false;   /* the AM/PM glyph is its own shadow */
 }
 
-static void gq_push(uint16_t font, uint16_t x, uint16_t y, char c) {
-    if (gq_n >= GQ_MAX) return;
+/* GQ_MAX holds the largest batch one tick queues (both text lines and the
+ * clock band), and housekeeping waits for the queue to empty, so a full
+ * queue is not expected. If it ever happens, the glyph is counted and the
+ * caller hears of it: queue_line then forgets its shadow and asks again. */
+static uint16_t gq_dropped = 0;
+static bool gq_push(uint16_t font, uint16_t x, uint16_t y, char c) {
+    if (gq_n >= GQ_MAX) {
+        if (gq_dropped < 0xFFFFu) gq_dropped++;
+        return false;
+    }
     gq[gq_n].font = font; gq[gq_n].x = x; gq[gq_n].y = y; gq[gq_n].c = c;
     gq_n++;
+    return true;
 }
 
 /* Called every main-loop iteration. Cheap by construction: one compare while
@@ -2819,8 +2877,22 @@ void display_blit_pump(void) {
     if (debug_exit_step) { blocked = false; debug_restore_step(); return; }
 #endif
 
-    if (gq_i >= gq_n || display_paused) {
+    if (display_paused) {
         blocked = false;   /* stale grace must not carry into later work */
+        return;
+    }
+    /* The labels first (see LQ_MAX): one glyph a pass, as below. */
+    if (lq_pending()) {
+        if (!lcd_draw_flash_glyph_try(FONT_STATUS, lq[lq_i].c, lq[lq_i].x, LOCK_Y)) {
+            pump_bus_busy(&blocked, &blocked_since);
+            return;
+        }
+        blocked = false;
+        if (++lq_i >= lq_n) lq_reset();
+        return;
+    }
+    if (gq_i >= gq_n) {
+        blocked = false;
         return;
     }
     if (!lcd_draw_flash_glyph_try(gq[gq_i].font, gq[gq_i].c, gq[gq_i].x, gq[gq_i].y)) {
@@ -2845,6 +2917,11 @@ void display_blit_pump(void) {
 static void display_queue_discard(void) {
     gq_reset();
     shadow_invalidate();
+    /* The labels' queue too, and the lock band is blank (or under the
+     * splash): forget it here, beside the shadows, never on a queue's
+     * ordinary completion, or a Caps-off would skip its clear. */
+    lq_reset();
+    locks_forget();
 }
 
 /* Queue one line, drawing ONLY what differs from what is already on the panel.
@@ -2911,9 +2988,10 @@ static void queue_line(uint8_t slot, uint16_t font, uint16_t x, uint16_t y,
         band_clear(0, y, PANEL_WIDTH, h);
     }
 
+    bool dropped = false;
     for (uint8_t i = 0; i < n; i++)
         if (moved || unknown || i >= old_n || shadow[slot].s[i] != str[i])
-            gq_push(font, (uint16_t)(x + i * adv), y, str[i]);
+            if (!gq_push(font, (uint16_t)(x + i * adv), y, str[i])) dropped = true;
 
     /* Cells the new string no longer occupies keep their old glyphs otherwise. */
     if (old_n > n)
@@ -2923,7 +3001,13 @@ static void queue_line(uint8_t slot, uint16_t font, uint16_t x, uint16_t y,
     memcpy(shadow[slot].s, str, n);
     shadow[slot].s[n] = '\0';
     shadow[slot].font = font; shadow[slot].x = x; shadow[slot].y = y;
-    shadow[slot].valid = true;
+    shadow[slot].valid = !dropped;
+    /* A glyph that did not fit: the shadow is unknown, so the next paint
+     * clears the row and draws it all, and the owner is asked again. */
+    if (dropped) {
+        if (slot == GQ_SLOT_CLOCK) clock_force_repaint = true;
+        else text_dirty = true;
+    }
 }
 
 /* Declare a slot KNOWN EMPTY at a layout: the caller has just cleared the
@@ -3110,7 +3194,7 @@ void display_wake_corrected(void) {
 
 static void wake_paint_step(void) {
     if (pass_deferred || !splash_cleared || display_paused || debug_active || debug_exit_step) return;
-    if (gq_pending() || lcd_blit_busy()) return;   /* the pump finishes what is queued first */
+    if (gq_pending() || lq_pending() || lcd_blit_busy()) return;   /* the pump finishes what is queued first */
     if (wake_clock_due) {
         wake_clock_due = false;
         draw_clock();
@@ -3179,7 +3263,7 @@ void display_housekeeping_task(void) {
          * scanning loop (audit BW-1). The 1 Hz clock latch below is only
          * reached when this passes, so a deferred second paints on the next
          * tick rather than being skipped. */
-        if (gq_pending()) return;
+        if (gq_pending() || lq_pending()) return;
 
         // Connection digit every tick (~10 Hz) so its blink animates; self-guarded.
         LOOP_SITE(LOOP_SITE_CONN, DPROBE(DP_CONN, draw_conn_number(false)));

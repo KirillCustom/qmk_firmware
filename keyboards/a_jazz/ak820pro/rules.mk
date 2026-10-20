@@ -13,8 +13,10 @@ BLUETOOTH_DRIVER = custom
 
 # External PCF8563 RTC over the ChibiOS software (bit-banged) I2C fallback LLD.
 # Swaps the SN32 HW I2C driver for the SW fallback; rtc.c drives it via the I2C HAL
-# API. Working on hardware since 2026-08 (docs/clock.md). The bit-banged
-# transaction runs with interrupts masked, ~1 ms per byte-sized transfer.
+# API. Working on hardware since 2026-08 (docs/clock.md). HAL holds the
+# system lock for a whole transaction (interrupts masked on this M0); the
+# fallback driver releases it at each byte boundary (SW_I2C_BYTE_PREEMPT,
+# halconf.h; plans/OVERRUN-CAPS-PLAN.md).
 USE_HAL_I2C_FALLBACK = yes
 
 SRC += bluetooth/ch582f_ajazz.c
@@ -38,6 +40,7 @@ SRC += param_overlay.c # RGB hold-to-repeat + parameter readout overlay
 SRC += indicators.c  # Caps/WinLock/Charging PWM, 20 kHz tick, lock states
 SRC += battery.c     # VDD from the SN32 ADC (AIN16 against VDD)
 SRC += power.c       # power caps: the low-battery lights cut; the idle ladder only with POWER_LADDER_ENABLE
+SRC += overrun_diag.c # dev builds: the radio link's UART overruns, measured (empty otherwise)
 SRC += hid_protocol.c # raw-HID channels 0x10-0x13 + VIA/non-VIA dispatch
 SRC += flash_stats.c  # C1: which writer each internal-flash write session belongs to
 SRC += loop_acct.c    # D1: per-task accounting of every main-loop pass
