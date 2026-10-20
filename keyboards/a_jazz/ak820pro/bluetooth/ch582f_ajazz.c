@@ -664,9 +664,11 @@ static eventflags_t uart_err_poll(void) {
  * (must-fix 5). */
 #define RAW81_LEN           34u
 #define RAW81_SILENCE_MS    5u
-/* A collection may span several passes (RAW81_DRAIN_MS), and the module was
- * measured taking ~8-9 ms to deliver one 81's bytes (the Mac session, 10-19):
- * 15 ms would have left ~6 of margin once the drain stopped holding the pass. */
+/* A collection may span several passes (RAW81_DRAIN_MS), and the drain was
+ * measured taking 8-9 ms over one 81's 34 bytes (the Mac session, 10-19;
+ * whether that is the module's pacing or the cost per byte is open, and op
+ * 17's pass count is what tells): 15 ms would leave too little margin once
+ * the collection spans passes. */
 #define RAW81_LIFETIME_MS   40u
 /* While a collection is in progress, a drain stops after this long, so one
  * pass never pays for a whole frame: before it, every 81 cost one pass of
@@ -1473,6 +1475,7 @@ void ch582_task(void) {
     uint8_t bytes_processed = 0;
 #ifdef AK820_DEV_HOOKS
     const uint16_t drain_t0 = timer_read();
+    bool           rx_left  = false;   /* the drain stopped on its budget, bytes still queued */
     if (r81_state == R81_COLLECT && r81_passes < 255u) r81_passes++;
 #endif
     uint16_t p1 = prof ? ACCT_NOW() : 0u;
@@ -1484,11 +1487,15 @@ void ch582_task(void) {
     while (bytes_processed < 64) {
 #ifdef AK820_DEV_HOOKS
         /* Mid-collection, the drain gives the pass back after RAW81_DRAIN_MS:
-         * the module delivers an 81 over ~8-9 ms, and draining until the queue
-         * ran dry held one pass for all of it. The rest waits in the input
-         * queue (128 bytes) for the next pass; the collection's lifetime
-         * spans the passes. */
-        if (r81_state == R81_COLLECT && timer_elapsed(drain_t0) >= RAW81_DRAIN_MS) break;
+         * draining one 81 took 8-9 ms and held one pass for all of it. The
+         * rest waits in the input queue (128 bytes) for the next pass; the
+         * collection's lifetime spans the passes. ⚠️ Bytes are left queued,
+         * and an ACK among them must be consumed before the TX pump judges
+         * anything, so the pump skips this pass (rx_left, below). */
+        if (r81_state == R81_COLLECT && timer_elapsed(drain_t0) >= RAW81_DRAIN_MS) {
+            rx_left = true;
+            break;
+        }
 #endif
 #ifdef WDT_TEST_HOOKS
         /* Fault injection (instrumented builds): bytes queued via
@@ -1776,6 +1783,15 @@ void ch582_task(void) {
      * flight (an orphan) -- or, worse, popped the NEXT frame, since `61 0D 0A`
      * carries no sequence number. */
     uint16_t p2 = prof ? ACCT_NOW() : 0u;
+#ifdef AK820_DEV_HOOKS
+    /* An ACK may still be queued behind the collection's tail: judging the
+     * in-flight frame now could retransmit it, and that copy's later ACK would
+     * release the NEXT frame unsent (wireless.md; codex raw81 drain review,
+     * must-fix 1). Likewise the 91's window must not close with its ACK
+     * unread. So the pump waits for a drain that reached the queue's end:
+     * the next pass, ~3 ms on. */
+    if (!rx_left)
+#endif
     ch582_tx_pump();
 #ifdef AK820_DEV_HOOKS
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
