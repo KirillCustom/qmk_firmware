@@ -271,7 +271,7 @@ void ak820_i2c_xfer_end(void)
     chSysLock();
     if (i2c_row_irq_on) NVIC_EnableIRQ(CT16B1_IRQn);
 #ifdef AK820_DEV_HOOKS
-    od_mask_begin();   /* the closing stretch, from the relock */
+    od_mask_begin();   /* the closing stretch, from after the row IRQ's restore */
 #endif
 }
 
@@ -1165,7 +1165,9 @@ bool rtc_set_time(const rtc_time_t *t)
      * not only the clock's part (codex, deep-sleep build review 1). Nor after
      * another PCF transaction this pass: raw HID drains several queued
      * commands in one pass, and each set could run into the 10 ms deadline
-     * (codex, the UART-latency implementation review). The host retries. */
+     * (codex, the UART-latency implementation review). The refusal answers
+     * 0xFF, which ak820ctl's legacy set reports as unhandled and exits 1 on,
+     * without retrying: no current tool sends two of these in one pass. */
     if (rtc_wake_busy() || sleep_recovering() || rtc_pass_used_bus()) return false;
     host_sync_gen++;
     clock_gen++;
