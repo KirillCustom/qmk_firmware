@@ -30,6 +30,7 @@ SRC += lockchan_media.c   # what a committed frame means (pure logic; used by de
 # The firmware reads the index at boot (flash_assets_init) and DMA-draws by id.
 
 SRC += graphics/display.c
+SRC += graphics/playback.c   # the playback readout's state (pure logic)
 SRC += rtc/rtc.c
 SRC += watchdog.c   # hardware WDT: arm/kick/boot accounting/bootloader stop
 SRC += watchdog_record.c # reset-retained operation breadcrumbs
