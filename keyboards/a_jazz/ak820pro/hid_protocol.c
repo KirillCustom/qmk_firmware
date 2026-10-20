@@ -314,7 +314,28 @@ static inline bool is_text_cmd(const uint8_t *data, uint8_t length) {
     return length >= 3 && data[0] == RTC_SET_VALUE && data[1] == TEXT_CHANNEL;
 }
 
+/* The lock-LED channel's lease (plans/LOCK-LED-CHANNEL-PLAN.md, R3-2): when
+ * raw HID last carried an accepted media command, by USB or through the 2.4G
+ * dongle (raw81 dispatches here too). Set here at the ingress, never in the
+ * display's setters, which the lock-LED handler calls as well. */
+static uint32_t rawhid_media_at;
+static bool     rawhid_media_seen;
+
+bool hid_rawhid_media_within(uint32_t now, uint32_t ms) {
+    return rawhid_media_seen && now - rawhid_media_at < ms;
+}
+
+static void text_command_inner(uint8_t *data, uint8_t length);
+
 static void text_command(uint8_t *data, uint8_t length) {
+    text_command_inner(data, length);
+    if (data[0] != RTC_UNHANDLED) {
+        rawhid_media_at   = timer_read32();
+        rawhid_media_seen = true;
+    }
+}
+
+static void text_command_inner(uint8_t *data, uint8_t length) {
     switch (data[2]) {
         case TEXT_SET:
             /* data[3] = icon id, data[4..] = ASCII. Length is whatever the host
@@ -1115,12 +1136,22 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 17: {
-                    if (length < 32 || data[4] > 5 || (data[4] == 4 && (data[5] == 0 || data[5] > 50)) ||
+                    if (length < 32 || (data[4] > 5 && data[4] != 7) || (data[4] == 4 && (data[5] == 0 || data[5] > 50)) ||
                         (data[4] == 5 && data[5] > 2)) {
                         data[0] = RTC_UNHANDLED;
                         break;
                     }
                     uint8_t sub = data[4];
+                    if (sub == 7) {
+                        /* The lock-LED handler: [5..8] applied, [9..12]
+                         * rejected, [13..16] refused by the lease (u32 LE). */
+                        uint32_t c[3];
+                        ch582_lockchan_media_counts(c);
+                        memset(&data[4], 0, 28);
+                        data[4] = 7;
+                        memcpy(&data[5], c, sizeof c);
+                        break;
+                    }
                     if (sub == 5) {
                         /* Responses held in the pump: [5] 1 on, 2 off, 0
                          * reads. Reply: 5, the state. */

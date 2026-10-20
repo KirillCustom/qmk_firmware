@@ -22,6 +22,7 @@ USE_HAL_I2C_FALLBACK = yes
 SRC += bluetooth/ch582f_ajazz.c
 SRC += bluetooth/raw81.c   # raw HID over the 2.4G dongle (pure logic; used by dev builds)
 SRC += lockchan.c   # the lock-LED channel's receiver (pure logic; used by dev builds)
+SRC += lockchan_media.c   # what a committed frame means (pure logic; used by dev builds)
 
 # Dashboard graphics now live in EXTERNAL FLASH, not firmware. Generate the blob
 # with `python3 graphics/res/mkraw.py --flash` and upload it once per keyboard:

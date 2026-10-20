@@ -107,6 +107,10 @@ enum loop_site {
     LOOP_SITE_BATT, LOOP_SITE_EECFG, LOOP_SITE_HEALTH, LOOP_SITE_RGBFLUSH,
     LOOP_SITE_COUNT
 };
+/* hid_protocol.c: raw HID (USB or the 2.4G dongle) carried an accepted media
+ * command less than `ms` ago (the lock-LED channel's lease, R3-2). */
+bool hid_rawhid_media_within(uint32_t now, uint32_t ms);
+
 #ifdef LOOPGAP_INSTRUMENT
 void loop_site_begin(uint8_t site);
 void loop_site_end(void);
