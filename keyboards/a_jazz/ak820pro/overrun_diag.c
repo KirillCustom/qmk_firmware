@@ -35,7 +35,7 @@ typedef struct {
 static od_kind_t kinds[OD_PCF_KINDS];
 
 static volatile uint32_t oe_obs, oe_drain, rx_drop, rx_off;
-static volatile uint16_t ctx_pcf, ctx_flash, ctx_sleep, ctx_none;
+static volatile uint16_t ctx_pcf, ctx_flash, ctx_sleep, ctx_none, ctx_probe;
 static volatile uint16_t usb_t0, st_t0, usb_max, st_max, usb_max_since, st_max_since;
 
 typedef struct __attribute__((packed)) {
@@ -77,6 +77,7 @@ static void oe_seen(uint8_t in_drain) {
     if (act & OD_ACT_PCF) ctx_pcf++;
     if (act & (OD_ACT_FLASH_PROG | OD_ACT_FLASH_ERASE)) ctx_flash++;
     if (act & OD_ACT_SLEEP) ctx_sleep++;
+    if (act & OD_ACT_MASK_PROBE) ctx_probe++;
     if (!act) ctx_none++;
     od_entry_t *e = &ring[ring_seq % OD_RING];
     e->seq     = ring_seq;
@@ -142,6 +143,19 @@ void od_pcf_end(uint8_t kind, bool ok) {
     chSysUnlock();
 }
 
+/* The receiver's depth probe (rtc.c's burst, op 23 sub 3): interrupts masked
+ * for `ticks`, timed on the free-running counter, the span published as an
+ * I2C stretch's is, so the ring's entries carry it. Main loop, unlocked. */
+void od_mask_probe(uint16_t ticks) {
+    od_activity_set(OD_ACT_MASK_PROBE);
+    chSysLock();
+    uint16_t t0 = od_now();
+    while ((uint16_t)(od_now() - t0) < ticks) {}
+    mask_last = (uint16_t)(od_now() - t0);
+    chSysUnlock();
+    od_activity_clear(OD_ACT_MASK_PROBE);
+}
+
 bool od_byte_mode(void) { return od_i2c_byte_mode != 0; }
 void od_set_byte_mode(bool on) { od_i2c_byte_mode = on ? 1u : 0u; }
 
@@ -151,7 +165,7 @@ void od_reset(void) {
     memset(ring, 0, sizeof(ring));
     ring_seq = 0;
     oe_obs = oe_drain = rx_drop = rx_off = 0;
-    ctx_pcf = ctx_flash = ctx_sleep = ctx_none = 0;
+    ctx_pcf = ctx_flash = ctx_sleep = ctx_none = ctx_probe = 0;
     usb_max = st_max = usb_max_since = st_max_since = 0;
     chSysUnlock();
 }
@@ -196,8 +210,9 @@ bool od_fill_ring(uint8_t page, uint8_t *out) {
  * masked stretch, [8..9] the longest whole call (ticks), [10..13] stretches
  * of 1.0 ms or more, [14..17] of 1.4 ms or more, [18..21] stretches in all.
  * Kind 0xFF: [0..1] OEs seen during a deep sleep's teardown or wake, the
- * tick rate u32 at [2..5], and the RTC's seconds since boot now at [6..9]
- * (the ring's entries are stamped in the same seconds). */
+ * tick rate u32 at [2..5], the RTC's seconds since boot now at [6..9] (the
+ * ring's entries are stamped in the same seconds), [10..11] OEs seen with
+ * the depth probe's masked span. */
 bool od_fill_kind(uint8_t kind, uint8_t *out) {
     memset(out, 0, 28);
     if (kind == 0xFFu) {
@@ -206,6 +221,7 @@ bool od_fill_kind(uint8_t kind, uint8_t *out) {
         chSysUnlock();
         put32(&out[2], CH_CFG_ST_FREQUENCY);
         put32(&out[6], rtc_seconds_since_boot());
+        put16(&out[10], ctx_probe);
         return true;
     }
     if (kind >= OD_PCF_KINDS) return false;

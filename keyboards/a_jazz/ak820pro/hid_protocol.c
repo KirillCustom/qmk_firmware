@@ -599,8 +599,10 @@ enum {
      *       for the sleep's OE count and the tick rate.
      * op 23: the burst of PCF reads (rtc.c). [4] sub: 0 reads; 1 starts n =
      *       u16 at [5..6] (1..2000) reads, gaps random in [7]..[8] ms (low >=
-     *       20); 2 stops. Replies rtc_burst_fill's 28 bytes; a refused start
-     *       is unhandled.
+     *       20); 2 stops; 3 starts the receiver's depth probe instead: n spans
+     *       of interrupts masked for the u16 at [9..10] us (1..3000), the
+     *       same gaps and admission, no I2C. Replies rtc_burst_fill's 28
+     *       bytes; a refused start is unhandled.
      * op 24: the deep sleep's wake ring, slot arg (0..7): sleep.h.
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
@@ -1118,10 +1120,15 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !od_fill_kind(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 23: {
-                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
-                    uint8_t  sub = data[4];
-                    uint16_t n   = (uint16_t)(data[5] | (data[6] << 8));
-                    if (sub == 1 && !rtc_burst_start(n, data[7], data[8])) { data[0] = RTC_UNHANDLED; break; }
+                    if (length < 32 || data[4] > 3) { data[0] = RTC_UNHANDLED; break; }
+                    uint8_t  sub  = data[4];
+                    uint16_t n    = (uint16_t)(data[5] | (data[6] << 8));
+                    uint16_t mask = (uint16_t)(data[9] | (data[10] << 8));
+                    if ((sub == 1 || sub == 3) &&
+                        ((sub == 3 && mask == 0) || !rtc_burst_start(n, data[7], data[8], sub == 3 ? mask : 0))) {
+                        data[0] = RTC_UNHANDLED;
+                        break;
+                    }
                     if (sub == 2) rtc_burst_stop();
                     rtc_burst_fill(&data[4]);
                     break;

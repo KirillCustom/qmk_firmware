@@ -88,8 +88,10 @@ uint16_t rtc_clock_generation(void);
  * held 1 s past the bracket's edge, once. */
 void rtc_dev_delay_full_once(void);
 /* The overrun A/B's burst of PCF reads (HC_DEVHOOK op 23): n (1..2000) reads,
- * random gaps of lo_ms..hi_ms (lo >= 20); false if refused. */
-bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms);
+ * random gaps of lo_ms..hi_ms (lo >= 20); or, with mask_us (1..3000), as many
+ * spans of interrupts masked that long instead, the receiver's depth probe.
+ * False if refused. */
+bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms, uint16_t mask_us);
 void rtc_burst_stop(void);
 void rtc_burst_fill(uint8_t *out28);
 #endif

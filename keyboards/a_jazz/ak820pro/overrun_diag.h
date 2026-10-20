@@ -28,6 +28,7 @@
 #define OD_ACT_FLASH_PROG  0x02u
 #define OD_ACT_FLASH_ERASE 0x04u
 #define OD_ACT_SLEEP       0x08u
+#define OD_ACT_MASK_PROBE  0x10u   /* the receiver's depth probe: a masked span on demand */
 
 /* PCF transaction kinds and their wire bytes. */
 enum { OD_PCF_R1 = 0,   /* a 1-byte register read: 4 */
@@ -43,6 +44,7 @@ void od_pcf_begin(uint8_t kind);
 void od_pcf_end(uint8_t kind, bool ok);
 void od_rx_off(void);          /* I-class: the deep sleep turned the receiver off */
 void od_reset(void);
+void od_mask_probe(uint16_t ticks);   /* the depth probe: interrupts masked this long */
 bool od_byte_mode(void);
 void od_set_byte_mode(bool on);
 /* HC_DEVHOOK ops 20-22's replies, 28 bytes at out. */

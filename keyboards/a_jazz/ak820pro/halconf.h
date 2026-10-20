@@ -21,16 +21,19 @@
 #define SW_I2C_USE_OPENDRAIN FALSE  // emulate open-drain by input/output switching
 #define SW_I2C_USE_OSAL_DELAY FALSE // use rtc.c's busy-wait delay (non-yielding)
 /* HAL holds the system lock for a whole transaction and the busy-wait never
- * yields, so every interrupt waited for the whole transfer: up to ~3 ms,
- * longer than UART2's FIFO lasts (~1.4 ms if it is 16 bytes). The fallback
- * driver releases it at each byte boundary instead (chibios-contrib
- * ak820pro-patches; plans/OVERRUN-CAPS-PLAN.md, step 2). */
-#define SW_I2C_BYTE_PREEMPT TRUE
-
-/* Dev builds: the overrun measurement's hooks (overrun_diag.c) and the lock
- * span's run-time switch, which boots per transaction (as before the patch)
- * until the bench switches it. Daily builds release the lock every byte. */
+ * yields, so every interrupt waits for the whole transfer: 2.6 ms for the
+ * calendar read. The fallback driver can release it at each byte boundary
+ * (SW_I2C_BYTE_PREEMPT, chibios-contrib ak820pro-patches), but measured on
+ * 10-19 that is no fix: UART2's receiver holds far less than 16 bytes, so its
+ * 0.3 ms stretches overran ~8x more often, and the calendar read took 5.4 ms,
+ * past the deep sleep's 5 ms deadline (history/overrun-ab-20261019/). Off in
+ * released builds; dev builds compile it behind the run-time switch below,
+ * which boots per transaction.
+ *
+ * Dev builds: the overrun measurement's hooks (overrun_diag.c) and that
+ * switch. */
 #if defined(AK820_DEV_HOOKS) && !defined(_FROM_ASM_) && !defined(__ASSEMBLER__)
+#define SW_I2C_BYTE_PREEMPT TRUE
 extern volatile unsigned char od_i2c_byte_mode;
 void od_mask_begin(void);
 void od_mask_end(void);

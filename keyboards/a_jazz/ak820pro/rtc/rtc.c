@@ -1807,6 +1807,7 @@ static bool wake_step(void)
  * lock to the echo's period or the loop's. */
 static uint16_t      bu_left, bu_done, bu_failed, bu_skipped;
 static uint8_t       bu_lo = 40, bu_hi = 80;
+static uint16_t      bu_mask_ticks;   /* nonzero: the depth probe's masked spans, not PCF reads */
 static uint32_t      bu_first_ms, bu_last_ms, bu_rng = 0x2545F491u;
 /* The gaps run on the system tick, checked every pass (timer_read32 is a
  * 64-bit software divide here, ~250 us under the row ISR); `due` latches,
@@ -1828,9 +1829,10 @@ static bool burst_active(void)
     return bu_left != 0;
 }
 
-bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms)
+bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms, uint16_t mask_us)
 {
-    if (n == 0 || n > 2000u || lo_ms < 20u || hi_ms < lo_ms) return false;
+    if (n == 0 || n > 2000u || lo_ms < 20u || hi_ms < lo_ms || mask_us > 3000u) return false;
+    bu_mask_ticks = (uint16_t)TIME_US2I(mask_us);
     bu_lo = lo_ms; bu_hi = hi_ms;
     bu_done = bu_failed = bu_skipped = 0;
     bu_first_ms = bu_last_ms = 0;
@@ -1859,10 +1861,15 @@ static bool burst_step(void)
         if (bu_skipped < 0xFFFFu) bu_skipped++;
         return false;
     }
-    rtc_time_t scratch;
-    pcf_short_timeout = true;
-    bool ok = pcf_read_raw(&scratch);
-    pcf_short_timeout = false;
+    bool ok = true;
+    if (bu_mask_ticks) {
+        od_mask_probe(bu_mask_ticks);   /* the receiver's depth: no I2C at all */
+    } else {
+        rtc_time_t scratch;
+        pcf_short_timeout = true;
+        ok = pcf_read_raw(&scratch);
+        pcf_short_timeout = false;
+    }
     display_defer_pass();
     uint32_t now = timer_read32();
     if (!bu_done && !bu_failed) bu_first_ms = now;
