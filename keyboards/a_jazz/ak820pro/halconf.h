@@ -21,33 +21,49 @@
 #define SW_I2C_USE_OPENDRAIN FALSE  // emulate open-drain by input/output switching
 #define SW_I2C_USE_OSAL_DELAY FALSE // use rtc.c's busy-wait delay (non-yielding)
 /* HAL holds the system lock for a whole transaction and the busy-wait never
- * yields, so every interrupt waits for the whole transfer: 2.6 ms for the
- * calendar read. The fallback driver can release it at each byte boundary
- * (SW_I2C_BYTE_PREEMPT, chibios-contrib ak820pro-patches), but measured on
- * 10-19 that is no fix: UART2's receiver holds far less than 16 bytes, so its
- * 0.3 ms stretches overran ~8x more often, and the calendar read took 5.4 ms,
- * past the deep sleep's 5 ms deadline (history/overrun-ab-20261019/). Off in
- * released builds; dev builds compile it behind the run-time switch below,
- * which boots per transaction.
- *
- * Dev builds: the overrun measurement's hooks (overrun_diag.c) and that
- * switch. */
+ * yields, so every interrupt used to wait for the whole transfer: 2.6 ms for
+ * the calendar read, against UART2's receiver, which holds about one byte
+ * (87 us; history/overrun-depth-20261019/). The lock was there for the pin
+ * modes: the I2C's SDA switches are read-modify-writes of port A's MODE, as
+ * are the row ISR's, and nothing else changes a pin mode from an interrupt.
+ * So the transfer runs unlocked with only the row ISR's interrupt held off
+ * (rtc.c's ak820_i2c_xfer_begin/end; plans/UART-LATENCY-PLAN.md, fix 1).
+ * Every build. */
+#if !defined(_FROM_ASM_) && !defined(__ASSEMBLER__)
+void ak820_i2c_xfer_begin(void);
+void ak820_i2c_xfer_end(void);
+#define SW_I2C_XFER_BEGIN()                 ak820_i2c_xfer_begin()
+#define SW_I2C_XFER_END()                   ak820_i2c_xfer_end()
+#endif
+
+/* Dev builds: the overrun measurement's hooks (overrun_diag.c), and the lock's
+ * run-time switch: od_i2c_lock_mode 0 holds the system lock for the whole
+ * transaction (as before), 1 releases it at each byte boundary (measured: no
+ * fix; its 0.3 ms stretches still overrun), 2 runs unlocked (the default, as
+ * in every build). SW_I2C_INJECT_STUCK() makes the clock waits see SCL low:
+ * the real deadline, for the timeout test. */
 #if defined(AK820_DEV_HOOKS) && !defined(_FROM_ASM_) && !defined(__ASSEMBLER__)
 #define SW_I2C_BYTE_PREEMPT TRUE
-extern volatile unsigned char od_i2c_byte_mode;
+extern volatile unsigned char od_i2c_lock_mode;
+extern volatile unsigned char od_i2c_stuck;
 void od_mask_begin(void);
 void od_mask_end(void);
 void od_uart_oe(unsigned char in_drain);
 void od_uart_rxdrop(void);
+void od_uart_enter(void);
+void od_uart_exit(void);
 void od_usb_enter(void);
 void od_usb_exit(void);
 void od_st_enter(void);
 void od_st_exit(void);
-#define SW_I2C_BYTE_PREEMPT_ENABLED()       (od_i2c_byte_mode != 0)
+#define SW_I2C_BYTE_PREEMPT_ENABLED()       (od_i2c_lock_mode == 1u)
+#define SW_I2C_INJECT_STUCK()               (od_i2c_stuck != 0u)
 #define SW_I2C_MASK_BEGIN()                 od_mask_begin()
 #define SW_I2C_MASK_END()                   od_mask_end()
 #define SN32_SERIAL_OE_HOOK(sdp, in_drain)  od_uart_oe(in_drain)
 #define SN32_SERIAL_RXDROP_HOOK(sdp)        od_uart_rxdrop()
+#define SN32_SERIAL_IRQ_ENTER_HOOK()        od_uart_enter()
+#define SN32_SERIAL_IRQ_EXIT_HOOK()         od_uart_exit()
 #define SN32_USB_IRQ_ENTER_HOOK()           od_usb_enter()
 #define SN32_USB_IRQ_EXIT_HOOK()            od_usb_exit()
 #define SN32_ST_IRQ_ENTER_HOOK()            od_st_enter()

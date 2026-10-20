@@ -36,7 +36,7 @@
  * start; with rtc.c's 15-NOP bit delay a whole read is well under 1 ms, so 5
  * bounds only a stuck bus. */
 static bool pcf_short_timeout = false;
-#define PCF8563_I2C_TIMEOUT     (pcf_short_timeout ? TIME_MS2I(5) : TIME_MS2I(20))
+#define PCF8563_I2C_TIMEOUT     (pcf_short_timeout ? TIME_MS2I(5) : TIME_MS2I(10))
 
 
 #ifndef PCF8563_I2C_DELAY_NOPS
@@ -237,6 +237,43 @@ static void i2c_note(msg_t r, uint32_t sc0, uint32_t c0) {
     if (r != MSG_OK && i2c_fail_count < 0xFFFF) i2c_fail_count++;
 }
 
+/* The fallback LLD's transfer hooks (halconf.h): the transfer runs with the
+ * system lock released and only the row ISR's interrupt held off, CT16B1 in
+ * the NVIC (plans/UART-LATENCY-PLAN.md, fix 1). The lock was there for the
+ * pin modes: SDA's input/output switches are read-modify-writes of port A's
+ * MODE, and the row ISR writes the same register for A18/A19; no other
+ * interrupt changes a pin mode. HAL's own state update stays under its lock:
+ * begin is entered with it held and end returns with it held. Only the row
+ * line's enable bit is saved and put back, so a pending row interrupt fires
+ * once at the release (late, as under the old lock) and a disabled one stays
+ * disabled. NVIC_DisableIRQ has its barriers; never ChibiOS's vector
+ * helpers, which clear the pending state. Dev builds can keep the old lock
+ * (or the per-byte release) for the A/B. */
+static uint32_t i2c_row_irq_on;
+
+void ak820_i2c_xfer_begin(void)
+{
+#ifdef AK820_DEV_HOOKS
+    if (od_lock_mode() != OD_LOCK_UNLOCKED) return;
+    od_mask_end();   /* the opening stretch, closed before the unlock */
+#endif
+    i2c_row_irq_on = NVIC->ISER[0] & (1u << CT16B1_IRQn);
+    NVIC_DisableIRQ(CT16B1_IRQn);
+    chSysUnlock();
+}
+
+void ak820_i2c_xfer_end(void)
+{
+#ifdef AK820_DEV_HOOKS
+    if (od_lock_mode() != OD_LOCK_UNLOCKED) return;
+#endif
+    chSysLock();
+    if (i2c_row_irq_on) NVIC_EnableIRQ(CT16B1_IRQn);
+#ifdef AK820_DEV_HOOKS
+    od_mask_begin();   /* the closing stretch, from the relock */
+#endif
+}
+
 /* Every PCF transaction, one I2C call: its accounting, and after a failure
  * the driver's restart. The fallback driver reports every error (a NACK, a
  * lost arbitration, the deadline) as MSG_TIMEOUT, which leaves I2CD1 in
@@ -249,12 +286,12 @@ static msg_t pcf_xfer(uint8_t kind, const uint8_t *tx, size_t ntx, uint8_t *rx, 
     uint32_t sc0, c0; cyc_stamp(&sc0, &c0);
     OD_PCF_BEGIN(kind);
     msg_t r = i2cMasterTransmitTimeout(&I2CD1, PCF8563_ADDR, tx, ntx, rx, nrx, PCF8563_I2C_TIMEOUT);
-    OD_PCF_END(kind, r == MSG_OK);
     i2c_note(r, sc0, c0);
     if (r != MSG_OK) {
         i2cStop(&I2CD1);
         i2cStart(&I2CD1, &i2ccfg);
     }
+    OD_PCF_END(kind, r == MSG_OK);   /* the whole call, the restart included */
     return r;
 }
 
@@ -1892,9 +1929,37 @@ static bool burst_step(void)
     return true;
 }
 
+/* The ordinary path's real deadline, tested (op 23 sub 5): one 7-byte read,
+ * the ordinary 10 ms timeout, with the clock waits seeing SCL held low
+ * (halconf.h's SW_I2C_INJECT_STUCK), so the transfer runs into its deadline
+ * and the restart; through rtc_fast_task's ordinary admission, so the pass it
+ * lands in is the one to measure. */
+static bool     stuck_pending, stuck_ok;
+static uint32_t stuck_ms;
+
+void rtc_stuck_test(void)
+{
+    stuck_pending = true;
+}
+
+static bool stuck_step(void)
+{
+    if (!stuck_pending) return false;
+    stuck_pending = false;
+    rtc_time_t scratch;
+    uint32_t   t0 = timer_read32();
+    od_i2c_stuck  = 1;
+    stuck_ok      = pcf_read_raw(&scratch);
+    od_i2c_stuck  = 0;
+    stuck_ms      = timer_read32() - t0;
+    return true;
+}
+
 /* Op 23's reply: [0..1] reads left, [2..3] done, [4..5] failed, [6..9] ms
  * from the first read to the last, [10] active, [11] 0, [12..13] due passes
- * skipped (the bus used or not admitted), [14] the gap's low, [15] high. */
+ * skipped (the bus used or not admitted), [14] the gap's low, [15] high;
+ * the stuck-SCL test's [16] pending, [17] whether its read succeeded (it
+ * should not), [18..21] its whole call in ms, the restart included. */
 void rtc_burst_fill(uint8_t *out)
 {
     memset(out, 0, 28);
@@ -1906,6 +1971,9 @@ void rtc_burst_fill(uint8_t *out)
     put16(&out[12], bu_skipped);
     out[14] = bu_lo;
     out[15] = bu_hi;
+    out[16] = stuck_pending ? 1 : 0;
+    out[17] = stuck_ok ? 1 : 0;
+    put32(&out[18], stuck_ms);
 }
 #endif /* AK820_DEV_HOOKS */
 
@@ -1935,11 +2003,19 @@ void rtc_fast_task(void)
         if (pcf_xfers != n0) display_defer_pass();
         return;
     }
-    if (acq_state == ACQ_WAIT_SPLASH || acq_active()) { acquisition_step(); return; }
+    /* The ordinary path: one PCF transaction a pass, none after an earlier
+     * handler's (a legacy synchronous set from raw HID), and a pass that ran
+     * one defers its display work, as the recovery's do (plans/
+     * UART-LATENCY-PLAN.md, V2). */
+    if (rtc_pass_used_bus()) return;
+    uint32_t n0 = pcf_xfers;
+    if (acq_state == ACQ_WAIT_SPLASH || acq_active()) acquisition_step();
 #ifdef AK820_DEV_HOOKS
-    if (!pcf_pending && ps_state == PS_IDLE && burst_step()) return;
+    else if (stuck_step()) {}
+    else if (!pcf_pending && ps_state == PS_IDLE && burst_step()) {}
 #endif
-    pcf_machine_step();
+    else pcf_machine_step();
+    if (pcf_xfers != n0) display_defer_pass();
 }
 
 void rtc_status_fill_page4(uint8_t *out)

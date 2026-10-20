@@ -7,6 +7,7 @@
 #include "graphics/display.h"
 #include "bluetooth/ch582f_ajazz.h"   /* the module's battery level */
 #include "battery.h"                  /* battery_ran_from_pack */
+#include "overrun_diag.h"             /* dev: the interrupt-service-gap monitor rides this tick */
 #include <hal.h>
 
 /* --- Indicator LEDs -------------------------------------------------------
@@ -147,6 +148,9 @@ static void indicators_tick(void) {
  * Removed from the shipped build because it prints every second. */
 static void pwm_tick_cb(GPTDriver *gptp) {
     (void)gptp;
+#ifdef AK820_DEV_HOOKS
+    od_tick();   /* first, so the gap is this entry's */
+#endif
     display_backlight_tick();
     indicators_tick();
 }
@@ -207,6 +211,9 @@ void pwm_tick_startI(void) {
     gptStartContinuousI(&GPTD4, PWM_TICK_TIMEBASE / PWM_TICK_HZ);
     SN_CT16B3->MCTRL = CT16_PWM_UNLOCK(SN_CT16B3->MCTRL | mskCT16_MRnRST_EN(0));
     pwm_tick_stopped = false;
+#ifdef AK820_DEV_HOOKS
+    od_tick_reprime();   /* the gap across the stop is not a service gap */
+#endif
 }
 
 void pwm_tick_run(bool on) {

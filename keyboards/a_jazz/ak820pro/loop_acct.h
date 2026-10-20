@@ -65,8 +65,18 @@ extern bool     loop_acct_on;
 extern uint32_t loop_acct_run[ACCT_N];
 
 #define ACCT_NOW() ((uint16_t)st_lld_get_counter())
+/* Dev builds: each scope is also published, while it runs, as the overrun
+ * monitor's observed context (overrun_diag.h's od_ctx; ACCT_UNACCOUNTED
+ * between scopes). Two stores a scope; the scopes do not nest. */
+#ifdef AK820_DEV_HOOKS
+extern volatile uint8_t od_ctx;
+#    define ACCT_CTX(scope) (od_ctx = (uint8_t)(scope))
+#else
+#    define ACCT_CTX(scope) ((void)0)
+#endif
 #define ACCT(scope, call)                                                          \
     do {                                                                           \
+        ACCT_CTX(scope);                                                           \
         if (loop_acct_on) {                                                        \
             uint16_t acct_t0_ = ACCT_NOW();                                        \
             call;                                                                  \
@@ -74,6 +84,7 @@ extern uint32_t loop_acct_run[ACCT_N];
         } else {                                                                   \
             call;                                                                  \
         }                                                                          \
+        ACCT_CTX(ACCT_UNACCOUNTED);                                                \
     } while (0)
 
 /* health_loop_tick(): one pass ended, `gap_ms` long (its own measurement). A

@@ -379,11 +379,11 @@ static bool display_backlight_init(void) {
 static bool clock_force_repaint = true;
 static uint16_t clock_gen_painted = 0;   /* rtc_clock_generation() as the clock last drew from it */
 
-static void draw_status(bool force); // CH582F status: battery + channel digit
-/* draw_status() is FOUR forced repaints in a trench coat. Stepping it as one
- * unit left a 44 ms stall on the debug-page exit even after the clear was
- * banded -- the clear was never the whole cost. Declared individually so the
- * restore can spend one main-loop pass on each. */
+/* The status band is FOUR forced repaints (the old draw_status(), removed
+ * 10-19 with the one-call dashboard repaint). Stepping them as one unit left
+ * a 44 ms stall on the debug-page exit even after the clear was banded -- the
+ * clear was never the whole cost. Declared individually so the restore can
+ * spend one main-loop pass on each. */
 static void draw_conn_number(bool force);
 static void draw_battery(bool force);
 static void draw_locks(bool force);
@@ -1347,14 +1347,12 @@ void draw_clock(void) {
     }
 }
 
-/* One stage of display_redraw_dashboard(), for the Fn+D exit path. Returns true
- * while more stages remain.
- *
- * Same work, same order, split so no single main-loop pass carries all of it.
- * The animation-resume path still calls display_redraw_dashboard() whole: it
- * exits on a timer rather than a keypress, so nobody is mid-word when it fires,
- * and splitting a shared path used by the flash player was not worth the risk
- * for that caller. If it ever shows up in blit_gap_max_ms, route it here too. */
+/* One stage of the dashboard's repaint: the Fn+D exit's, and since 10-19 the
+ * animation's stop and the boot's too (display_redraw_dashboard requests it;
+ * the one-call version's full clear was 43-44 ms). Returns true while more
+ * stages remain. The whole repaint's work, in its order, split so no single
+ * main-loop pass carries all of it. The animation owns the panel while
+ * paused: the pump runs no stage then, and its stop starts again at 1. */
 static bool debug_restore_step(void) {
     uint8_t step = debug_exit_step;
 
@@ -1398,30 +1396,18 @@ static bool debug_restore_step(void) {
     return true;
 }
 
+/* The whole dashboard, repainted: as a request since 10-19, through the Fn+D
+ * restore's stages (a band of clear, then one component, a pass), because
+ * the one-call version cleared the whole panel at once, 43-44 ms on the loop
+ * that scans the matrix (plans/UART-LATENCY-PLAN.md, fix 4). Its callers are
+ * main-loop code: the boot's defer_exec after the splash, and the
+ * animation's stop (display_set_paused(false)). The bootloader splash has its
+ * own clear. The Fn+D page restores itself on its exit. */
 uint32_t display_redraw_dashboard(uint32_t trigger_time, void *cb_arg) {
-    splash_cleared = true;
-
-    /* Anything still queued belongs to the pre-clear frame -- painting it
-     * after this clear would scatter stale glyphs over the fresh dashboard
-     * (the resume-from-animation path made that reachable). */
-    display_queue_discard();
-
-    // Clear background.
-    lcd_clear_rect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
-
-    // Full repaint: force the clock and date to redraw over the cleared screen.
-    clock_force_repaint = true;
-
-    // Mac/Windows icon (top-left).
-    lcd_draw_flash_image(mac_mode ? ASSET_APPLE_ICON_24X24 : ASSET_WINDOWS_ICON_24X24, 0, 0);
-
-    // Connection icon.
-    draw_conn_row();
-
-    draw_clock();
-    draw_status(true);   // battery + channel digit over the cleared screen
-
-    return 0; // one-shot
+    (void)trigger_time;
+    (void)cb_arg;
+    if (!debug_active) debug_exit_step = 1;
+    return 0;   /* one-shot */
 }
 
 bool display_init_kb(void) {
@@ -1750,8 +1736,8 @@ static uint8_t batt_dirty = 0;
 static uint8_t txt_done   = 0;       /* glyphs of the current text painted */
 static bool    txt_placed = false;   /* its x is set and its vacated cells cleared */
 /* At most ONE component per main-loop pass. display_housekeeping_task() runs
- * from the RTC second edge AND the 10 Hz tick, and the deferred dashboard
- * redraw (draw_status) runs before both, so two or three can land in one pass
+ * from the RTC second edge AND the 10 Hz tick, and a forced repaint (the
+ * restore's battery stage) can run before both, so two or three can land in one pass
  * (codex, flash 2c finding 1 and its verification). display_pass_end(), the
  * last thing housekeeping_task_kb() does, clears this once a pass. */
 static bool    batt_painted_this_pass = false;
@@ -1844,11 +1830,11 @@ static void draw_battery(bool force) {
      * and the bar a clear and a rect. What changed is marked in batt_dirty, and
      * each call paints the first mark: the outline (after a clear), the bolt,
      * the text, then the bar. The housekeeping tick calls back while marks
-     * remain, so a plug-in settles in three ticks, ~300 ms. The Fn+D restore's
-     * battery stage and draw_status() now paint only the outline themselves. */
+     * remain, so a plug-in settles in three ticks, ~300 ms. The restore's
+     * battery stage paints only the outline itself. */
     if (force) {
-        /* The callers (draw_status, the Fn+D restore) have just cleared the
-         * panel: nothing of ours is on it. */
+        /* The caller (the staged restore) has just cleared the panel:
+         * nothing of ours is on it. */
         last_fw = 0; last_txt_x = PANEL_WIDTH; last_txt_w = 0;
         txt_done = 0; txt_placed = false;
         batt_dirty = BATT_DIRTY_ALL;
@@ -2894,8 +2880,15 @@ void display_blit_pump(void) {
         DPROBE(DP_DBG_GLYPH, debug_pump_glyph());
         return;
     }
-    /* Restoring the dashboard after Fn+D: one stage per pass. Ahead of the
-     * queue because stage 1 clears the panel and discards whatever is in it. */
+    /* The animation owns the panel while paused, the staged restore included:
+     * one requested when it stops starts again from stage 1 (fix 4). */
+    if (display_paused) {
+        blocked = false;   /* stale grace must not carry into later work */
+        return;
+    }
+    /* Restoring the dashboard after Fn+D, the animation or the boot splash:
+     * one stage per pass. Ahead of the queue because stage 1 clears the panel
+     * and discards whatever is in it. */
 #ifdef AK820_DEV_HOOKS
     if (debug_exit_step) {
         blocked = false;
@@ -2907,10 +2900,6 @@ void display_blit_pump(void) {
     if (debug_exit_step) { blocked = false; debug_restore_step(); return; }
 #endif
 
-    if (display_paused) {
-        blocked = false;   /* stale grace must not carry into later work */
-        return;
-    }
     /* The labels first (see LQ_MAX): one glyph a pass, as below. */
     if (lq_pending()) {
         if (!lcd_draw_flash_glyph_try(FONT_STATUS, lq[lq_i].c, lq[lq_i].x, LOCK_Y)) {
@@ -3154,13 +3143,6 @@ static void draw_text_slot(bool force) {
      * nothing clears the gutter and this never fires. */
     if (icon_clobbered && want_icon != DISPLAY_ICON_NONE)
         draw_text_icon(0, icon_y, want_icon);
-}
-
-static void draw_status(bool force) {
-    draw_conn_number(force);
-    draw_battery(force);
-    draw_locks(force);
-    draw_text_slot(force);
 }
 
 /* Clock-sync plan 3.9: on an RTC second edge, run ONE extra pass of the

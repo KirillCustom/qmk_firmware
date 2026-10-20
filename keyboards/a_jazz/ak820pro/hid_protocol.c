@@ -600,10 +600,12 @@ enum {
  *       only; a reset boots on). Replies [4] 1 if on.
      * Ops 20-24: the radio link's UART overruns, measured (overrun_diag.h,
      * plans/OVERRUN-CAPS-PLAN.md, step 1). Each reply is 28 bytes at [4..31].
-     * op 20: the summary (od_fill_summary). arg 0 reads; 1 zeroes the counts,
-     *       the ring and the kinds' figures; 2 sets the I2C lock span per
-     *       transaction, 3 per byte (RAM only: a reset boots per
-     *       transaction); each then replies as 0.
+     * op 20: the summary (od_fill_summary). [4] sub: 0 reads; 1 zeroes the
+     *       counts, the ring and the kinds' figures; 2 sets the PCF
+     *       transaction's lock to [5] (OD_LOCK_*: 0 the system lock
+     *       throughout, 1 per byte, 2 unlocked, as every build boots); 3 sets
+     *       UART2's NVIC priority to [5] (0, as every build boots, or 1);
+     *       RAM only; each then replies as 0.
      * op 21: the OE ring, page arg (0..15): slots 2*arg and 2*arg+1.
      * op 22: one PCF transaction kind's figures, arg 0..3 (OD_PCF_*), or 0xFF
      *       for the sleep's OE count and the tick rate.
@@ -611,9 +613,13 @@ enum {
      *       u16 at [5..6] (1..2000) reads, gaps random in [7]..[8] ms (low >=
      *       20); 2 stops; 3 starts the receiver's depth probe instead: n spans
      *       of interrupts masked for the u16 at [9..10] us (1..3000), the
-     *       same gaps and admission, no I2C. Replies rtc_burst_fill's 28
-     *       bytes; a refused start is unhandled.
+     *       same gaps and admission, no I2C; 5 runs one ordinary read into
+     *       its real deadline (SCL injected stuck). Replies rtc_burst_fill's
+     *       28 bytes; a refused start is unhandled.
      * op 24: the deep sleep's wake ring, slot arg (0..7): sleep.h.
+     * op 25: the interrupt-service-gap monitor (od_fill_mon): [4] 0 reads,
+     *       1 on, 2 off, 3 zeroes; then replies as 0.
+     * op 26: its ring, page arg (0..7).
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -1171,10 +1177,14 @@ static void health_command(uint8_t *data, uint8_t length) {
                     break;
                 }
                 case 20: {
-                    uint8_t sub = data[4];
-                    if (length < 32 || sub > 3) { data[0] = RTC_UNHANDLED; break; }
+                    uint8_t sub = data[4], arg = data[5];
+                    if (length < 32 || sub > 3 || (sub == 2 && arg > OD_LOCK_UNLOCKED) || (sub == 3 && arg > 1)) {
+                        data[0] = RTC_UNHANDLED;
+                        break;
+                    }
                     if (sub == 1) od_reset();
-                    if (sub >= 2) od_set_byte_mode(sub == 3);
+                    if (sub == 2) od_set_lock_mode(arg);
+                    if (sub == 3) od_set_uart_priority(arg);
                     od_fill_summary(&data[4]);
                     break;
                 }
@@ -1185,7 +1195,7 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !od_fill_kind(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 23: {
-                    if (length < 32 || data[4] > 3) { data[0] = RTC_UNHANDLED; break; }
+                    if (length < 32 || data[4] > 5 || data[4] == 4) { data[0] = RTC_UNHANDLED; break; }
                     uint8_t  sub  = data[4];
                     uint16_t n    = (uint16_t)(data[5] | (data[6] << 8));
                     uint16_t mask = (uint16_t)(data[9] | (data[10] << 8));
@@ -1195,11 +1205,20 @@ static void health_command(uint8_t *data, uint8_t length) {
                         break;
                     }
                     if (sub == 2) rtc_burst_stop();
+                    if (sub == 5) rtc_stuck_test();
                     rtc_burst_fill(&data[4]);
                     break;
                 }
                 case 24:
                     if (length < 32 || !sleep_wake_ring_fill(data[4], &data[4])) data[0] = RTC_UNHANDLED;
+                    break;
+                case 25:
+                    if (length < 32 || data[4] > 3) { data[0] = RTC_UNHANDLED; break; }
+                    if (data[4]) od_mon_set(data[4]);
+                    od_fill_mon(&data[4]);
+                    break;
+                case 26:
+                    if (length < 32 || !od_fill_mon_ring(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 default: data[0] = RTC_UNHANDLED; break;
             }

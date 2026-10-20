@@ -30,6 +30,11 @@
 #define OD_ACT_SLEEP       0x08u
 #define OD_ACT_MASK_PROBE  0x10u   /* the receiver's depth probe: a masked span on demand */
 
+/* The PCF transaction's lock (od_i2c_lock_mode, halconf.h). */
+enum { OD_LOCK_TRANSACTION = 0,   /* the system lock throughout (before 10-19) */
+       OD_LOCK_BYTE        = 1,   /* released at each byte boundary: no fix */
+       OD_LOCK_UNLOCKED    = 2 }; /* unlocked, the row ISR held off: every build's way */
+
 /* PCF transaction kinds and their wire bytes. */
 enum { OD_PCF_R1 = 0,   /* a 1-byte register read: 4 */
        OD_PCF_R7,       /* the 7-byte calendar read: 10 */
@@ -45,8 +50,20 @@ void od_pcf_end(uint8_t kind, bool ok);
 void od_rx_off(void);          /* I-class: the deep sleep turned the receiver off */
 void od_reset(void);
 void od_mask_probe(uint16_t ticks);   /* the depth probe: interrupts masked this long */
-bool od_byte_mode(void);
-void od_set_byte_mode(bool on);
+uint8_t od_lock_mode(void);
+bool    od_set_lock_mode(uint8_t mode);          /* false for a value past OD_LOCK_UNLOCKED */
+uint8_t od_set_uart_priority(uint8_t prio);      /* 0 or 1; returns NVIC_GetPriority's readback */
+uint8_t od_uart_priority(void);
+void    od_mask_begin(void);
+void    od_mask_end(void);
+/* The interrupt-service-gap monitor on the 20 kHz CT16B3 tick (indicators.c). */
+void od_tick(void);                              /* from the tick's handler */
+void od_tick_reprime(void);                      /* whenever the tick stops, starts, or the monitor turns on */
+void od_mon_set(uint8_t sub);                    /* 1 on, 2 off, 3 zero */
+void od_fill_mon(uint8_t *out);                  /* op 25 */
+bool od_fill_mon_ring(uint8_t page, uint8_t *out);   /* op 26 */
+/* The observed context: the ACCT() scope running now, or ACCT_UNACCOUNTED. */
+extern volatile uint8_t od_ctx;
 /* HC_DEVHOOK ops 20-22's replies, 28 bytes at out. */
 void od_fill_summary(uint8_t *out);
 bool od_fill_ring(uint8_t page, uint8_t *out);

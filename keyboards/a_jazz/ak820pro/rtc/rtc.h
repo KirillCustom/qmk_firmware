@@ -93,6 +93,7 @@ void rtc_dev_delay_full_once(void);
  * False if refused. */
 bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms, uint16_t mask_us);
 void rtc_burst_stop(void);
+void rtc_stuck_test(void);   /* op 23 sub 5: one ordinary read into its real deadline */
 void rtc_burst_fill(uint8_t *out28);
 #endif
 

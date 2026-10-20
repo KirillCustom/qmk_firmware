@@ -61,7 +61,7 @@
  * wrong is what caused both the Bluetooth throughput collapse and the backlight
  * flicker, so the reasoning is spelled out:
  *
- *   1  UART2 (CH582F)  -- byte-loss critical. A missed ACK stalls a TX frame for
+ *   0  UART2 (CH582F)  -- byte-loss critical (1 until 10-19; see below). A missed ACK stalls a TX frame for
  *                         CH582_TX_ACK_TIMEOUT_MS; at 3.7 retries per frame that
  *                         is ~7 characters/second and you can out-type the link.
  *   2  GPT CT16B3      -- the backlight/indicator PWM tick. Tiny (a counter, a
@@ -75,7 +75,15 @@
  *
  * The defaults had this inverted: UART 3, PWM 2, GPT 3. */
 #undef SN32_SERIAL_UART2_PRIORITY
-#define SN32_SERIAL_UART2_PRIORITY 1
+#define SN32_SERIAL_UART2_PRIORITY 0
+/* 0, above USB (1), since 10-19: UART2's receiver holds about one byte, so it
+ * must be served within ~87 us, and the USB handler (up to ~0.085 ms) shared
+ * its priority (plans/UART-LATENCY-PLAN.md, fix 2). This port allows OS calls
+ * at 0 (ARMv6-M: PRIMASK locking, the context switch through the NMI). The
+ * system timer is 0 too, stated below: the two cannot preempt each other.
+ * Priority 0 still cannot preempt a PRIMASK section. */
+#undef SN32_ST_IRQ_PRIORITY
+#define SN32_ST_IRQ_PRIORITY 0      /* was the default 8, which the 2-bit field truncated to 0 */
 
 #undef SN32_GPT_CT16B3_IRQ_PRIORITY
 #define SN32_GPT_CT16B3_IRQ_PRIORITY 2

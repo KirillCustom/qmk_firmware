@@ -6,6 +6,7 @@
 #include "quantum.h"
 #include "overrun_diag.h"
 #include "rtc/rtc.h"   /* rtc_seconds_since_boot */
+#include "loop_acct.h" /* ACCT_UNACCOUNTED, the observed context's sentinel */
 
 #ifdef AK820_DEV_HOOKS
 
@@ -17,9 +18,11 @@
 
 static inline uint16_t od_now(void) { return (uint16_t)st_lld_get_counter(); }
 
-/* Read by the drivers' hooks (halconf.h): the lock's span between bytes, as
- * the board boots (0, per transaction) until a dev command sets it. */
-volatile uint8_t od_i2c_byte_mode = 0;
+/* Read by the drivers' hooks (halconf.h): the PCF transaction's lock
+ * (OD_LOCK_*), unlocked as every build boots; and the stuck-SCL injection. */
+volatile uint8_t od_i2c_lock_mode = OD_LOCK_UNLOCKED;
+volatile uint8_t od_i2c_stuck     = 0;
+volatile uint8_t od_ctx           = ACCT_UNACCOUNTED;   /* loop_acct.h's ACCT() publishes it */
 
 static volatile uint8_t  activity;        /* OD_ACT_* */
 static volatile uint8_t  pcf_kind;        /* the transaction in flight */
@@ -37,6 +40,7 @@ static od_kind_t kinds[OD_PCF_KINDS];
 static volatile uint32_t oe_obs, oe_drain, rx_drop, rx_off;
 static volatile uint16_t ctx_pcf, ctx_flash, ctx_sleep, ctx_none, ctx_probe;
 static volatile uint16_t usb_t0, st_t0, usb_max, st_max, usb_max_since, st_max_since;
+static volatile uint16_t uart_t0, uart_max;
 
 typedef struct __attribute__((packed)) {
     uint16_t seq;
@@ -83,7 +87,7 @@ static void oe_seen(uint8_t in_drain) {
     e->seq     = ring_seq;
     e->secs    = rtc_seconds_since_boot();
     e->act     = act;
-    e->flags   = (uint8_t)((pcf_kind & 3u) | (in_drain ? 0x40u : 0u) | (od_i2c_byte_mode ? 0x80u : 0u));
+    e->flags   = (uint8_t)((pcf_kind & 3u) | ((od_i2c_lock_mode & 3u) << 4) | (in_drain ? 0x40u : 0u));
     e->span    = mask_last;
     e->usb_max = usb_max_since;
     e->st_max  = st_max_since;
@@ -94,11 +98,21 @@ static void oe_seen(uint8_t in_drain) {
 void od_uart_oe(uint8_t in_drain) { oe_seen(in_drain); }
 void od_uart_rxdrop(void) { rx_drop++; }
 
+/* USB's span includes any UART2 handler that preempted it (UART2 is above it
+ * since 10-19), and both hooks sit inside the port's prologue and epilogue.
+ * The maxima under the ISR lock: UART2's OE entry clears usb_max_since. */
 void od_usb_enter(void) { usb_t0 = od_now(); }
 void od_usb_exit(void) {
     uint16_t d = (uint16_t)(od_now() - usb_t0);
+    chSysLockFromISR();
     if (d > usb_max) usb_max = d;
     if (d > usb_max_since) usb_max_since = d;
+    chSysUnlockFromISR();
+}
+void od_uart_enter(void) { uart_t0 = od_now(); }
+void od_uart_exit(void) {
+    uint16_t d = (uint16_t)(od_now() - uart_t0);
+    if (d > uart_max) uart_max = d;   /* UART2 and the system timer, both at 0, cannot preempt it */
 }
 void od_st_enter(void) { st_t0 = od_now(); }
 void od_st_exit(void) {
@@ -156,8 +170,90 @@ void od_mask_probe(uint16_t ticks) {
     od_activity_clear(OD_ACT_MASK_PROBE);
 }
 
-bool od_byte_mode(void) { return od_i2c_byte_mode != 0; }
-void od_set_byte_mode(bool on) { od_i2c_byte_mode = on ? 1u : 0u; }
+uint8_t od_lock_mode(void) { return od_i2c_lock_mode; }
+/* The main thread only, between transactions: never during one. */
+bool od_set_lock_mode(uint8_t mode) {
+    if (mode > OD_LOCK_UNLOCKED) return false;
+    od_i2c_lock_mode = mode;
+    return true;
+}
+
+/* UART2's priority at run time, for the A/B (0 every build, 1 before 10-19):
+ * under the lock, its line disabled across the write (CMSIS's disable has its
+ * barriers; the pending state is kept), the enable put back as found. Not
+ * ChibiOS's vector helpers, which clear the pending state; a serial restart
+ * would put mcuconf's value back. */
+uint8_t od_set_uart_priority(uint8_t prio) {
+    if (prio > 1u) prio = 1u;
+    chSysLock();
+    bool on = (NVIC->ISER[0] & (1u << UART2_IRQn)) != 0u;
+    NVIC_DisableIRQ(UART2_IRQn);
+    NVIC_SetPriority(UART2_IRQn, prio);
+    if (on) NVIC_EnableIRQ(UART2_IRQn);
+    chSysUnlock();
+    return (uint8_t)NVIC_GetPriority(UART2_IRQn);
+}
+uint8_t od_uart_priority(void) { return (uint8_t)NVIC_GetPriority(UART2_IRQn); }
+
+/* ---- The interrupt-service-gap monitor (plans/UART-LATENCY-PLAN.md, fix 3) --
+ * The 20 kHz tick's entries, a nominal 50 us apart: a longer gap means its
+ * handler was held off, by a masked stretch or by a handler at 0-1 (UART2,
+ * the system timer, USB). A gap, not UART2's latency; and what the main loop
+ * was in (od_ctx, the activity bits) is the observed context, not a cause.
+ * The fast path is a counter read, a subtract and a compare. */
+#define MON_T130 ((uint16_t)(CH_CFG_ST_FREQUENCY * 130u / 1000000u))   /* lateness 80 us */
+#define MON_T200 ((uint16_t)(CH_CFG_ST_FREQUENCY * 200u / 1000000u))   /* 150 us */
+#define MON_T350 ((uint16_t)(CH_CFG_ST_FREQUENCY * 350u / 1000000u))   /* 300 us */
+#define MON_RING 16u
+static volatile uint8_t  mon_on, mon_primed;
+static uint16_t          mon_last;
+static volatile uint16_t mon_max, mon_seq;
+static volatile uint8_t  mon_max_ctx, mon_max_act;
+static volatile uint32_t mon_n130, mon_n200, mon_n350, mon_ticks;
+typedef struct __attribute__((packed)) {
+    uint16_t seq;
+    uint32_t secs;
+    uint16_t gap;      /* ticks */
+    uint8_t  ctx, act;
+} mon_entry_t;
+static mon_entry_t mon_ring[MON_RING];
+
+void od_tick_reprime(void) { mon_primed = 0; }
+
+void od_tick(void) {
+    if (!mon_on) return;
+    uint16_t now = od_now();
+    uint16_t gap = (uint16_t)(now - mon_last);
+    mon_last = now;
+    if (!mon_primed) { mon_primed = 1; return; }
+    mon_ticks++;
+    if (gap < MON_T130) return;
+    /* The rare path. */
+    chSysLockFromISR();
+    mon_n130++;
+    if (gap >= MON_T200) mon_n200++;
+    if (gap >= MON_T350) mon_n350++;
+    uint8_t ctx = od_ctx, act = activity;
+    if (gap > mon_max) { mon_max = gap; mon_max_ctx = ctx; mon_max_act = act; }
+    if (gap >= MON_T200) {
+        mon_entry_t *e = &mon_ring[mon_seq % MON_RING];
+        e->seq = mon_seq++; e->secs = rtc_seconds_since_boot(); e->gap = gap; e->ctx = ctx; e->act = act;
+    }
+    chSysUnlockFromISR();
+}
+
+void od_mon_set(uint8_t sub) {
+    chSysLock();
+    if (sub == 1) { mon_on = 1; mon_primed = 0; }
+    if (sub == 2) mon_on = 0;
+    if (sub == 3) {
+        mon_max = mon_seq = 0; mon_max_ctx = mon_max_act = 0;
+        mon_n130 = mon_n200 = mon_n350 = mon_ticks = 0;
+        memset(mon_ring, 0, sizeof(mon_ring));
+        mon_primed = 0;
+    }
+    chSysUnlock();
+}
 
 void od_reset(void) {
     chSysLock();
@@ -167,6 +263,7 @@ void od_reset(void) {
     oe_obs = oe_drain = rx_drop = rx_off = 0;
     ctx_pcf = ctx_flash = ctx_sleep = ctx_none = ctx_probe = 0;
     usb_max = st_max = usb_max_since = st_max_since = 0;
+    uart_max = 0;
     chSysUnlock();
 }
 
@@ -178,8 +275,9 @@ static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
  * mode, [15] 0, [16..17] the longest USB handler, [18..19] the longest
  * system-timer handler (ticks), [20..21] OEs seen with a PCF transaction,
  * [22..23] with a flash program or erase, [24..25] with neither nor a
- * sleep, [26..27] the deep sleep's receiver-off intervals (u16). The sleep's
- * own OE count is page 1 of op 22 (kind 0xFF). */
+ * sleep, [26..27] the deep sleep's receiver-off intervals (u16); [14] is the
+ * lock mode (OD_LOCK_*) and [15] UART2's priority as the NVIC reads it. The
+ * sleep's own OE count is op 22's kind 0xFF. */
 void od_fill_summary(uint8_t *out) {
     memset(out, 0, 28);
     chSysLock();
@@ -187,7 +285,8 @@ void od_fill_summary(uint8_t *out) {
     put32(&out[4], oe_drain);
     put32(&out[8], rx_drop);
     put16(&out[12], ring_seq);
-    out[14] = od_i2c_byte_mode;
+    out[14] = od_i2c_lock_mode;
+    out[15] = (uint8_t)NVIC_GetPriority(UART2_IRQn);
     put16(&out[16], usb_max);
     put16(&out[18], st_max);
     put16(&out[20], ctx_pcf);
@@ -211,8 +310,10 @@ bool od_fill_ring(uint8_t page, uint8_t *out) {
  * of 1.0 ms or more, [14..17] of 1.4 ms or more, [18..21] stretches in all.
  * Kind 0xFF: [0..1] OEs seen during a deep sleep's teardown or wake, the
  * tick rate u32 at [2..5], the RTC's seconds since boot now at [6..9] (the
- * ring's entries are stamped in the same seconds), [10..11] OEs seen with
- * the depth probe's masked span. */
+ * ring's entries are stamped in the same seconds: coarse context only, since
+ * a phase set or a wake's correction can move them), [10..11] OEs seen with
+ * the depth probe's masked span, [12..13] the UART2 handler's longest run
+ * (ticks, prologue to epilogue excluded). */
 bool od_fill_kind(uint8_t kind, uint8_t *out) {
     memset(out, 0, 28);
     if (kind == 0xFFu) {
@@ -222,6 +323,7 @@ bool od_fill_kind(uint8_t kind, uint8_t *out) {
         put32(&out[2], CH_CFG_ST_FREQUENCY);
         put32(&out[6], rtc_seconds_since_boot());
         put16(&out[10], ctx_probe);
+        put16(&out[12], uart_max);
         return true;
     }
     if (kind >= OD_PCF_KINDS) return false;
@@ -235,6 +337,35 @@ bool od_fill_kind(uint8_t kind, uint8_t *out) {
     put32(&out[10], k.n_ge1);
     put32(&out[14], k.n_ge14);
     put32(&out[18], k.spans);
+    return true;
+}
+
+/* Op 25: [0] on, [1] primed, [2..3] the longest gap (ticks), [4..7] gaps of
+ * 130 us or more (80 late), [8..11] 200 us (150 late), [12..15] 350 us (300
+ * late), [16..19] gaps measured, [20] the longest's observed context (an
+ * ACCT_* scope, 0xFF none), [21] its activity bits, [22..23] the ring's
+ * entries written (gaps of 200 us or more). */
+void od_fill_mon(uint8_t *out) {
+    memset(out, 0, 28);
+    chSysLock();
+    out[0] = mon_on; out[1] = mon_primed;
+    put16(&out[2], mon_max);
+    put32(&out[4], mon_n130); put32(&out[8], mon_n200); put32(&out[12], mon_n350);
+    put32(&out[16], mon_ticks);
+    out[20] = mon_max_ctx; out[21] = mon_max_act;
+    put16(&out[22], mon_seq);
+    chSysUnlock();
+}
+
+/* Op 26, page 0..7: slots 2*page and 2*page+1, 10 bytes each at [0..9] and
+ * [10..19]: u16 sequence, u32 RTC seconds, u16 the gap (ticks), the
+ * observed context, the activity bits. */
+bool od_fill_mon_ring(uint8_t page, uint8_t *out) {
+    if (page >= MON_RING / 2u) return false;
+    memset(out, 0, 28);
+    chSysLock();
+    memcpy(out, &mon_ring[2u * page], 2u * sizeof(mon_entry_t));
+    chSysUnlock();
     return true;
 }
 
