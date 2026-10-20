@@ -8,6 +8,9 @@
 #include "loop_acct.h" /* D1: this task's share of each main-loop pass */
 #ifdef AK820_DEV_HOOKS
 #include "lockchan.h"  /* the lock-LED channel's receiver, fed from 5A */
+#include "lockchan_media.h"   /* what a committed frame means */
+#include "ak820pro.h"         /* hid_rawhid_media_within, the channel's lease */
+#include "graphics/display.h" /* the text slot, for a committed frame */
 #endif
 
 #ifndef CH582_SERIAL_DRIVER
@@ -414,6 +417,42 @@ void ch582_lockchan_clear(void) { lockchan_clear_stats(&lockchan); }
 /* Only while the radio is the active host: in cable mode the LED state the
  * band shows is USB's, which a radio frame must not hold (codex, flash 2h). */
 bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scroll(&lockchan); }
+
+/* A committed frame on the panel (plans/LOCK-LED-CHANNEL-PLAN.md, R2-9 and
+ * R3-2): validated whole first (lockchan_media.c), then refused while raw HID
+ * has carried a media command within the lease, so a late Bluetooth frame
+ * cannot overwrite what USB or the 2.4G dongle just showed. Only then the
+ * display, through the same setters as raw HID's text channel: both lines and
+ * the icon, and playback off (an absolute snapshot carries none). RAM state
+ * only; the band paints on its own schedule. */
+#define LOCKCHAN_LEASE_MS 10000u
+static uint32_t lcm_applied, lcm_rejected, lcm_leased;
+
+static void lockchan_media_commit(const lockchan_frame_t *f) {
+    lockchan_media_t m;
+    if (!lockchan_media_parse(f, &m)) {
+        lcm_rejected++;
+        return;
+    }
+    if (hid_rawhid_media_within(timer_read32(), LOCKCHAN_LEASE_MS)) {
+        lcm_leased++;
+        return;
+    }
+    if (m.type == LOCKCHAN_TYPE_CLEAR) {
+        display_clear_text();
+    } else {
+        display_set_text_line(0, m.icon, (const char *)m.l0, m.n0);
+        display_set_text_line(1, m.icon, (const char *)m.l1, m.n1);
+    }
+    display_set_playback(0, 0, 0);
+    lcm_applied++;
+}
+
+void ch582_lockchan_media_counts(uint32_t out[3]) {
+    out[0] = lcm_applied;
+    out[1] = lcm_rejected;
+    out[2] = lcm_leased;
+}
 /* Every site where the link may move also drops stage 1's pending echo, so a
  * reply cannot leave on a link other than its request's (r81 below; codex
  * stage-1 review, should-fix 4). */
@@ -1810,7 +1849,9 @@ void ch582_task(void) {
                      *     to pass the checksum usually has high bits set. */
 #ifdef AK820_DEV_HOOKS
                     led5a_note(d, is_module_connected && (d & ~0x1F) == 0);
-                    if (is_module_connected && !usb_mode) lockchan_feed(&lockchan, d, timer_read32());
+                    if (is_module_connected && !usb_mode && lockchan_feed(&lockchan, d, timer_read32())) {
+                        lockchan_media_commit(&lockchan.last);
+                    }
 #endif
                     if (is_module_connected && (d & ~0x1F) == 0) {
                         host_leds = d;
