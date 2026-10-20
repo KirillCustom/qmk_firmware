@@ -971,6 +971,30 @@ bool ch582_raw81_window(int8_t on) {
     if (on >= 0) r91_window_on = on != 0;
     return r91_window_on;
 }
+
+/* HC_DEVHOOK op 17 sub 6: the long clock's virtual timer stopped (0) or
+ * armed (1); -1 only reads. For the deep-sleep A/B (10-20: every sleep woke
+ * after a second on b2a07e0d) in one image, so the layout does not move.
+ * Stopped, the clock is refreshed only by ch582_task's passes, and a stall
+ * past a 16-bit wrap (~0.35 s) loses time: diagnostic use only. Returns
+ * whether it is armed. */
+bool ch582_raw81_vt(int8_t on) {
+#if CH_CFG_ST_RESOLUTION < 32
+    r81_ensure();
+    if (on == 0) {
+        chVTReset(&r81_long_vt);
+    } else if (on > 0) {
+        chSysLock();
+        r81_long_extend();
+        if (!chVTIsArmedI(&r81_long_vt)) chVTSetI(&r81_long_vt, RAW81_LONG_UPDATE, r81_long_tick, NULL);
+        chSysUnlock();
+    }
+    return chVTIsArmed(&r81_long_vt);
+#else
+    (void)on;
+    return false;
+#endif
+}
 #endif
 
 #ifdef CONSOLE_ENABLE
