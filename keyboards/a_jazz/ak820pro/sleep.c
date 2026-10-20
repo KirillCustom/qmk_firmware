@@ -304,6 +304,64 @@ static uint8_t  rc_timed_out;
 static void recovery_begin(uint8_t reason);
 
 #ifdef AK820_DEV_HOOKS
+/* DIAGNOSTIC, not for merge (10-20): which WFI placement breaks the wake.
+ * On b2a07e0d37 every sleep ended after one counted second as a "charge"
+ * wake, with r7 corrupted; the same code moved by 37 lines' worth of layout
+ * slept. op 14 sub 7 picks the sequence for the next sleeps:
+ *   0xFF  the C sequence as built (the default);
+ *   0-7   the sequence in asm, aligned so the WFI sits at (2k + 6) mod 16
+ *         in a 16-byte line: k 5 = 0, 6 = 2, 7 = 4, 0 = 6, 1 = 8 ... 4 = 14;
+ *   8     from SRAM (.ramtext, copied at boot with .data), with ~100 us of
+ *         settle in SRAM before the flash is fetched again. */
+static volatile uint8_t ds_wfi_variant = 0xFFu;
+
+uint8_t sleep_wfi_variant(int16_t v) {
+    if (v >= 0) ds_wfi_variant = (uint8_t)v;
+    return ds_wfi_variant;
+}
+
+__attribute__((section(".ramtext"), noinline, long_call)) static void ds_wfi_ram(volatile uint32_t *ctrl) {
+    *ctrl = 2u;
+    __DSB();
+    __WFI();
+    *ctrl = 0u;
+    for (volatile uint32_t d = 0; d < 300u; d++) {}   /* ~100 us at the IHRC's 12 MHz */
+}
+
+#    define DS_WFI_ASM(k)                                                                          \
+        __asm volatile(".balign 16\n\t.rept " #k "\n\tnop\n\t.endr\n\t"                          \
+                       "str %[two], [%[ctrl]]\n\tdsb\n\twfi\n\tstr %[zero], [%[ctrl]]\n\t"         \
+                       :                                                                        \
+                       : [ctrl] "l"(&SN_PMU->CTRL), [two] "l"(2u), [zero] "l"(0u)               \
+                       : "memory")
+
+static inline __attribute__((always_inline)) void ds_wfi(void) {
+    switch (ds_wfi_variant) {
+        case 0: DS_WFI_ASM(0); break;
+        case 1: DS_WFI_ASM(1); break;
+        case 2: DS_WFI_ASM(2); break;
+        case 3: DS_WFI_ASM(3); break;
+        case 4: DS_WFI_ASM(4); break;
+        case 5: DS_WFI_ASM(5); break;
+        case 6: DS_WFI_ASM(6); break;
+        case 7: DS_WFI_ASM(7); break;
+        case 8: ds_wfi_ram(&SN_PMU->CTRL); break;
+        default:
+            SN_PMU->CTRL = 2;
+            __DSB();
+            __WFI();
+            SN_PMU->CTRL = 0;
+            break;
+    }
+}
+#else
+uint8_t sleep_wfi_variant(int16_t v) {
+    (void)v;
+    return 0xFFu;
+}
+#endif
+
+#ifdef AK820_DEV_HOOKS
 /* Each teardown's wake, the last eight (sleep.h), since the page keeps only
  * the last sleep's reason: on 10-19 a ~3 s wake an hour in, with no key,
  * went unnamed because the rig's tap woke the next sleep. */
@@ -447,10 +505,14 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
         /* Asleep. PRIMASK is set: a pending wake source ends the WFI, but no
          * handler runs; these vectors have none. */
         for (;;) {
+#ifdef AK820_DEV_HOOKS
+            ds_wfi();           /* Deep-sleep (p. 75), the diagnostic's placement */
+#else
             SN_PMU->CTRL = 2;   /* Deep-sleep (p. 75) */
             __DSB();
             __WFI();
             SN_PMU->CTRL = 0;
+#endif
             uint32_t r0 = SN_GPIO0->RIS & p0w, r1 = SN_GPIO1->RIS & p1w, r2 = SN_GPIO2->RIS & p2w;
             bool second = take_second();
             if (second) {

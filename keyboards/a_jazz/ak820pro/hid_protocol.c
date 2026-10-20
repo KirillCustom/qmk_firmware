@@ -1030,9 +1030,10 @@ static void health_command(uint8_t *data, uint8_t length) {
                         break;
                     }
                     uint8_t sub = data[4], arg = data[5];
-                    if (sub > 6 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
+                    if (sub > 7 || (sub == 1 && arg >= POWER_MODE_COUNT) ||
                         (sub == 2 && arg != 0xFF && arg > POWER_STAGE_SCREEN_OFF) ||
-                        (sub == 3 && (arg & ~SLEEP_LS_ALL)) || (sub == 4 && arg > 2) || (sub == 6 && arg != 1)) {
+                        (sub == 3 && (arg & ~SLEEP_LS_ALL)) || (sub == 4 && arg > 2) || (sub == 6 && arg != 1) ||
+                        (sub == 7 && arg > 8 && arg != 0xFE && arg != 0xFF)) {
                         data[0] = RTC_UNHANDLED;
                         break;
                     }
@@ -1084,6 +1085,16 @@ static void health_command(uint8_t *data, uint8_t length) {
                                                  (uint32_t)data[8] << 16 | (uint32_t)data[9] << 24);
                         memset(&data[4], 0, 28);
                         data[4] = 5;
+                        break;
+                    }
+                    if (sub == 7) {
+                        /* DIAGNOSTIC (10-20): the deep sleep's WFI sequence
+                         * (sleep.c): arg 0-8 or 0xFF sets it, 0xFE only
+                         * reads. Reply: 7, the sequence. */
+                        uint8_t v = sleep_wfi_variant(arg == 0xFE ? -1 : (int16_t)arg);
+                        memset(&data[4], 0, 28);
+                        data[4] = 7;
+                        data[5] = v;
                         break;
                     }
                     if (sub == 6) {

@@ -101,6 +101,9 @@ void sleep_deep_cancel(void);   /* disarm, if armed and not yet asleep */
  * 1's last byte). */
 #define SLEEP_RECORD_SIZE 27u
 void sleep_deep_record(uint8_t *out);
+/* DIAGNOSTIC (dev, 10-20): the deep sleep's WFI sequence, op 14 sub 7
+ * (sleep.c); v < 0 only reads. 0xFF on daily builds. */
+uint8_t sleep_wfi_variant(int16_t v);
 /* Each teardown's wake, the last eight (HC_DEVHOOK op 24): the page keeps only
  * the last sleep's. Slot 0..7, 28 bytes, little endian: u16 the entry's
  * sequence number (entry n is in slot n % 8), u8 reason (SLEEP_WAKE_*), u8
