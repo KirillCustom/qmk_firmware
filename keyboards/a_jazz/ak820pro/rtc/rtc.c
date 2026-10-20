@@ -255,7 +255,8 @@ void ak820_i2c_xfer_begin(void)
 {
 #ifdef AK820_DEV_HOOKS
     if (od_lock_mode() != OD_LOCK_UNLOCKED) return;
-    od_mask_end();   /* the opening stretch, closed before the unlock */
+    od_mask_end();   /* the opening stretch, closed before the unlock: a partial
+                      * span, excluding the NVIC writes and HAL's own state update */
 #endif
     i2c_row_irq_on = NVIC->ISER[0] & (1u << CT16B1_IRQn);
     NVIC_DisableIRQ(CT16B1_IRQn);
@@ -1161,9 +1162,11 @@ bool rtc_set_time(const rtc_time_t *t)
 
     /* Synchronous I2C: never inside a deep sleep's recovery, whose passes are
      * budgeted (plans/DEEP-SLEEP-BUILD-PLAN.md, section 4) -- the whole of it,
-     * not only the clock's part (codex, deep-sleep build review 1). The host
-     * retries. */
-    if (rtc_wake_busy() || sleep_recovering()) return false;
+     * not only the clock's part (codex, deep-sleep build review 1). Nor after
+     * another PCF transaction this pass: raw HID drains several queued
+     * commands in one pass, and each set could run into the 10 ms deadline
+     * (codex, the UART-latency implementation review). The host retries. */
+    if (rtc_wake_busy() || sleep_recovering() || rtc_pass_used_bus()) return false;
     host_sync_gen++;
     clock_gen++;
     rtc_to_chibiostime(t, &dt);
@@ -2007,7 +2010,11 @@ void rtc_fast_task(void)
      * handler's (a legacy synchronous set from raw HID), and a pass that ran
      * one defers its display work, as the recovery's do (plans/
      * UART-LATENCY-PLAN.md, V2). */
-    if (rtc_pass_used_bus()) return;
+    if (rtc_pass_used_bus()) {         /* an earlier handler's (a legacy set): its pass */
+        display_defer_pass();
+        return;
+    }
+    if (sleep_pass_us() >= RTC_ADMIT_US) return;   /* a late pass: the transaction waits a pass */
     uint32_t n0 = pcf_xfers;
     if (acq_state == ACQ_WAIT_SPLASH || acq_active()) acquisition_step();
 #ifdef AK820_DEV_HOOKS

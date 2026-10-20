@@ -369,7 +369,9 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
             }
             return false;
         case ANIM_TOG:
-            if (record->event.pressed) anim_toggle();
+            /* Not into the animation from the Fn+D page, which owns the panel
+             * (codex, the UART-latency implementation review); out of one always. */
+            if (record->event.pressed && (anim_active() || !display_debug_active())) anim_toggle();
             return false;
         case SCR_UP:
         case SCR_DN:

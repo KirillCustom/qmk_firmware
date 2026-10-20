@@ -201,9 +201,11 @@ uint8_t od_uart_priority(void) { return (uint8_t)NVIC_GetPriority(UART2_IRQn); }
  * the system timer, USB). A gap, not UART2's latency; and what the main loop
  * was in (od_ctx, the activity bits) is the observed context, not a cause.
  * The fast path is a counter read, a subtract and a compare. */
-#define MON_T130 ((uint16_t)(CH_CFG_ST_FREQUENCY * 130u / 1000000u))   /* lateness 80 us */
-#define MON_T200 ((uint16_t)(CH_CFG_ST_FREQUENCY * 200u / 1000000u))   /* 150 us */
-#define MON_T350 ((uint16_t)(CH_CFG_ST_FREQUENCY * 350u / 1000000u))   /* 300 us */
+/* In whole ticks of 5.33 us: 24, 37 and 65, i.e. gaps of 128, 197 and 347 us
+ * (lateness ~80, ~150, ~300 against the nominal 50). */
+#define MON_T130 ((uint16_t)(CH_CFG_ST_FREQUENCY * 130u / 1000000u))
+#define MON_T200 ((uint16_t)(CH_CFG_ST_FREQUENCY * 200u / 1000000u))
+#define MON_T350 ((uint16_t)(CH_CFG_ST_FREQUENCY * 350u / 1000000u))
 #define MON_RING 16u
 static volatile uint8_t  mon_on, mon_primed;
 static uint16_t          mon_last;
@@ -340,11 +342,12 @@ bool od_fill_kind(uint8_t kind, uint8_t *out) {
     return true;
 }
 
-/* Op 25: [0] on, [1] primed, [2..3] the longest gap (ticks), [4..7] gaps of
- * 130 us or more (80 late), [8..11] 200 us (150 late), [12..15] 350 us (300
- * late), [16..19] gaps measured, [20] the longest's observed context (an
- * ACCT_* scope, 0xFF none), [21] its activity bits, [22..23] the ring's
- * entries written (gaps of 200 us or more). */
+/* Op 25: [0] on, [1] primed, [2..3] the longest gap that crossed the first
+ * threshold (ticks; 0 if none did), [4..7] gaps of 24 ticks (128 us) or more,
+ * [8..11] of 37 (197 us), [12..15] of 65 (347 us), [16..19] gaps measured,
+ * [20] the longest's observed context (an ACCT_* scope; ACCT_UNACCOUNTED,
+ * 12 today, between scopes), [21] its activity bits, [22..23] the ring's
+ * entries written (gaps of 37 ticks or more). */
 void od_fill_mon(uint8_t *out) {
     memset(out, 0, 28);
     chSysLock();

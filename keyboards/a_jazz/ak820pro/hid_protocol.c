@@ -1177,8 +1177,9 @@ static void health_command(uint8_t *data, uint8_t length) {
                     break;
                 }
                 case 20: {
+                    if (length < 32) { data[0] = RTC_UNHANDLED; break; }   /* before reading the arguments */
                     uint8_t sub = data[4], arg = data[5];
-                    if (length < 32 || sub > 3 || (sub == 2 && arg > OD_LOCK_UNLOCKED) || (sub == 3 && arg > 1)) {
+                    if (sub > 3 || (sub == 2 && arg > OD_LOCK_UNLOCKED) || (sub == 3 && arg > 1)) {
                         data[0] = RTC_UNHANDLED;
                         break;
                     }
