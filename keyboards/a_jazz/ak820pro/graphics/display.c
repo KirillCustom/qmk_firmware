@@ -2736,7 +2736,9 @@ static struct {
     uint16_t font, x, y;
     char     s[GQ_LINE_MAX + 1];
     bool     valid;
+    bool     dropped;   /* the last queue_line lost a glyph: some of it may be up */
 } shadow[GQ_RUNS];
+static bool gq_retry_clock = false;   /* housekeeping turns it into clock_force_repaint */
 
 static uint8_t last_icon_drawn = DISPLAY_ICON_NONE;
 static uint16_t last_icon_y    = 0;
@@ -2799,7 +2801,7 @@ bool display_bus_idle(void) {
 }
 
 static void shadow_invalidate(void) {
-    for (uint8_t i = 0; i < GQ_RUNS; i++) shadow[i].valid = false;
+    for (uint8_t i = 0; i < GQ_RUNS; i++) shadow[i].valid = shadow[i].dropped = false;
     last_icon_drawn = DISPLAY_ICON_NONE;
     ampm.shown      = false;   /* the AM/PM glyph is its own shadow */
 }
@@ -3001,11 +3003,14 @@ static void queue_line(uint8_t slot, uint16_t font, uint16_t x, uint16_t y,
     memcpy(shadow[slot].s, str, n);
     shadow[slot].s[n] = '\0';
     shadow[slot].font = font; shadow[slot].x = x; shadow[slot].y = y;
-    shadow[slot].valid = !dropped;
+    shadow[slot].valid   = !dropped;
+    shadow[slot].dropped = dropped;
     /* A glyph that did not fit: the shadow is unknown, so the next paint
-     * clears the row and draws it all, and the owner is asked again. */
+     * clears the row and draws it all, and the owner is asked again (the
+     * clock through housekeeping: draw_clock clears clock_force_repaint
+     * after its own call). retire_line clears such a row whole. */
     if (dropped) {
-        if (slot == GQ_SLOT_CLOCK) clock_force_repaint = true;
+        if (slot == GQ_SLOT_CLOCK) gq_retry_clock = true;
         else text_dirty = true;
     }
 }
@@ -3021,11 +3026,19 @@ static void shadow_mark_empty(uint8_t slot, uint16_t font, uint16_t x, uint16_t 
     shadow[slot].y     = y;
     shadow[slot].s[0]  = '\0';
     shadow[slot].valid = true;
+    shadow[slot].dropped = false;
 }
 
 /* Retire a line that is no longer shown, clearing only what it occupied. */
 static void retire_line(uint8_t slot) {
-    if (slot >= GQ_RUNS || !shadow[slot].valid) return;
+    if (slot >= GQ_RUNS) return;
+    if (!shadow[slot].valid) {
+        /* A line that lost a glyph may be partly up: clear its whole row. */
+        uint16_t dh = lcd_font_height(shadow[slot].font);
+        if (shadow[slot].dropped && dh) band_clear(0, shadow[slot].y, PANEL_WIDTH, dh);
+        shadow[slot].dropped = false;
+        return;
+    }
     uint16_t adv = lcd_font_advance(shadow[slot].font);
     uint16_t h   = lcd_font_height(shadow[slot].font);
     if (adv && h)
@@ -3264,6 +3277,7 @@ void display_housekeeping_task(void) {
          * reached when this passes, so a deferred second paints on the next
          * tick rather than being skipped. */
         if (gq_pending() || lq_pending()) return;
+        if (gq_retry_clock) { gq_retry_clock = false; clock_force_repaint = true; }
 
         // Connection digit every tick (~10 Hz) so its blink animates; self-guarded.
         LOOP_SITE(LOOP_SITE_CONN, DPROBE(DP_CONN, draw_conn_number(false)));

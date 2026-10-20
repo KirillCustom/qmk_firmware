@@ -1636,7 +1636,9 @@ bool rtc_sleep_ok(void)
 
 bool rtc_sleep_prepare(void)
 {
-    if (!bus_admit()) return false;
+    /* Its read is this pass's PCF transaction: not after another one (a
+     * burst's last read, the reference check); the sleep waits a pass. */
+    if (!bus_admit() || rtc_pass_used_bus()) return false;
     rtc_time_t t;
     pcf_short_timeout = true;
     wk_pre_ok = pcf_read_raw(&t) && rtc_time_epoch(&t, &wk_pre_epoch);
@@ -1959,8 +1961,11 @@ void rtc_task(void)
     if (wk_state != WK_IDLE || sleep_recovering()) return;
     if (pcf_pending || ps_state != PS_IDLE) return;
 #ifdef AK820_DEV_HOOKS
-    if (burst_active()) return;   /* the check stays due; one PCF transaction a pass */
+    if (burst_active()) return;   /* the check stays due while a bench burst runs */
 #endif
+    /* One PCF transaction a pass: none if this pass has had one already (a
+     * sync's step, a burst's last read); the check stays due for the next. */
+    if (rtc_pass_used_bus()) return;
     if (rtc_check_seconds < RTC_CHECK_INTERVAL_S) {
         return;
     }

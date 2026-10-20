@@ -67,7 +67,10 @@ void od_mask_end(void) {
     if (d >= OD_T_1MS4) k->n_ge14++;
 }
 
+/* In the UART ISR. Under the ISR lock: SysTick outranks UART2 and could
+ * publish a new maximum between the copy and the clear below. */
 static void oe_seen(uint8_t in_drain) {
+    chSysLockFromISR();
     if (in_drain) oe_drain++;
     else oe_obs++;
     uint8_t act = activity;
@@ -85,6 +88,7 @@ static void oe_seen(uint8_t in_drain) {
     e->st_max  = st_max_since;
     usb_max_since = st_max_since = 0;
     ring_seq++;
+    chSysUnlockFromISR();
 }
 void od_uart_oe(uint8_t in_drain) { oe_seen(in_drain); }
 void od_uart_rxdrop(void) { rx_drop++; }
