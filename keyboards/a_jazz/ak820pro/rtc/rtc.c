@@ -1617,6 +1617,11 @@ static bool bus_admit(void)
 
 #ifdef AK820_DEV_HOOKS
 static bool burst_active(void);
+/* A burst step ran this pass (a PCF read or a masked span): until the pass
+ * mark, the burst counts as active, so its last step still keeps the
+ * reference check and the pre-sleep read out of its pass (codex, the depth
+ * probe's review). */
+static bool bu_ran_pass;
 #endif
 
 bool rtc_sleep_ok(void)
@@ -1688,6 +1693,9 @@ bool rtc_pass_used_bus(void)
 void rtc_pass_mark(void)
 {
     pcf_xfers_mark = pcf_xfers;
+#ifdef AK820_DEV_HOOKS
+    bu_ran_pass = false;
+#endif
 }
 
 bool rtc_wake_busy(void)
@@ -1826,7 +1834,7 @@ static uint32_t bu_gap(void)
 
 static bool burst_active(void)
 {
-    return bu_left != 0;
+    return bu_left != 0 || bu_ran_pass;
 }
 
 bool rtc_burst_start(uint16_t n, uint8_t lo_ms, uint8_t hi_ms, uint16_t mask_us)
@@ -1871,6 +1879,7 @@ static bool burst_step(void)
         pcf_short_timeout = false;
     }
     display_defer_pass();
+    bu_ran_pass = true;
     uint32_t now = timer_read32();
     if (!bu_done && !bu_failed) bu_first_ms = now;
     bu_last_ms = now;
