@@ -22,6 +22,20 @@
 #include "drivers/led/sn32f2xx.h"
 #include "overrun_diag.h"   /* dev: a UART overrun's context */
 
+/* DIAGNOSTIC, not for merge (10-20, plans/DEEP-SLEEP-REGRESSION-2026-10-20.md):
+ * b2a07e0d37's deep sleep ends after one counted second with r7 corrupted,
+ * and the same code moved by 0xe4 sleeps. DS_PAD bytes of padding (a
+ * multiple of 4; never executed) ahead of this file's code move all of it
+ * by exactly that much, with nothing else changed: no instruction, and no
+ * RAM. "R" (SHF_GNU_RETAIN) keeps the section from --gc-sections. */
+#define DS_PAD 16
+#define DS_STR_(x) #x
+#define DS_STR(x)  DS_STR_(x)
+__asm__(".pushsection .text.ak820_ds_pad, \"axR\", %progbits\n\t"
+        ".balign 4\n\t"
+        ".space " DS_STR(DS_PAD) "\n\t"
+        ".popsection");
+
 /* The encoder driver's decoder state, read only (drivers/encoder/
  * encoder_quadrature.c, a local accessor): A in bit 0, B in bit 1. */
 uint8_t encoder_quadrature_state(uint8_t index);
