@@ -448,6 +448,13 @@ static void lockchan_media_commit(const lockchan_frame_t *f) {
     lcm_applied++;
 }
 
+/* Raw HID just changed the display (hid_protocol.c): drop any lock-LED frame
+ * being assembled, so none can straddle it and commit after (R4-3). The LED
+ * baseline goes too; the next report only sets it. */
+void ch582_lockchan_rawhid(void) {
+    lockchan_link_lost(&lockchan);
+}
+
 void ch582_lockchan_media_counts(uint32_t out[3]) {
     out[0] = lcm_applied;
     out[1] = lcm_rejected;
