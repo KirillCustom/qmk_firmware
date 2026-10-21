@@ -24,6 +24,7 @@
 #include "consumer_mod.h"
 #include "param_overlay.h"
 #include "indicators.h"
+#include "menu.h"            /* the settings menu on Fn + knob press */
 #ifdef RGB_MATRIX_ENABLE
 #    include "stock_fx.h"     /* the stock lighting modes: key events, Fn+\ */
 #endif
@@ -346,6 +347,9 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
 #ifdef CONSOLE_ENABLE
     if (record->event.pressed) key_press_count++;
 #endif
+    /* The settings menu takes every press while it is up -- before the hold
+     * repeat could arm and before the knob's consumer sequencer sees a turn. */
+    if (menu_process_record(keycode, record)) return false;
     param_repeat_process_record(keycode, record);   // arm/disarm hold-to-repeat
 #ifdef RGB_MATRIX_ENABLE
     /* Every physical key, whatever it is bound to: the stock reactive modes
@@ -409,6 +413,8 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
             return false;
         case PWR_MODE:
             if (record->event.pressed) power_cycle_mode();
+            return false;
+        case MENU_OPEN:   /* the press opened the menu in menu_process_record; the release lands here */
             return false;
         case DBG_PAGE:
             /* Tap toggles the page; HOLD resets the counters.
@@ -608,6 +614,7 @@ void housekeeping_task_kb(void) {
         LOOP_SITE(LOOP_SITE_BATT,     ACCT(ACCT_BATT, battery_task()));   // one ~11 us VDD conversion
         LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, bt_pair_hold_task()));   // hold-to-pair fires under the finger, not on release
         LOOP_SITE(LOOP_SITE_PAIR,     ACCT(ACCT_HK_OTHER, dbg_hold_task()));       // hold-Fn+D resets the health counters
+        LOOP_SITE(LOOP_SITE_PARAM,    ACCT(ACCT_HK_OTHER, menu_task()));           // the settings menu: idle close, live values
         LOOP_SITE(LOOP_SITE_CONSUMER, ACCT(ACCT_HK_OTHER, modified_consumer_task()));  // drop held mods once a knob spin stops
 #ifdef PARAM_OVERLAY
         LOOP_SITE(LOOP_SITE_PARAM,    ACCT(ACCT_HK_OTHER, param_status_task()));   // surface setting changes in the info band

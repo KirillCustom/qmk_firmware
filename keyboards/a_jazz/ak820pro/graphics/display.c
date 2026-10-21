@@ -138,6 +138,7 @@ static bool debug_active    = false;   // true while the Fn+D debug page owns th
 static uint8_t debug_exit_step  = 0;   // >0 while the dashboard is being restored
 static uint8_t debug_clear_band = 0;   // >0 while the entry clear is banding down the panel
 static bool    debug_big        = false; // the second Fn+D tap: the camera page (big digits)
+static bool    debug_menu       = false; // the settings menu (menu.c) owns the debug page's rows
 static bool    locks_stage_first = true; // restore: the next lock-band pass forgets the (cleared) band
 static bool splash_cleared = false;
 static bool mac_mode = false;
@@ -807,6 +808,7 @@ void display_debug_refresh(void) {
 
 static void draw_debug_page(void) {
     static uint32_t last_sec = UINT32_MAX;
+    if (debug_menu) return;   /* menu.c writes the rows itself (display_menu_row) */
     uint32_t sec = rtc_get_seconds();
     if (sec == last_sec && !dbg_force_recompose) return;
     last_sec = sec;
@@ -1169,6 +1171,8 @@ void display_debug_toggle(void) {
     /* Refuse while the animation player owns the bus rather than drawing over
      * it: both would keep blitting and the panel would tear between them. */
     if (!debug_active && display_paused) return;
+    /* The menu normally swallows Fn+D; if anything else toggles, it closes. */
+    if (debug_menu) { display_menu_close(); return; }
     /* A cycle: dashboard -> debug page -> camera page -> dashboard. The middle
      * step keeps the panel and only changes what is drawn on it. */
     if (debug_active && !debug_big) {
@@ -1212,6 +1216,58 @@ void display_debug_toggle(void) {
          * step stays well under the 25 ms threshold and the whole restore still
          * completes in a few milliseconds of wall time -- visually instant. */
         debug_exit_step = 1;
+    }
+}
+
+/* --- The settings menu (menu.c) ---------------------------------------------------
+ * A third use of the debug page's machinery: the banded clear on entry, one
+ * changed glyph per pass, the staged restore on exit. Only the composer
+ * differs: menu.c sets whole rows, and nothing here recomposes them. */
+_Static_assert(DISPLAY_MENU_ROWS == DBG_ROWS && DISPLAY_MENU_COLS == DBG_COLS, "display.h's menu size must match the debug page");
+
+static void debug_blank_rows(void) {
+    for (uint8_t r = 0; r < DBG_ROWS; r++) {
+        memset(dbg_text[r], ' ', DBG_COLS);  dbg_text[r][DBG_COLS]  = '\0';
+        memset(dbg_shown[r], ' ', DBG_COLS); dbg_shown[r][DBG_COLS] = '\0';
+    }
+    dbg_dirty = 0;
+}
+
+bool display_menu_open(void) {
+    if (display_paused || !display_powered) return false;   /* the animation owns the bus / nothing to see */
+    if (debug_menu) return true;
+    debug_big        = false;
+    debug_menu       = true;
+    debug_active     = true;    /* from the Fn+D page too: the same switch as to the camera page */
+    debug_exit_step  = 0;       /* a restore still running is superseded by the clear */
+    debug_clear_band = 1;
+    debug_blank_rows();         /* a cleared panel is blank: a page of spaces */
+    cam_reset();
+    return true;
+}
+
+void display_menu_close(void) {
+    if (!debug_menu) return;
+    debug_menu = false;
+    if (debug_active) {
+        debug_active    = false;
+        debug_exit_step = 1;    /* the staged restore, as leaving Fn+D */
+    }
+}
+
+bool display_menu_active(void) {
+    return debug_menu && debug_active;
+}
+
+void display_menu_row(uint8_t row, const char *s) {
+    if (!debug_menu || row >= DBG_ROWS) return;
+    char    line[DBG_COLS];
+    uint8_t i = 0;
+    for (; i < DBG_COLS && s[i]; i++) line[i] = s[i];
+    for (; i < DBG_COLS; i++) line[i] = ' ';
+    if (memcmp(line, dbg_text[row], DBG_COLS) != 0) {
+        memcpy(dbg_text[row], line, DBG_COLS);
+        dbg_dirty |= (uint16_t)(1u << row);
     }
 }
 

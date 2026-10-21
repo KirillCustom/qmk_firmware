@@ -128,6 +128,17 @@ void display_bootloader_splash(void);
  * player owns the bus. */
 void display_debug_toggle(void);
 bool display_debug_active(void);
+
+/* The settings menu's page (menu.c): the Fn+D page's machinery with rows set
+ * by the caller. 9 rows x 21 columns of the 6x14 font. display_debug_active()
+ * is true while it is up. Open refuses while the animation plays or the panel
+ * is off. Close hands the panel back through the staged restore. */
+#define DISPLAY_MENU_ROWS 9
+#define DISPLAY_MENU_COLS 21
+bool display_menu_open(void);
+void display_menu_close(void);
+bool display_menu_active(void);
+void display_menu_row(uint8_t row, const char *s);
 /* A message was first painted in the band (an overlay, an alert, a link state
  * with words, new host text, the pair gesture) within the last `ms`: power.c's
  * Minimal mode lights the backlight for it. */

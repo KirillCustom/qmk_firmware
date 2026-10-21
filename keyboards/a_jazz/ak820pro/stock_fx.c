@@ -23,6 +23,7 @@
 #include "stock_fx_tables.h"
 #include "kb_eeconfig.h"
 #include "power.h"   /* power_val_cap(): the power ladder's ceiling on the value knob */
+#include "loop_acct.h"   /* ACCT_RGB: what the stock modes cost, on health's accounting page */
 #include "timer.h"
 #include "lib/lib8tion/lib8tion.h"
 #include <string.h>
@@ -490,7 +491,7 @@ void stock_fx_set_rainbow(bool on) {
     kb_eeconfig_set_stockfx_flags(on ? 1 : 0);
 }
 
-bool stock_fx_run(sfx_id_t id, effect_params_t *params) {
+static bool run_frame(sfx_id_t id, effect_params_t *params) {
     if (params->iter == 0) {             /* the simulation moves once a frame, not once a chunk */
         bool rb = stock_fx_get_rainbow();
         if (params->init || cur != id || cur_rainbow != rb) {
@@ -521,7 +522,7 @@ bool stock_fx_run(sfx_id_t id, effect_params_t *params) {
     return rgb_matrix_check_finished_leds(led_max);
 }
 
-void stock_fx_key(uint8_t row, uint8_t col, bool pressed) {
+static void key_event(uint8_t row, uint8_t col, bool pressed) {
     if (!rgb_matrix_is_enabled() || stock_mode_of(rgb_matrix_get_mode()) == 0xFF) return;
     if (row >= MATRIX_ROWS || col >= MATRIX_COLS) return;
     uint8_t i = led_at(row, col);
@@ -565,6 +566,16 @@ void stock_fx_key(uint8_t row, uint8_t col, bool pressed) {
     }
 }
 
+bool stock_fx_run(sfx_id_t id, effect_params_t *params) {
+    bool more;
+    ACCT(ACCT_RGB, more = run_frame(id, params));
+    return more;
+}
+
+void stock_fx_key(uint8_t row, uint8_t col, bool pressed) {
+    ACCT(ACCT_RGB, key_event(row, col, pressed));
+}
+
 /* ---------------------------------------------------------------- mode list */
 
 /* Stock order (gohv protocol.rs LightingMode, 0x00-0x13). 0 = Off is not an
@@ -595,6 +606,10 @@ static const uint8_t stock_rgb[STOCK_MODE_COUNT] = {
 /* The stock effects are contiguous in the enum, in sfx_id_t order. */
 #define SFX_FIRST RGB_MATRIX_CUSTOM_STOCK_STATIC
 _Static_assert(RGB_MATRIX_CUSTOM_STOCK_SHUTTLE - SFX_FIRST == SFX_SHUTTLE, "stock effects must stay contiguous and in sfx_id_t order");
+/* via.json's Effect dropdown names these numbers outright: change both together. */
+_Static_assert(SFX_FIRST == 4 && RGB_MATRIX_SOLID_COLOR == 1 && RGB_MATRIX_ALPHAS_MODS == 2 &&
+               RGB_MATRIX_TYPING_HEATMAP == 3 && RGB_MATRIX_CUSTOM_RAINFALL == 27 && RGB_MATRIX_CUSTOM_DRIFT == 28,
+               "effect numbers moved: update via.json's Effect options");
 
 static const uint8_t sfx_stock[SFX_COUNT] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 11, 11, 12, 13, 14, 15, 16, 16, 17, 18, 18, 19,

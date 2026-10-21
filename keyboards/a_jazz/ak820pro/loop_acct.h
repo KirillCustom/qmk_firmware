@@ -53,10 +53,12 @@ enum acct_scope {
                        * tasks, the consumer sequencer. The per-pass param
                        * repeat and user hook are NOT timed (trimmed after
                        * gate 3): they fall in UNACCOUNTED. */
+    ACCT_RGB,         /* the stock lighting modes (stock_fx.c): their frames and key events */
     ACCT_N,
     ACCT_UNACCOUNTED = ACCT_N,   /* reported, never a scope */
     ACCT_REPORTED
 };
+_Static_assert(ACCT_REPORTED <= 14, "pages 1-4 carry 7 scopes each, page 5 fourteen u16s");
 
 extern bool     loop_acct_on;
 /* Running per-scope ticks since boot, wrapping at 2^32 (read only as
@@ -99,17 +101,17 @@ void loop_acct_reset(void);
 void loop_acct_set_enabled(bool on);
 
 /* Raw HID HC_ACCT pages (hid_protocol.c), 28 bytes each, little-endian.
- * Scope order is enum acct_scope, with UNACCOUNTED last (ACCT_REPORTED = 13).
+ * Scope order is enum acct_scope, with UNACCOUNTED last (ACCT_REPORTED = 14).
  *   page 0: u8 enabled, u8 ACCT_REPORTED, u8 ring length (16), u8 next ring
  *           slot; u32 passes, u32 slow passes, u32 CH_CFG_ST_FREQUENCY,
  *           u32 uptime_ms, u32 ring entries ever written, u32 long passes
  *           (>= 340 ms: counted slow, not attributed). The pass after a
  *           reset or an on/off is not counted at all.
- *   page 1: u32 slow-pass ticks, scopes 0-6     page 2: scopes 7-12
- *   page 3: u32 all-pass MILLISECONDS, scopes 0-6   page 4: scopes 7-12
- *   page 5: u16 times each scope was the largest in a slow pass, 0-12
+ *   page 1: u32 slow-pass ticks, scopes 0-6     page 2: scopes 7-13
+ *   page 3: u32 all-pass MILLISECONDS, scopes 0-6   page 4: scopes 7-13
+ *   page 5: u16 times each scope was the largest in a slow pass, 0-13
  *   pages 16-31: ring slot 0-15: u32 uptime_ms at the pass's end (0: empty),
- *           u8 pass ms, u8 ms per scope 0-12 (saturating at 255)
+ *           u8 pass ms, u8 ms per scope 0-13 (saturating at 255)
  * Slow-pass totals are whole system ticks (the host converts with the
  * frequency); all-pass totals are ms, since they run for hours. */
 bool loop_acct_fill(uint8_t page, uint8_t *out28);

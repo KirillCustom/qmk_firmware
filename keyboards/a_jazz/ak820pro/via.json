@@ -7,7 +7,180 @@
     "cols": 15
   },
   "menus": [
-    "qmk_rgb_matrix"
+    {
+      "label": "Lighting",
+      "content": [
+        {
+          "label": "Backlight",
+          "content": [
+            {
+              "label": "Brightness",
+              "type": "range",
+              "options": [
+                0,
+                255
+              ],
+              "content": [
+                "id_qmk_rgb_matrix_brightness",
+                3,
+                1
+              ]
+            },
+            {
+              "label": "Effect",
+              "type": "dropdown",
+              "options": [
+                [
+                  "Off",
+                  0
+                ],
+                [
+                  "Static",
+                  4
+                ],
+                [
+                  "Single On",
+                  5
+                ],
+                [
+                  "Single Off",
+                  6
+                ],
+                [
+                  "Glittering",
+                  7
+                ],
+                [
+                  "Falling",
+                  8
+                ],
+                [
+                  "Colourful",
+                  9
+                ],
+                [
+                  "Breath",
+                  10
+                ],
+                [
+                  "Spectrum",
+                  11
+                ],
+                [
+                  "Outward",
+                  12
+                ],
+                [
+                  "Scrolling (down)",
+                  13
+                ],
+                [
+                  "Scrolling (up)",
+                  14
+                ],
+                [
+                  "Rolling (right)",
+                  15
+                ],
+                [
+                  "Rolling (left)",
+                  16
+                ],
+                [
+                  "Rotating",
+                  17
+                ],
+                [
+                  "Explode",
+                  18
+                ],
+                [
+                  "Launch",
+                  19
+                ],
+                [
+                  "Ripples",
+                  20
+                ],
+                [
+                  "Flowing (right)",
+                  21
+                ],
+                [
+                  "Flowing (left)",
+                  22
+                ],
+                [
+                  "Pulsating",
+                  23
+                ],
+                [
+                  "Tilt (right)",
+                  24
+                ],
+                [
+                  "Tilt (left)",
+                  25
+                ],
+                [
+                  "Shuttle",
+                  26
+                ],
+                [
+                  "Extra: Solid",
+                  1
+                ],
+                [
+                  "Extra: Alphas/Mods",
+                  2
+                ],
+                [
+                  "Extra: Heatmap",
+                  3
+                ],
+                [
+                  "Extra: Rainfall",
+                  27
+                ],
+                [
+                  "Extra: Drift",
+                  28
+                ]
+              ],
+              "content": [
+                "id_qmk_rgb_matrix_effect",
+                3,
+                2
+              ]
+            },
+            {
+              "showIf": "{id_qmk_rgb_matrix_effect} != 0",
+              "label": "Effect Speed",
+              "type": "range",
+              "options": [
+                0,
+                255
+              ],
+              "content": [
+                "id_qmk_rgb_matrix_effect_speed",
+                3,
+                3
+              ]
+            },
+            {
+              "showIf": "{id_qmk_rgb_matrix_effect} != 0",
+              "label": "Color",
+              "type": "color",
+              "content": [
+                "id_qmk_rgb_matrix_color",
+                3,
+                4
+              ]
+            }
+          ]
+        }
+      ]
+    }
   ],
   "layouts": {
     "keymap": [
@@ -291,6 +464,11 @@
       "name": "PWR_MODE",
       "title": "Power mode: Always on / Balanced / Power saver / Lights out",
       "shortName": "Power"
+    },
+    {
+      "name": "MENU_OPEN",
+      "title": "Settings menu on the screen (Fn + knob press)",
+      "shortName": "Menu"
     }
   ]
 }
