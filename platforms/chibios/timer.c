@@ -33,6 +33,25 @@ static inline uint32_t get_system_time_ticks(void) {
     return systime;
 }
 
+// TIME_I2MS() with only 32-bit arithmetic: the same ceiling, bit for bit.
+// TIME_I2MS multiplies by 1000 in 64 bits, which on a core without a divider is
+// a software 64-bit multiply and divide (__aeabi_lmul + __aeabi_uldivmod, a
+// bit-by-bit loop) on every timer_read32() -- ~15 calls per main-loop pass on
+// the AK820 Pro (187.5 kHz). When the frequency is a multiple of 125, 1000/f
+// reduces to 8/(f/125): ms = 8q + ceil(8r/B) with q, r = ticks divided by B,
+// and 8r + B - 1 < 8B never overflows. Checked against TIME_I2MS for every
+// 32-bit tick count at 187.5 kHz.
+static inline uint32_t ticks_to_ms(uint32_t ticks) {
+#if (CH_CFG_ST_FREQUENCY % 125) == 0
+    const uint32_t b = CH_CFG_ST_FREQUENCY / 125;
+    uint32_t       q = ticks / b;
+    uint32_t       r = ticks - q * b;
+    return 8u * q + (8u * r + b - 1u) / b;
+#else
+    return (uint32_t)TIME_I2MS(ticks);
+#endif
+}
+
 #if CH_CFG_ST_RESOLUTION < 32
 static virtual_timer_t update_timer;
 
@@ -116,5 +135,5 @@ uint32_t timer_read32(void) {
     uint32_t ms_offset_copy = ms_offset; // read while still holding the lock to ensure a consistent value
     chSysRestoreStatusX(sts);
 
-    return (uint32_t)TIME_I2MS(ticks) + ms_offset_copy;
+    return ticks_to_ms(ticks) + ms_offset_copy;
 }
