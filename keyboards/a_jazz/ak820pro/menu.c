@@ -148,10 +148,9 @@ static void value_text(uint8_t item, char *out) {
             break;
         case I_RAINBOW: put(out, on_off(stock_fx_get_rainbow())); break;
         case I_LIGHTS:  put(out, on_off(rgb_matrix_is_enabled())); break;
-        case I_LCD_LEVEL: {
-            char *p = put_u(out, display_get_brightness());
-            p       = put(p, "/");
-            put_u(p, display_get_brightness_max());
+        case I_LCD_LEVEL: {   /* the level as a share of the top one: 0-100% */
+            uint8_t mx = display_get_brightness_max();
+            put(put_u(out, mx ? (uint16_t)((display_get_brightness() * 100u + mx / 2u) / mx) : 0u), "%");
             break;
         }
         case I_LCD_ON:  put(out, on_off(display_get_power())); break;

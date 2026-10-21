@@ -517,7 +517,10 @@ static bool run_frame(sfx_id_t id, effect_params_t *params) {
         RGB_MATRIX_TEST_LED_FLAGS();
         rgb_t   c = per_led ? pix[i] : base;
         uint8_t m = scale8(mask[i], v);
-        rgb_matrix_set_color(i, scale8(c.r, m), scale8(c.g, m), scale8(c.b, m));
+        /* The stock white balance: red at 2/3 on every key (the composer
+         * FUN_0000cc74, its usual branch). This board's red LEDs are the
+         * strong ones; without it white reads pink-violet. */
+        rgb_matrix_set_color(i, scale8(scale8(c.r, m), 170), scale8(c.g, m), scale8(c.b, m));
     }
     return rgb_matrix_check_finished_leds(led_max);
 }
