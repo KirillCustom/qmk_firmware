@@ -571,14 +571,18 @@ uint16_t battery_led_pm(void) { return led_pm; }
  *            0.90, blue 0.81; one B for all read red 7.7% low and blue 7.2%
  *            high, the fit is within 0.6% at every step, and purple, outside
  *            it, within 0.2%. A is the fit's 7.71 mW against the measured
- *            RGB-off, refitted against this model's own (0.93 mW lower). */
+ *            RGB-off, refitted against this model's own (0.93 mW lower).
+ *            The B's are per unit over RGB_MATRIX_LED_COUNT's 81 LEDs. Until
+ *            10-21 the fit counted 82 (rgb_fit.py's N), so they were 81/82 of
+ *            these (3636/2533/2294) and the RGB read ~1.2% low; A is
+ *            unchanged (plans/BACKLOG.md, "The RGB model's 82 LEDs"). */
 #define P_BASE_UW        106900u
 #define P_USB_UW           7100u
 #define P_BKL_FULL_UW     39100u
 #define P_RGB_A_UW         8640u
-#define P_RGB_R_NW         3636u   /* nW per unit of the red channels' sum (82 channels) */
-#define P_RGB_G_NW         2533u   /* ... green */
-#define P_RGB_B_NW         2294u   /* ... blue */
+#define P_RGB_R_NW         3681u   /* nW per unit of the red channels' sum (81 channels) */
+#define P_RGB_G_NW         2565u   /* ... green */
+#define P_RGB_B_NW         2322u   /* ... blue */
 #define BKL_DUTY_FULL        48u
 /* The capacity: R3's 15,579 mWh from FULL to the RGB cut, at JD's settings
  * (history/battery-2026-10-15-drain-2f/, "A1/A2"). One pm is a thousandth:
