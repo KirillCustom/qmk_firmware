@@ -515,7 +515,10 @@ static volatile uint32_t *col_mr[SN32F2XX_RGB_MATRIX_COLS];
 static uint32_t           col_mr_key[SN32F2XX_RGB_MATRIX_COLS]; /* CT16B0/B2 MR writes need the 0x5A key */
 static volatile uint32_t *ioen_b1_reg, *ctrl_b0_reg, *ctrl_b2_reg;
 static uint32_t           ioen_b1, ioen_b0, ioen_b2;
-volatile bool             sn32f2xx_fast_cols = false;
+#        ifndef SN32F2XX_RGB_FAST_COLS
+#            define SN32F2XX_RGB_FAST_COLS false
+#        endif
+volatile bool             sn32f2xx_fast_cols = SN32F2XX_RGB_FAST_COLS;
 
 static void fast_cols_init(void) {
     ioen_b1_reg = SN32_CT_PWM_GET_ADDR(&PWMD1, pwm.PWMIOENB);
@@ -767,13 +770,21 @@ static void update_pwm_channels(PWMDriver *pwmp) {
  * and sets the real row rate. These hooks let a board measure that instead of
  * deriving it from the timer configuration -- the two differ by ~4.8x on the
  * AK820 Pro. Cost when implemented: two tick reads and a few adds per ISR. */
-/* PWM ticks of dark between the ISR's end and the next lit period (experiment,
- * 2026-10-21): whether the outputs stay dark while the counter runs above every
- * match decides how a shorter ISR keeps the slot period, and so the brightness. */
-#ifndef SN32F2XX_RGB_DARK_TICKS
-#    define SN32F2XX_RGB_DARK_TICKS 0
+/* The slot period (2026-10-21). With a short ISR -- the direct-register column
+ * path -- a dark tail tops each slot up to sn32f2xx_slot_ticks PWM ticks from
+ * the ISR's entry, so the field rate and the brightness stop following the
+ * ISR's own length (a scan slot, a pre-emption) and the time it saves goes to
+ * the main loop instead. 0 = re-arm at once: the period is the ISR plus one
+ * PWM period, as before. The outputs stay dark while the counter runs above
+ * every match (measured: a 480-tick tail dimmed the board by about a third);
+ * the ISR's length comes from the system timer, in 5.3 us steps at 187.5 kHz.
+ * Dev op 27 sets it at run time. */
+#ifndef SN32F2XX_RGB_SLOT_TICKS
+#    define SN32F2XX_RGB_SLOT_TICKS 0
 #endif
-volatile uint16_t sn32f2xx_dark_ticks = SN32F2XX_RGB_DARK_TICKS;
+volatile uint16_t sn32f2xx_slot_ticks = SN32F2XX_RGB_SLOT_TICKS;
+/* System-timer ticks to PWM ticks, x8 (4.8 MHz / 187.5 kHz = 25.6 -> 205). */
+#define SN32F2XX_ST_TO_PWM_X8 ((uint32_t)(((uint64_t)SN32F2XX_RGB_PWM_FREQ * 8u + CH_CFG_ST_FREQUENCY / 2u) / CH_CFG_ST_FREQUENCY))
 
 __attribute__((weak)) void sn32f2xx_isr_enter_hook(void) {}
 __attribute__((weak)) void sn32f2xx_isr_exit_hook(void) {}
@@ -801,6 +812,7 @@ bool sn32f2xx_scan_only_active(void) {
 #endif
 
 static void rgb_callback(PWMDriver *pwmp) {
+    const systime_t isr_t0 = chVTGetSystemTimeX();
     sn32f2xx_isr_enter_hook();
     // Disable the interrupt
     pwmDisablePeriodicNotification(pwmp);
@@ -899,9 +911,20 @@ static void rgb_callback(PWMDriver *pwmp) {
     if (period_change) pwmChangePeriodI(pwmp, scan_only ? SN32F2XX_SCAN_ONLY_TICKS : periodticks);
 #endif
     // Advance the timer to just before the wrap-around, that will start a new PWM cycle
-    // A dark tail first, when set: the counter runs from UINT16_MAX - dark up past
-    // every match before it wraps (sn32f2xx_dark_ticks; 0 = the old re-arm).
-    const uint16_t rearm = (uint16_t)(UINT16_MAX - sn32f2xx_dark_ticks);
+    // -- after a dark tail when a slot period is set: the counter runs from
+    // UINT16_MAX - dark up past every match before it wraps.
+    uint16_t       dark = 0;
+    const uint16_t slot = sn32f2xx_slot_ticks;
+    if (slot > periodticks
+#if defined(SN32F2XX_SLEEP_HOOKS) && defined(SHARED_MATRIX) && (SN32F2XX_PWM_DIRECTION == COL2ROW) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+        && !scan_only
+#endif
+    ) {
+        uint32_t spent = ((uint32_t)(uint16_t)(chVTGetSystemTimeX() - isr_t0) * SN32F2XX_ST_TO_PWM_X8) >> 3;
+        uint32_t want  = slot - periodticks;
+        if (spent < want) dark = (uint16_t)(want - spent);
+    }
+    const uint16_t rearm = (uint16_t)(UINT16_MAX - dark);
     pwm_lld_change_counter(pwmp, rearm);
 #if defined(SN32F2XX_PWM_MULTI_TIMER)
     // Re-arm the auxiliary PWM timers on the same boundary as PWMD1. This is what

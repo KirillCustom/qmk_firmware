@@ -125,6 +125,14 @@
  * another. That reasoning is now obsolete; it is kept for the history because
  * the rebalance table explains where the constants came from. */
 #define SN32F2XX_RGB_PWM_FREQ 4800000
+/* The row ISR writes the column registers directly (~60 us instead of ~160) and
+ * a dark tail keeps each slot at 1085 PWM ticks = 226 us, the period the old
+ * ISR ran at on d70e9c68b3: the same field rate (~245 Hz) and brightness, with
+ * the saved ~100 us per slot given to the main loop (drivers/led/sn32f2xx.c,
+ * sn32f2xx_fast_cols / sn32f2xx_slot_ticks; checked by eye 2026-10-21: same
+ * brightness and colour, pure R/G/B even, a lone key white). */
+#define SN32F2XX_RGB_FAST_COLS  true
+#define SN32F2XX_RGB_SLOT_TICKS 1085
 
 /* 256 values, 1.4 deg -- the FINEST POSSIBLE. Hue is an 8-bit value in QMK, so
  * 256 steps over 360 deg is the hardware floor; true single-degree steps would

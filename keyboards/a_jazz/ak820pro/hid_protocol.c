@@ -1290,11 +1290,12 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !od_fill_mon_ring(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 27: {
-                    /* The row ISR's dark tail in PWM ticks: data[4] = 1 sets it from
-                     * data[5..6] (LE), 0 only reads. Replies with the value in data[4..5]. */
-                    extern volatile uint16_t sn32f2xx_dark_ticks;
-                    if (data[4] == 1) sn32f2xx_dark_ticks = (uint16_t)(data[5] | (data[6] << 8));
-                    uint16_t v = sn32f2xx_dark_ticks;
+                    /* The row ISR's slot period in PWM ticks (0 = the ISR's own length
+                     * plus one PWM period): data[4] = 1 sets it from data[5..6] (LE),
+                     * 0 only reads. Replies with the value in data[4..5]. */
+                    extern volatile uint16_t sn32f2xx_slot_ticks;
+                    if (data[4] == 1) sn32f2xx_slot_ticks = (uint16_t)(data[5] | (data[6] << 8));
+                    uint16_t v = sn32f2xx_slot_ticks;
                     data[4]    = (uint8_t)v;
                     data[5]    = (uint8_t)(v >> 8);
                     break;
