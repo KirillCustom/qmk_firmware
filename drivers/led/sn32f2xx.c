@@ -468,6 +468,40 @@ static void shared_matrix_scan_keys(matrix_row_t current_matrix[], uint8_t curre
 
 #if (SN32F2XX_PWM_DIRECTION == COL2ROW)
 
+/* Current_row's colour slot, kept as its own counter: `current_row % 3` is a
+ * software divide on a core without one, and it ran 15 times per ISR inside
+ * the column loop (the compiler re-reads current_row after each call). */
+static uint8_t current_slot = 0;
+
+/* The 18 row pins sit on a few ports; de-selecting them all is one BSET/BCLR
+ * write per port instead of one per pin. Filled by sn32f2xx_init(). */
+static ioportid_t row_ports[4];
+static uint32_t   row_port_masks[4];
+static uint8_t    row_port_count = 0;
+
+static void row_ports_init(void) {
+    for (uint8_t x = 0; x < SN32F2XX_RGB_MATRIX_ROWS_HW; x++) {
+        ioportid_t port = PAL_PORT(led_row_pins[x]);
+        uint8_t    i    = 0;
+        while (i < row_port_count && row_ports[i] != port) i++;
+        if (i == row_port_count) {
+            if (row_port_count == 4) continue; /* cannot happen on SN32F2 (ports 0-3); rows_deselect() would miss it */
+            row_ports[row_port_count++] = port;
+        }
+        row_port_masks[i] |= 1u << PAL_PAD(led_row_pins[x]);
+    }
+}
+
+static inline void rows_deselect(void) {
+    for (uint8_t i = 0; i < row_port_count; i++) {
+#    if (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_HIGH)
+        palClearPort(row_ports[i], row_port_masks[i]);
+#    elif (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_LOW)
+        palSetPort(row_ports[i], row_port_masks[i]);
+#    endif
+    }
+}
+
 static void shared_matrix_rgb_disable_output(void) {
     // Disable PWM outputs on column pins
     for (uint8_t y = 0; y < SN32F2XX_RGB_MATRIX_COLS; y++) {
@@ -478,28 +512,27 @@ static void shared_matrix_rgb_disable_output(void) {
 #    endif // SN32F2XX_PWM_CONTROL
     }
     // Disable LED outputs on RGB channel pins
-    for (uint8_t x = 0; x < SN32F2XX_RGB_MATRIX_ROWS_HW; x++) {
-#    if (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_HIGH)
-        gpio_write_pin_low(led_row_pins[x]);
-#    elif (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_LOW)
-        gpio_write_pin_high(led_row_pins[x]);
-#    endif // SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL
-    }
+    rows_deselect();
 }
 
 static void update_pwm_channels(PWMDriver *pwmp) {
     // Advance to the next LED RGB channels
     current_row++;
+    if (++current_slot == SN32F2XX_RGB_MATRIX_ROW_CHANNELS) current_slot = 0;
     /* Check if counter has wrapped around, reset before the next pass */
-    if (current_row == SN32F2XX_RGB_MATRIX_ROWS_HW) current_row = 0;
+    if (current_row == SN32F2XX_RGB_MATRIX_ROWS_HW) {
+        current_row  = 0;
+        current_slot = 0; /* ROWS_HW is a multiple of ROW_CHANNELS; this only re-asserts it */
+    }
+    const uint8_t slot = current_slot;
 #    if defined(SHARED_MATRIX)
     uint8_t last_key_row = current_key_row;
 #    endif // SHARED_MATRIX
     // Advance to the next key matrix row
 #    if (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
-    if (current_row % SN32F2XX_RGB_MATRIX_ROW_CHANNELS == 2) current_key_row++;
+    if (slot == 2) current_key_row++;
 #    elif (SN32F2XX_PWM_CONTROL == SOFTWARE_PWM)
-    if (current_row % SN32F2XX_RGB_MATRIX_ROW_CHANNELS == 0) current_key_row++;
+    if (slot == 0) current_key_row++;
 #    endif // SN32F2XX_PWM_CONTROL
     /* Check if counter has wrapped around, reset before the next pass */
     if (current_key_row == SN32F2XX_RGB_MATRIX_ROWS) current_key_row = 0;
@@ -522,7 +555,7 @@ static void update_pwm_channels(PWMDriver *pwmp) {
         if (led_state[led_index].r > 0) enable_pwm_output |= true;
         // Update matching RGB channel PWM configuration
 #    if (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
-        switch (current_row % SN32F2XX_RGB_MATRIX_ROW_CHANNELS) {
+        switch (slot) {
             case 0:
                 pwmEnableChannel(COL_PWM_DRV(current_key_col), COL_PWM_CH(current_key_col), led_state[led_index].b);
                 break;
@@ -535,7 +568,7 @@ static void update_pwm_channels(PWMDriver *pwmp) {
             default:;
         }
 #    elif (SN32F2XX_PWM_CONTROL == SOFTWARE_PWM)
-        switch (current_row % SN32F2XX_RGB_MATRIX_ROW_CHANNELS) {
+        switch (slot) {
             case 0:
                 led_duty_cycle[current_key_col] = led_state[led_index].r;
                 break;
@@ -851,6 +884,9 @@ void sn32f2xx_init(void) {
         gpio_write_pin_high(led_row_pins[x]);
 #endif // SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL
     }
+#if (SN32F2XX_PWM_DIRECTION == COL2ROW)
+    row_ports_init();
+#endif
 
     // Determine which PWM channels we need to control
 #if (defined(SN32F240B) || defined(SN32F240C) || defined(SN32F290))
