@@ -444,4 +444,5 @@
 // LCD backlight; at full drive they are searchlights on a dark desk, and the
 // charging one is not under user control at all. 1 = dimmest lit step (1/64).
 // 0 would turn them off entirely.
-#define INDICATOR_BRIGHTNESS_DEFAULT 1
+#define INDICATOR_BRIGHTNESS_DEFAULT 9   /* stock-like: full (kirillcustom; JD runs 1) */
+#define CHARGING_LED_BRIGHTNESS 9        /* stock-like: the charging LED lit while charging (JD: 0, off) */

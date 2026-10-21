@@ -6,7 +6,7 @@
 #include "hal.h"
 #include "health.h"   /* health_note_rx_malformed() -- main-loop context only */
 #include "loop_acct.h" /* D1: this task's share of each main-loop pass */
-#ifdef AK820_DEV_HOOKS
+#if defined(AK820_DEV_HOOKS) || defined(AK820_LOCKCHAN)
 #include "lockchan.h"  /* the lock-LED channel's receiver, fed from 5A */
 #include "lockchan_media.h"   /* what a committed frame means */
 #include "ak820pro.h"         /* hid_rawhid_media_within, the channel's lease */
@@ -573,6 +573,33 @@ void ch582_lockchan_media_counts(uint32_t out[3]) {
  * stage-1 review, should-fix 4). */
 static void r81_link_lost(void);
 #    define LOCKCHAN_LINK_LOST() do { lockchan_link_lost(&lockchan); r81_link_lost(); ch582_lockchan_clock_drop(); } while (0)
+#elif defined(AK820_LOCKCHAN)
+/* Released builds with the wireless clock (local, kirillcustom): the receiver
+ * and the type-4 clock machine exactly as the dev block above has them -- one
+ * clock owner (usb_mode, raw HID's clock within LOCKCHAN_CLOCK_OWNER_S), the
+ * retry, the drop on a link change -- and nothing else: no media frames, no
+ * raw81, no devhook reads. */
+static lockchan_t lockchan;
+bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scroll(&lockchan); }
+#define LOCKCHAN_CLOCK_OWNER_S 600u
+_Static_assert(LOCKCHAN_SET_RETRY == RTC_SET_RETRY && LOCKCHAN_SET_REJECT == RTC_SET_REJECT,
+               "the clock machine's statuses are rtc.h's");
+static lockchan_clock_state_t lcc = LOCKCHAN_CLOCK_STATE_INIT;
+static bool lcc_owned_elsewhere(void) {
+    return usb_mode || !is_module_connected || hid_rawhid_clock_within(LOCKCHAN_CLOCK_OWNER_S);
+}
+static uint8_t lcc_set(const lockchan_clock_t *at, int16_t *off) {
+    rtc_time_t t = {
+        .year = (uint16_t)(2000 + at->yy), .month = at->mo, .day = at->dd, .weekday = at->wd,
+        .hours = at->hh, .minutes = at->mi, .seconds = at->ss,
+    };
+    return rtc_set_time_ms(&t, at->ms, 0, 0x7FFF, off);
+}
+static const lockchan_clock_hooks_t lcc_hooks = {lcc_owned_elsewhere, lcc_set};
+void ch582_lockchan_clock_drop(void) {
+    lockchan_clock_drop(&lcc);
+}
+#    define LOCKCHAN_LINK_LOST() do { lockchan_link_lost(&lockchan); ch582_lockchan_clock_drop(); } while (0)
 #else
 #    define LOCKCHAN_LINK_LOST() ((void)0)
 #endif
@@ -1967,6 +1994,11 @@ void ch582_task(void) {
                     if (is_module_connected && !usb_mode && lockchan_feed(&lockchan, d, timer_read32())) {
                         lockchan_media_commit(&lockchan.last);
                     }
+#elif defined(AK820_LOCKCHAN)
+                    if (is_module_connected && !usb_mode && lockchan_feed(&lockchan, d, timer_read32()) &&
+                        lockchan.last.type == LOCKCHAN_TYPE_CLOCK) {
+                        lockchan_clock_commit(&lcc, &lockchan.last, timer_read32(), &lcc_hooks);
+                    }
 #endif
                     if (is_module_connected && (d & ~0x1F) == 0) {
                         host_leds = d;
@@ -2169,6 +2201,9 @@ void ch582_task(void) {
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
     lockchan_clock_poll(&lcc, timer_read32(), &lcc_hooks);
     r81_depth--;
+#elif defined(AK820_LOCKCHAN)
+    lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
+    lockchan_clock_poll(&lcc, timer_read32(), &lcc_hooks);
 #endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);
 }

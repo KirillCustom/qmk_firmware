@@ -108,8 +108,9 @@ enum {
  * stamped whenever it gets past validation, since a false from it can still
  * have moved the board's clock (a PCF write that failed): a refusal it did
  * not need costs a wireless sync's 10 minutes, never a wrong clock. Raw81
- * (the dongle) carries no clock command. Dev builds only, with the channel. */
-#ifdef AK820_DEV_HOOKS
+ * (the dongle) carries no clock command. Dev builds only, with the channel
+ * (and released builds with AK820_LOCKCHAN, local). */
+#if defined(AK820_DEV_HOOKS) || defined(AK820_LOCKCHAN)
 static uint32_t rawhid_clock_at, rawhid_clock_credit;
 static bool     rawhid_clock_seen;
 

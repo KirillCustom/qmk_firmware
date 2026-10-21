@@ -120,6 +120,11 @@ bool ch582_rxtap_page(uint8_t page, uint8_t *out);
 const lockchan_t *ch582_lockchan(void);
 void ch582_lockchan_clear(void);
 bool ch582_lockchan_holds_scroll(void);
+#elif defined(AK820_LOCKCHAN)
+/* Released builds with the wireless clock (local): receiver + type-4 clock only. */
+#include "lockchan.h"
+bool ch582_lockchan_holds_scroll(void);
+void ch582_lockchan_clock_drop(void);
 #else
 static inline bool ch582_lockchan_holds_scroll(void) { return false; }
 #endif
