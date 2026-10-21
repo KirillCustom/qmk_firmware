@@ -21,6 +21,12 @@
  *     its anchor-to-commit time (lockchan_media_position). A new type, not a
  *     bit in type 1 (codex, the play-times review, P2 1): a board before it
  *     rejects the frame whole and keeps its text.
+ *   type 4, clock (10-20, "The wireless clock"): exactly raw HID's
+ *     RTC_SET_TIME_MS body, yy mm dd wd hh mi ss ms_lo ms_hi flags bias_lo
+ *     bias_hi, local wall time, meaning "at the frame's anchor, true time was
+ *     this". rtc/rtc_payload.h's rules, plus flags 0 and bias 0x7FFF (no
+ *     wireless sample feeds a learner). Not a display frame: the board's
+ *     clock (ch582f_ajazz.c), never the text slot.
  *
  * Anything else is rejected whole. Pure logic, as lockchan.c is: the board
  * applies a parsed frame (ch582f_ajazz.c), the host tests parse it. */
@@ -28,6 +34,8 @@
 #define LOCKCHAN_TYPE_NOW_PLAYING 1
 #define LOCKCHAN_TYPE_CLEAR       2
 #define LOCKCHAN_TYPE_TRANSPORT   3
+#define LOCKCHAN_TYPE_CLOCK       4
+#define LOCKCHAN_CLOCK_LEN        12
 #define LOCKCHAN_MEDIA_MAX_L0     19
 #define LOCKCHAN_MEDIA_MAX_L1     21
 #define LOCKCHAN_TRANSPORT_LEN    6
@@ -49,6 +57,23 @@ bool lockchan_media_parse(const lockchan_frame_t *f, lockchan_media_t *m);
  * anchor to its commit, rounded to the second; never past a known duration,
  * never past 0xFFFF. */
 uint16_t lockchan_media_position(const lockchan_media_t *m, uint32_t anchor_ms, uint32_t commit_ms);
+
+/* A type 4's time: rtc_time_t's fields, year less 2000, and the ms. */
+typedef struct {
+    uint8_t  yy, mo, dd, wd, hh, mi, ss;
+    uint16_t ms;
+} lockchan_clock_t;
+
+/* True, with *c filled, when the frame is a valid type 4. */
+bool lockchan_clock_parse(const lockchan_frame_t *f, lockchan_clock_t *c);
+
+/* *c plus `elapsed_ms` (the anchor to the set), with the second, minute,
+ * hour, day, month and year carried and the weekday moved by the days
+ * carried (the host's numbering kept). False when the result leaves raw HID's
+ * range (2026-2098), or elapsed_ms is over LOCKCHAN_CLOCK_MAX_ELAPSED_MS: no
+ * anchor that old is trusted. */
+#define LOCKCHAN_CLOCK_MAX_ELAPSED_MS 60000u
+bool lockchan_clock_advance(const lockchan_clock_t *c, uint32_t elapsed_ms, lockchan_clock_t *out);
 
 /* The play icon, as the frame and display.h's DISPLAY_ICON_PLAY number it. */
 #define LOCKCHAN_ICON_PLAY 1

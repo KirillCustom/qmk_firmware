@@ -102,6 +102,16 @@ bool ch582_raw81_window(int8_t on);
 void ch582_lockchan_media_counts(uint32_t out[3]);
 /* Raw HID changed the display: drop a lock-LED frame being assembled. */
 void ch582_lockchan_rawhid(void);
+/* Raw HID set the clock: drop a lock-LED clock frame waiting to retry. */
+void ch582_lockchan_clock_drop(void);
+/* op 17 sub 8: the lock-LED clock (type 4), 27 bytes from out[0]:
+ * [0..1] applied, [2..3] refused (owner: usb_mode or raw HID's clock within
+ * 10 min), [4..5] rejected (invalid, or the setter's REJECT), [6..7] retried
+ * (a RETRY kept), [8..9] dropped (a retry's time out, a link change, a wake,
+ * a raw-HID set), all u16 LE; [10..11] the last applied's offset (s16 LE ms,
+ * target minus board, rtc_set_time_ms's), [12] its status (RTC_SET_*), [13]
+ * a retry pending. */
+void ch582_lockchan_clock_fill(uint8_t *out);
 void ch582_rxtap_arm(bool armed);
 void ch582_rxtap_fill(uint8_t *out);
 bool ch582_rxtap_page(uint8_t page, uint8_t *out);

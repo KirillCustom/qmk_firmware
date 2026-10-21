@@ -9,6 +9,7 @@
 #include "ak820pro.h"
 #include "raw_hid.h"
 #include "rtc/rtc.h"
+#include "rtc/rtc_payload.h"           /* RTC_SET_TIME_MS validation, shared with type 4 */
 #include "graphics/display.h"
 #include "graphics/lcd_bus.h"
 #include "health.h"
@@ -28,6 +29,8 @@
 //   [0]=year-2000 [1]=month [2]=day [3]=weekday [4]=hour [5]=min [6]=sec
 // Sets both the PCF8563 (persist) and the live SN32 clock; the display picks it up
 // within a second via rtc_get_time(). Returns the PCF (persistence) write status.
+static void rawhid_clock_set(void);   /* below: the lock-LED clock's owner stamp */
+
 static bool rtc_apply_bytes(const uint8_t *p) {
     /* Validate BEFORE touching hardware: these bytes go into a BATTERY-BACKED
      * part, so garbage persists across power cycles -- and dec2bcd(sec >= 80)
@@ -56,7 +59,9 @@ static bool rtc_apply_bytes(const uint8_t *p) {
         .minutes = p[5],
         .seconds = p[6],
     };
-    return rtc_set_time(&t);
+    bool ok = rtc_set_time(&t);
+    rawhid_clock_set();
+    return ok;
 }
 
 // Clock-set command framing, identical for VIA and non-VIA builds so the host
@@ -91,28 +96,35 @@ enum {
     RTC_PROTO_VERSION = 2,
 };
 
-static const uint8_t days_in_month[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+/* Full validation for RTC_SET_TIME_MS: rtc/rtc_payload.h, shared with the
+ * lock-LED clock frame (type 4). */
 
-/* Full validation for RTC_SET_TIME_MS, BEFORE anything is written: calendar
- * incl. day-of-month and leap year, year 2026..2098 (the PCF stores year%100
- * and the +1 s branch must stay representable), ms <= 999, reserved flag
- * bits zero, sof_bias in +-600 ppm or the 0x7FFF "unknown" sentinel. */
-static bool rtc_ms_payload_valid(const uint8_t *p) {
-    uint8_t yy = p[0], mo = p[1], dd = p[2];
-    if (yy < 26 || yy > 98) return false;
-    if (mo < 1 || mo > 12) return false;
-    uint8_t dim = days_in_month[mo - 1];
-    uint16_t year = 2000 + yy;
-    if (mo == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) dim = 29;
-    if (dd < 1 || dd > dim) return false;
-    if (p[3] > 6 || p[4] > 23 || p[5] > 59 || p[6] > 59) return false;
-    uint16_t ms = (uint16_t)(p[7] | (p[8] << 8));
-    if (ms > 999) return false;
-    if (p[9] & 0xFC) return false;
-    int16_t bias = (int16_t)(p[10] | (p[11] << 8));
-    if (bias != 0x7FFF && (bias < -600 || bias > 600)) return false;
-    return true;
+/* The lock-LED clock's owner rule (plans/LOCK-LED-CHANNEL-PLAN.md, C2; codex,
+ * the wireless clock's review, should-fix 9): when raw HID last set the clock.
+ * Stamped here, after the set, never in rtc.c's setters, which the lock-LED
+ * handler calls too. Counted in rtc_get_seconds(), which a deep sleep's
+ * seconds are handed back to, so the window includes slept time. An accepted
+ * set only (stepped or slewing), never a RETRY or a REJECT; the legacy set is
+ * stamped whenever it gets past validation, since a false from it can still
+ * have moved the board's clock (a PCF write that failed): a refusal it did
+ * not need costs a wireless sync's 10 minutes, never a wrong clock. Raw81
+ * (the dongle) carries no clock command. Dev builds only, with the channel. */
+#ifdef AK820_DEV_HOOKS
+static uint32_t rawhid_clock_at;
+static bool     rawhid_clock_seen;
+
+bool hid_rawhid_clock_within(uint32_t now_s, uint32_t s) {
+    return rawhid_clock_seen && now_s - rawhid_clock_at <= s;
 }
+
+static void rawhid_clock_set(void) {
+    rawhid_clock_at   = rtc_get_seconds();
+    rawhid_clock_seen = true;
+    ch582_lockchan_clock_drop();   /* a wireless sync still waiting yields to it */
+}
+#else
+static inline void rawhid_clock_set(void) {}
+#endif
 
 static void rtc_set_ms_command(uint8_t *data, uint8_t length) {
     if (length < 15 || !rtc_ms_payload_valid(&data[3])) {
@@ -129,6 +141,7 @@ static void rtc_set_ms_command(uint8_t *data, uint8_t length) {
     int16_t  bias  = (int16_t)(data[13] | (data[14] << 8));
     int16_t  off   = 0;
     uint8_t  st    = rtc_set_time_ms(&t, ms, flags, bias, &off);
+    if (st == RTC_SET_STEPPED || st == RTC_SET_SLEWING) rawhid_clock_set();
     memset(&data[3], 0, 29);
     data[3]  = st;
     data[4]  = (uint8_t)((uint16_t)off & 0xFF);
@@ -1149,7 +1162,7 @@ static void health_command(uint8_t *data, uint8_t length) {
                     if (length < 32 || !ch582_rxtap_page(data[4], &data[4])) data[0] = RTC_UNHANDLED;
                     break;
                 case 17: {
-                    if (length < 32 || (data[4] > 5 && data[4] != 7) || (data[4] == 4 && (data[5] == 0 || data[5] > 50)) ||
+                    if (length < 32 || (data[4] > 5 && data[4] != 7 && data[4] != 8) || (data[4] == 4 && (data[5] == 0 || data[5] > 50)) ||
                         (data[4] == 5 && data[5] > 2)) {
                         data[0] = RTC_UNHANDLED;
                         break;
@@ -1163,6 +1176,14 @@ static void health_command(uint8_t *data, uint8_t length) {
                         memset(&data[4], 0, 28);
                         data[4] = 7;
                         memcpy(&data[5], c, sizeof c);
+                        break;
+                    }
+                    if (sub == 8) {
+                        /* The lock-LED clock (type 4): ch582f_ajazz.h's
+                         * ch582_lockchan_clock_fill layout from [5]. */
+                        memset(&data[4], 0, 28);
+                        data[4] = 8;
+                        ch582_lockchan_clock_fill(&data[5]);
                         break;
                     }
                     if (sub == 5) {

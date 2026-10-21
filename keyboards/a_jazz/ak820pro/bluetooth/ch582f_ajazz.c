@@ -11,6 +11,7 @@
 #include "lockchan_media.h"   /* what a committed frame means */
 #include "ak820pro.h"         /* hid_rawhid_media_within, the channel's lease */
 #include "graphics/display.h" /* the text slot, for a committed frame */
+#include "rtc/rtc.h"          /* the board's clock, for a type 4 */
 #endif
 
 #ifndef CH582_SERIAL_DRIVER
@@ -450,7 +451,111 @@ _Static_assert(LOCKCHAN_MEDIA_MAX_L0 <= DISPLAY_TEXT_MAX_L0 && LOCKCHAN_MEDIA_MA
 _Static_assert(LOCKCHAN_ICON_PLAY == DISPLAY_ICON_PLAY, "the frame's play icon is the display's");
 static uint32_t lcm_applied, lcm_rejected, lcm_leased;
 
+/* The lock-LED clock, type 4 (plans/LOCK-LED-CHANNEL-PLAN.md, "The wireless
+ * clock", C2, with codex's review of it). A valid frame means "at its anchor,
+ * true local time was t + ms": the board sets its clock through
+ * rtc_set_time_ms, as raw HID's RTC_SET_TIME_MS does, with the time from the
+ * anchor to the set added (lockchan_clock_advance, timezone-free civil
+ * arithmetic; the timer's difference taken unsigned, so it wraps). Flags 0:
+ * a host's sync (it outranks the boot acquisition and a wake's PCF
+ * recovery), the PCF written phase-correct after it; bias unknown, so no
+ * learner takes it.
+ *
+ * One clock owner: refused in usb_mode (the slider's cable mode) and within
+ * LOCKCHAN_CLOCK_OWNER_S of an accepted raw-HID clock set (hid_protocol.c's
+ * stamp, in rtc_get_seconds(), so a deep sleep's seconds count), checked at
+ * every attempt. Not the media lease: a clock frame is not text.
+ *
+ * A RETRY (the board's clock unreadable this pass, or a wake's recovery
+ * running) keeps the frame's own copy and tries again each pass, the elapsed
+ * time recomputed from its anchor, until LOCKCHAN_CLOCK_RETRY_MS past its
+ * commit; then it is dropped (codex, must-fix 3). A pending one is dropped
+ * at once by a link change and a deep sleep's wake (LOCKCHAN_LINK_LOST: the
+ * timer stands still asleep, so no anchor survives one) and by a raw-HID
+ * clock set; a newer type 4 replaces it. 30 bytes of RAM. */
+#define LOCKCHAN_CLOCK_OWNER_S   600u
+#define LOCKCHAN_CLOCK_RETRY_MS  2000u
+static lockchan_clock_t lcc_t;
+static uint32_t         lcc_anchor_ms, lcc_commit_ms;
+static bool             lcc_pending;
+static uint8_t          lcc_status = 0xFF;
+static int16_t          lcc_off;
+static uint16_t         lcc_applied, lcc_refused, lcc_rejected, lcc_retried, lcc_dropped;
+
+/* One attempt at `now`: true when finished (applied, refused or rejected),
+ * false on a RETRY. */
+static bool lockchan_clock_try(uint32_t now) {
+    if (usb_mode || !is_module_connected || hid_rawhid_clock_within(rtc_get_seconds(), LOCKCHAN_CLOCK_OWNER_S)) {
+        lcc_refused++;
+        return true;
+    }
+    lockchan_clock_t at;
+    if (!lockchan_clock_advance(&lcc_t, now - lcc_anchor_ms, &at)) {
+        lcc_rejected++;
+        return true;
+    }
+    rtc_time_t t = {
+        .year = (uint16_t)(2000 + at.yy), .month = at.mo, .day = at.dd, .weekday = at.wd,
+        .hours = at.hh, .minutes = at.mi, .seconds = at.ss,
+    };
+    int16_t off = 0;
+    uint8_t st  = rtc_set_time_ms(&t, at.ms, 0, 0x7FFF, &off);
+    if (st == RTC_SET_RETRY) return false;
+    if (st == RTC_SET_REJECT) {
+        lcc_rejected++;
+        return true;
+    }
+    lcc_applied++;
+    lcc_status = st;
+    lcc_off    = off;
+    return true;
+}
+
+static void lockchan_clock_commit(const lockchan_frame_t *f) {
+    lockchan_clock_t c;
+    if (!lockchan_clock_parse(f, &c)) {
+        lcc_rejected++;
+        return;
+    }
+    if (lcc_pending) lcc_dropped++;   /* the newer frame's time replaces it */
+    lcc_t         = c;
+    lcc_anchor_ms = f->anchor_ms;
+    lcc_commit_ms = f->commit_ms;
+    lcc_pending   = !lockchan_clock_try(timer_read32());
+    if (lcc_pending) lcc_retried++;
+}
+
+/* Each pass, after the receiver's poll. */
+static void lockchan_clock_poll(void) {
+    if (!lcc_pending) return;
+    uint32_t now = timer_read32();
+    if (now - lcc_commit_ms > LOCKCHAN_CLOCK_RETRY_MS) {
+        lcc_pending = false;
+        lcc_dropped++;
+        return;
+    }
+    if (lockchan_clock_try(now)) lcc_pending = false;
+}
+
+void ch582_lockchan_clock_drop(void) {
+    if (!lcc_pending) return;
+    lcc_pending = false;
+    lcc_dropped++;
+}
+
+void ch582_lockchan_clock_fill(uint8_t *out) {
+    const uint16_t c[5] = { lcc_applied, lcc_refused, lcc_rejected, lcc_retried, lcc_dropped };
+    memcpy(out, c, sizeof c);
+    memcpy(&out[10], &lcc_off, 2);
+    out[12] = lcc_status;
+    out[13] = lcc_pending;
+}
+
 static void lockchan_media_commit(const lockchan_frame_t *f) {
+    if (f->type == LOCKCHAN_TYPE_CLOCK) {
+        lockchan_clock_commit(f);
+        return;
+    }
     lockchan_media_t m;
     if (!lockchan_media_parse(f, &m)) {
         lcm_rejected++;
@@ -513,7 +618,7 @@ void ch582_lockchan_media_counts(uint32_t out[3]) {
  * reply cannot leave on a link other than its request's (r81 below; codex
  * stage-1 review, should-fix 4). */
 static void r81_link_lost(void);
-#    define LOCKCHAN_LINK_LOST() do { lockchan_link_lost(&lockchan); r81_link_lost(); } while (0)
+#    define LOCKCHAN_LINK_LOST() do { lockchan_link_lost(&lockchan); r81_link_lost(); ch582_lockchan_clock_drop(); } while (0)
 #else
 #    define LOCKCHAN_LINK_LOST() ((void)0)
 #endif
@@ -2108,6 +2213,7 @@ void ch582_task(void) {
      * pass; never nested (R2-2). Its response goes on a later pass. */
     r81_dispatch();
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
+    lockchan_clock_poll();
     r81_depth--;
 #endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);

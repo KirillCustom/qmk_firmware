@@ -110,6 +110,10 @@ enum loop_site {
 /* hid_protocol.c: raw HID (USB or the 2.4G dongle) carried an accepted media
  * command less than `ms` ago (the lock-LED channel's lease, R3-2). */
 bool hid_rawhid_media_within(uint32_t now, uint32_t ms);
+/* hid_protocol.c: raw HID set the clock (an accepted set) at most `s` seconds
+ * ago, in rtc_get_seconds() (slept time included): the lock-LED clock's owner
+ * rule. */
+bool hid_rawhid_clock_within(uint32_t now_s, uint32_t s);
 
 #ifdef LOOPGAP_INSTRUMENT
 void loop_site_begin(uint8_t site);
