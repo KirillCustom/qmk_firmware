@@ -19,7 +19,7 @@
         "audio": false,
         "backlight": false,
         "bootmagic": true,
-        "command": true,
+        "command": false,
         "console": false,
         "extrakey": true,
         "mousekey": false,
