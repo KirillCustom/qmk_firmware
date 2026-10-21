@@ -549,6 +549,18 @@ static void update_pwm_channels(PWMDriver *pwmp) {
         }
 #    endif
     }
+#    if (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    /* The match values written above take effect a period late, so the row pin
+     * selected now shows the values the PREVIOUS ISR wrote: gate it on those.
+     * Gating on this ISR's values was wrong exactly where the key row advances
+     * (current_row % 3 == 2): the G slot of key row k was lit only if key row
+     * k+1 had any light, so a lone pressed key on a dark board lost its green
+     * (white -> purple, pure green -> dark; found 2026-10-21). */
+    static bool shown_lit = false;
+    bool        lit       = shown_lit;
+    shown_lit             = enable_pwm_output;
+    enable_pwm_output     = lit;
+#    endif // SN32F2XX_PWM_CONTROL
     // Enable RGB output
     if (enable_pwm_output) {
 #    if (SN32F2XX_RGB_OUTPUT_ACTIVE_LEVEL == SN32F2XX_RGB_OUTPUT_ACTIVE_HIGH)
