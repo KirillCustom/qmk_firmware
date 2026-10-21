@@ -2324,6 +2324,7 @@ void display_set_text_line(uint8_t line, uint8_t icon, const char *s, uint8_t le
     text_icon    = new_icon;
     text_stamp   = timer_read32();
     text_present = text_buf[0][0] || text_buf[1][0] || (text_icon != DISPLAY_ICON_NONE);
+    if (!text_present) playback_title_gone();   /* an empty slot ends a readout set with it (codex, the stray-diagnostic review, P2 1) */
     if (changed || (text_present && !was_present)) {
         text_dirty = true;
         band_gen[BAND_TEXT]++;
@@ -2399,6 +2400,7 @@ void display_set_text_icon(uint8_t icon) {
     if (new_icon == text_icon) return;
     text_icon    = new_icon;
     text_present = text_buf[0][0] || text_buf[1][0] || (text_icon != DISPLAY_ICON_NONE);
+    if (!text_present) playback_title_gone();   /* an empty slot ends a readout set with it (codex, the stray-diagnostic review, P2 1) */
     text_dirty   = true;
     band_gen[BAND_TEXT]++;
 }

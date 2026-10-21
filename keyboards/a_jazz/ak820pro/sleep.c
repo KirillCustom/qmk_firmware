@@ -356,32 +356,52 @@ static void wake_ring_put(uint32_t counted) {
 }
 
 /* The last sleep with a stray (plans/BACKLOG.md, "A stray-wake storm"): what
- * was pending when a WFI first returned with no wake pin and no second, and
- * how many strays more came within that counted second (a storm, or sparse
- * returns). Op 24's slot 8. Read registers only: no side effects. */
+ * was pending when a WFI first returned with no wake pin and no second, how
+ * many more came within that counted second (a storm, or sparse returns),
+ * whether anything outside the wake set could assert an enabled IRQ, and the
+ * pending state at the latest stray. Op 24's slot 8. Reads only: RIS, IE,
+ * ISER, ISPR and ICSR clear nothing when read. An empty snapshot means an
+ * unexplained return, not proven noise (codex, the stray-diagnostic review). */
 typedef struct __attribute__((packed)) {
-    uint16_t seq;               /* the ring entry this sleep will write */
-    uint16_t same_s;            /* strays within the first one's counted second */
-    uint32_t first_s;           /* the counted second of the first */
-    uint32_t ris0, ris1, ris2;  /* each port's whole RIS, not the wake mask's */
-    uint32_t ispr;              /* NVIC->ISPR[0] */
-    uint32_t icsr;              /* SCB->ICSR: VECTPENDING, PENDSVSET, PENDSTSET */
+    uint16_t seq;        /* the ring entry this sleep will write */
+    uint16_t same_s;     /* strays within the first one's counted second */
+    uint32_t first_s;    /* the counted second of the first */
+    uint32_t ispr;       /* NVIC->ISPR[0] at the first (enabled: P0-P2 and the RTC) */
+    uint32_t icsr;       /* SCB->ICSR at the first: VECTPENDING, PENDSVSET, PENDSTSET */
+    uint16_t flags;      /* STRAY_F_*, at the first */
+    uint16_t last_n;     /* the strays counted at the latest snapshot */
+    uint32_t last_ispr;  /* NVIC->ISPR[0] at the latest stray */
+    uint32_t last_icsr;  /* SCB->ICSR at the latest stray */
 } stray_diag_t;
 _Static_assert(sizeof(stray_diag_t) == 28, "op 24's slot 8 is 28 bytes");
+#define STRAY_F_IE(port)   (1u << (port))         /* IE set outside the port's wake mask */
+#define STRAY_F_MIS(port)  (1u << (3 + (port)))   /* RIS & IE outside it: could assert the port IRQ */
+#define STRAY_F_ISER       (1u << 6)              /* NVIC enabled != the wake set */
 static stray_diag_t stray_diag;
 
-static inline void stray_note(uint32_t strays, uint32_t secs) {
+static void stray_note(uint32_t strays, uint32_t secs, uint32_t p0w, uint32_t p1w, uint32_t p2w, uint32_t irqs) {
+    uint32_t ispr = NVIC->ISPR[0], icsr = SCB->ICSR;
     if (strays == 0) {
+        uint32_t ie0 = SN_GPIO0->IE & ~p0w, ie1 = SN_GPIO1->IE & ~p1w, ie2 = SN_GPIO2->IE & ~p2w;
+        uint16_t f   = 0;
+        if (ie0) f |= STRAY_F_IE(0);
+        if (ie1) f |= STRAY_F_IE(1);
+        if (ie2) f |= STRAY_F_IE(2);
+        if (SN_GPIO0->RIS & ie0) f |= STRAY_F_MIS(0);
+        if (SN_GPIO1->RIS & ie1) f |= STRAY_F_MIS(1);
+        if (SN_GPIO2->RIS & ie2) f |= STRAY_F_MIS(2);
+        if (NVIC->ISER[0] != irqs) f |= STRAY_F_ISER;
         stray_diag.seq     = wake_seq;
         stray_diag.same_s  = 0;
         stray_diag.first_s = secs;
-        stray_diag.ris0    = SN_GPIO0->RIS;
-        stray_diag.ris1    = SN_GPIO1->RIS;
-        stray_diag.ris2    = SN_GPIO2->RIS;
-        stray_diag.ispr    = NVIC->ISPR[0];
-        stray_diag.icsr    = SCB->ICSR;
+        stray_diag.ispr    = ispr;
+        stray_diag.icsr    = icsr;
+        stray_diag.flags   = f;
     }
     if (secs == stray_diag.first_s && stray_diag.same_s < 0xFFFFu) stray_diag.same_s++;
+    stray_diag.last_n    = (uint16_t)(strays + 1u > 0xFFFFu ? 0xFFFFu : strays + 1u);
+    stray_diag.last_ispr = ispr;
+    stray_diag.last_icsr = icsr;
 }
 
 bool sleep_wake_ring_fill(uint8_t slot, uint8_t *out) {
@@ -527,7 +547,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
             }
             if (second) continue;   /* a second is not a stray */
 #ifdef AK820_DEV_HOOKS
-            stray_note(strays, secs);
+            stray_note(strays, secs, p0w, p1w, p2w, wake_irqs);
 #endif
             if (++strays >= DS_STRAYS_MAX) {
                 ds_reason = SLEEP_WAKE_STRAYS;

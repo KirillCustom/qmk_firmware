@@ -456,6 +456,11 @@ static void lockchan_media_commit(const lockchan_frame_t *f) {
             return;
         }
         display_set_text_icon(m.icon);
+        left = display_text_lease_left();   /* again: an icon of NONE can empty the slot (codex, the stray-diagnostic review, P2 2) */
+        if (!left) {
+            lcm_rejected++;
+            return;
+        }
         display_set_playback_for(m.state, lockchan_media_position(&m, f->anchor_ms, f->commit_ms), m.dur,
                                  left < LOCKCHAN_PLAYBACK_MS ? left : LOCKCHAN_PLAYBACK_MS);
     } else {

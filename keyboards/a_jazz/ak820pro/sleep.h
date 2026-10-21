@@ -108,6 +108,9 @@ void sleep_deep_record(uint8_t *out);
  * woke it, u32 the uptime ms after the wake, u16 strays; [26..27] entries
  * written. Slot 8 is the last stray's diagnostic instead (sleep.c,
  * stray_diag_t): u16 the entry's sequence number, u16 strays within the first
- * one's counted second, u32 that second, u32 the whole RIS of P0, P1 and P2,
- * u32 NVIC->ISPR[0], u32 SCB->ICSR. False for a slot past 8. */
+ * one's counted second, u32 that second, u32 NVIC->ISPR[0] and u32 SCB->ICSR
+ * at the first, u16 flags (b0-2 IE outside a port's wake mask, b3-5 RIS & IE
+ * outside it, b6 NVIC enabled != the wake set), u16 the strays counted at the
+ * latest snapshot, u32 NVIC->ISPR[0] and u32 SCB->ICSR there. False for a
+ * slot past 8. */
 bool sleep_wake_ring_fill(uint8_t slot, uint8_t *out28);
