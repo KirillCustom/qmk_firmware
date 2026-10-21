@@ -700,6 +700,14 @@ static void update_pwm_channels(PWMDriver *pwmp) {
  * and sets the real row rate. These hooks let a board measure that instead of
  * deriving it from the timer configuration -- the two differ by ~4.8x on the
  * AK820 Pro. Cost when implemented: two tick reads and a few adds per ISR. */
+/* PWM ticks of dark between the ISR's end and the next lit period (experiment,
+ * 2026-10-21): whether the outputs stay dark while the counter runs above every
+ * match decides how a shorter ISR keeps the slot period, and so the brightness. */
+#ifndef SN32F2XX_RGB_DARK_TICKS
+#    define SN32F2XX_RGB_DARK_TICKS 0
+#endif
+volatile uint16_t sn32f2xx_dark_ticks = SN32F2XX_RGB_DARK_TICKS;
+
 __attribute__((weak)) void sn32f2xx_isr_enter_hook(void) {}
 __attribute__((weak)) void sn32f2xx_isr_exit_hook(void) {}
 
@@ -824,15 +832,18 @@ static void rgb_callback(PWMDriver *pwmp) {
     if (period_change) pwmChangePeriodI(pwmp, scan_only ? SN32F2XX_SCAN_ONLY_TICKS : periodticks);
 #endif
     // Advance the timer to just before the wrap-around, that will start a new PWM cycle
-    pwm_lld_change_counter(pwmp, UINT16_MAX);
+    // A dark tail first, when set: the counter runs from UINT16_MAX - dark up past
+    // every match before it wraps (sn32f2xx_dark_ticks; 0 = the old re-arm).
+    const uint16_t rearm = (uint16_t)(UINT16_MAX - sn32f2xx_dark_ticks);
+    pwm_lld_change_counter(pwmp, rearm);
 #if defined(SN32F2XX_PWM_MULTI_TIMER)
     // Re-arm the auxiliary PWM timers on the same boundary as PWMD1. This is what
     // actually keeps their hardware PWM phase-locked to the row scan every period;
     // without it they free-run and drift (irregular flicker + one-phase colour
     // shift). Both share PWMD1's clock and period, so a co-located re-arm holds them
     // in lockstep.
-    pwm_lld_change_counter(&PWMD0, UINT16_MAX);
-    pwm_lld_change_counter(&PWMD2, UINT16_MAX);
+    pwm_lld_change_counter(&PWMD0, rearm);
+    pwm_lld_change_counter(&PWMD2, rearm);
 #endif
     // Enable the interrupt
     pwmEnablePeriodicNotificationI(pwmp);
