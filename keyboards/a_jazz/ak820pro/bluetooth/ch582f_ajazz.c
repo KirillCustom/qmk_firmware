@@ -367,7 +367,7 @@ void ch582_led5a_reset(void) {
  * slot is its own index, not count % ring: 2^32 is not a multiple of 260, so
  * a wrapped count would skip slots 256-259 (codex rx-tap should-fix 1), and
  * the M0 has no divide instruction to spend per byte. */
-#define CH582_RXTAP_RING 260   /* ten 26-byte pages */
+#define CH582_RXTAP_RING 208   /* eight 26-byte pages (ten until 10-20: RAM for the lock-LED clock) */
 static bool     rxtap_armed = false;
 static uint32_t rxtap_count = 0;
 static uint16_t rxtap_slot  = 0;
@@ -472,88 +472,42 @@ static uint32_t lcm_applied, lcm_rejected, lcm_leased;
  * commit; then it is dropped (codex, must-fix 3). A pending one is dropped
  * at once by a link change and a deep sleep's wake (LOCKCHAN_LINK_LOST: the
  * timer stands still asleep, so no anchor survives one) and by a raw-HID
- * clock set; a newer type 4 replaces it. 30 bytes of RAM. */
-#define LOCKCHAN_CLOCK_OWNER_S   600u
-#define LOCKCHAN_CLOCK_RETRY_MS  2000u
-static lockchan_clock_t lcc_t;
-static uint32_t         lcc_anchor_ms, lcc_commit_ms;
-static bool             lcc_pending;
-static uint8_t          lcc_status = 0xFF;
-static int16_t          lcc_off;
-static uint16_t         lcc_applied, lcc_refused, lcc_rejected, lcc_retried, lcc_dropped;
+ * clock set; a newer type 4 replaces it. The machine is lockchan_media.c's
+ * (host-tested); these are the board's hooks. 32 bytes of RAM. */
+#define LOCKCHAN_CLOCK_OWNER_S 600u
+_Static_assert(LOCKCHAN_SET_RETRY == RTC_SET_RETRY && LOCKCHAN_SET_REJECT == RTC_SET_REJECT,
+               "the clock machine's statuses are rtc.h's");
+static lockchan_clock_state_t lcc = LOCKCHAN_CLOCK_STATE_INIT;
 
-/* One attempt at `now`: true when finished (applied, refused or rejected),
- * false on a RETRY. */
-static bool lockchan_clock_try(uint32_t now) {
-    if (usb_mode || !is_module_connected || hid_rawhid_clock_within(rtc_get_seconds(), LOCKCHAN_CLOCK_OWNER_S)) {
-        lcc_refused++;
-        return true;
-    }
-    lockchan_clock_t at;
-    if (!lockchan_clock_advance(&lcc_t, now - lcc_anchor_ms, &at)) {
-        lcc_rejected++;
-        return true;
-    }
+static bool lcc_owned_elsewhere(void) {
+    return usb_mode || !is_module_connected || hid_rawhid_clock_within(LOCKCHAN_CLOCK_OWNER_S);
+}
+
+static uint8_t lcc_set(const lockchan_clock_t *at, int16_t *off) {
     rtc_time_t t = {
-        .year = (uint16_t)(2000 + at.yy), .month = at.mo, .day = at.dd, .weekday = at.wd,
-        .hours = at.hh, .minutes = at.mi, .seconds = at.ss,
+        .year = (uint16_t)(2000 + at->yy), .month = at->mo, .day = at->dd, .weekday = at->wd,
+        .hours = at->hh, .minutes = at->mi, .seconds = at->ss,
     };
-    int16_t off = 0;
-    uint8_t st  = rtc_set_time_ms(&t, at.ms, 0, 0x7FFF, &off);
-    if (st == RTC_SET_RETRY) return false;
-    if (st == RTC_SET_REJECT) {
-        lcc_rejected++;
-        return true;
-    }
-    lcc_applied++;
-    lcc_status = st;
-    lcc_off    = off;
-    return true;
+    return rtc_set_time_ms(&t, at->ms, 0, 0x7FFF, off);
 }
 
-static void lockchan_clock_commit(const lockchan_frame_t *f) {
-    lockchan_clock_t c;
-    if (!lockchan_clock_parse(f, &c)) {
-        lcc_rejected++;
-        return;
-    }
-    if (lcc_pending) lcc_dropped++;   /* the newer frame's time replaces it */
-    lcc_t         = c;
-    lcc_anchor_ms = f->anchor_ms;
-    lcc_commit_ms = f->commit_ms;
-    lcc_pending   = !lockchan_clock_try(timer_read32());
-    if (lcc_pending) lcc_retried++;
-}
-
-/* Each pass, after the receiver's poll. */
-static void lockchan_clock_poll(void) {
-    if (!lcc_pending) return;
-    uint32_t now = timer_read32();
-    if (now - lcc_commit_ms > LOCKCHAN_CLOCK_RETRY_MS) {
-        lcc_pending = false;
-        lcc_dropped++;
-        return;
-    }
-    if (lockchan_clock_try(now)) lcc_pending = false;
-}
+static const lockchan_clock_hooks_t lcc_hooks = {lcc_owned_elsewhere, lcc_set};
 
 void ch582_lockchan_clock_drop(void) {
-    if (!lcc_pending) return;
-    lcc_pending = false;
-    lcc_dropped++;
+    lockchan_clock_drop(&lcc);
 }
 
 void ch582_lockchan_clock_fill(uint8_t *out) {
-    const uint16_t c[5] = { lcc_applied, lcc_refused, lcc_rejected, lcc_retried, lcc_dropped };
+    const uint16_t c[5] = { lcc.applied, lcc.refused, lcc.rejected, lcc.retried, lcc.dropped };
     memcpy(out, c, sizeof c);
-    memcpy(&out[10], &lcc_off, 2);
-    out[12] = lcc_status;
-    out[13] = lcc_pending;
+    memcpy(&out[10], &lcc.off, 2);
+    out[12] = lcc.status;
+    out[13] = lcc.pending;
 }
 
 static void lockchan_media_commit(const lockchan_frame_t *f) {
     if (f->type == LOCKCHAN_TYPE_CLOCK) {
-        lockchan_clock_commit(f);
+        lockchan_clock_commit(&lcc, f, timer_read32(), &lcc_hooks);
         return;
     }
     lockchan_media_t m;
@@ -2213,7 +2167,7 @@ void ch582_task(void) {
      * pass; never nested (R2-2). Its response goes on a later pass. */
     r81_dispatch();
     lockchan_poll(&lockchan, timer_read32(), is_module_connected && !usb_mode);
-    lockchan_clock_poll();
+    lockchan_clock_poll(&lcc, timer_read32(), &lcc_hooks);
     r81_depth--;
 #endif
     if (prof) prof_end(p0, p1, p2, bytes_processed);

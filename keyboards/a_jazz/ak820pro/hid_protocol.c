@@ -110,16 +110,18 @@ enum {
  * not need costs a wireless sync's 10 minutes, never a wrong clock. Raw81
  * (the dongle) carries no clock command. Dev builds only, with the channel. */
 #ifdef AK820_DEV_HOOKS
-static uint32_t rawhid_clock_at;
+static uint32_t rawhid_clock_at, rawhid_clock_credit;
 static bool     rawhid_clock_seen;
 
-bool hid_rawhid_clock_within(uint32_t now_s, uint32_t s) {
-    return rawhid_clock_seen && now_s - rawhid_clock_at <= s;
+bool hid_rawhid_clock_within(uint32_t s) {
+    return rawhid_clock_seen &&
+           rtc_stamp_age_s(rawhid_clock_at, rawhid_clock_credit, rtc_get_seconds(), rtc_seconds_credit()) <= s;
 }
 
 static void rawhid_clock_set(void) {
-    rawhid_clock_at   = rtc_get_seconds();
-    rawhid_clock_seen = true;
+    rawhid_clock_at     = rtc_get_seconds();
+    rawhid_clock_credit = rtc_seconds_credit();
+    rawhid_clock_seen   = true;
     ch582_lockchan_clock_drop();   /* a wireless sync still waiting yields to it */
 }
 #else

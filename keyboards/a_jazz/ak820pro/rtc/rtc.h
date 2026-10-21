@@ -40,6 +40,11 @@ bool rtc_set_time(const rtc_time_t *t);
  * no calendar conversion. For once-per-second edge detection (e.g. pacing the
  * display refresh). NOT wall time; use rtc_get_time() for that. */
 uint32_t rtc_get_seconds(void);
+/* The seconds a deep sleep's wake has credited to rtc_get_seconds() for what
+ * the ILRC missed asleep (wake_coarse), summed since boot, wrapping: a stamp
+ * taken from the count can take a later credit back out
+ * (rtc/rtc_payload.h's rtc_stamp_age_s). */
+uint32_t rtc_seconds_credit(void);
 /* Live SN32 divider period (trimmed register value). */
 uint32_t rtc_get_period(void);
 

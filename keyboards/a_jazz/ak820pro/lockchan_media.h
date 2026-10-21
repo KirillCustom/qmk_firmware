@@ -75,6 +75,41 @@ bool lockchan_clock_parse(const lockchan_frame_t *f, lockchan_clock_t *c);
 #define LOCKCHAN_CLOCK_MAX_ELAPSED_MS 60000u
 bool lockchan_clock_advance(const lockchan_clock_t *c, uint32_t elapsed_ms, lockchan_clock_t *out);
 
+/* A committed type 4 on its way to the board's clock (ch582f_ajazz.c holds
+ * one; codex, the wireless clock's review, must-fix 3, and its
+ * implementation review, 7: pure, so the host test runs it). Each attempt
+ * asks the board, through the hooks, whether another owner has the clock,
+ * then sets it with the time advanced from the frame's own anchor. A RETRY
+ * keeps the frame's copy and tries again each poll until
+ * LOCKCHAN_CLOCK_RETRY_MS past its commit, a fixed deadline; a drop (a link
+ * change, a wake, a raw-HID set) or a newer type 4 ends it. */
+#define LOCKCHAN_CLOCK_RETRY_MS  2000u
+#define LOCKCHAN_SET_RETRY       0xFE   /* rtc.h's RTC_SET_RETRY */
+#define LOCKCHAN_SET_REJECT      0xFF   /* rtc.h's RTC_SET_REJECT */
+typedef struct {
+    /* Another owner has the clock now: usb_mode, unlinked, or raw HID set it
+     * within its window. */
+    bool (*owned_elsewhere)(void);
+    /* rtc_set_time_ms with flags 0 and the bias unknown: an RTC_SET_*
+     * status, and the offset before (target minus board, ms). */
+    uint8_t (*set)(const lockchan_clock_t *at, int16_t *off);
+} lockchan_clock_hooks_t;
+
+typedef struct {
+    lockchan_clock_t t;
+    uint32_t         anchor_ms, commit_ms;
+    bool             pending;
+    uint8_t          status;    /* the last applied's RTC_SET_*; 0xFF none yet */
+    int16_t          off;       /* the last applied's offset */
+    uint16_t         applied, refused, rejected, retried, dropped;
+} lockchan_clock_state_t;
+
+#define LOCKCHAN_CLOCK_STATE_INIT {.status = 0xFF}
+void lockchan_clock_commit(lockchan_clock_state_t *s, const lockchan_frame_t *f, uint32_t now,
+                           const lockchan_clock_hooks_t *h);
+void lockchan_clock_poll(lockchan_clock_state_t *s, uint32_t now, const lockchan_clock_hooks_t *h);
+void lockchan_clock_drop(lockchan_clock_state_t *s);
+
 /* The play icon, as the frame and display.h's DISPLAY_ICON_PLAY number it. */
 #define LOCKCHAN_ICON_PLAY 1
 

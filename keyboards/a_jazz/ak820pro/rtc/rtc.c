@@ -955,6 +955,12 @@ uint32_t rtc_get_seconds(void) {
     return rtc_seconds_count;
 }
 
+static uint32_t rtc_credit_s;   /* wake_coarse's credits, summed (rtc.h) */
+
+uint32_t rtc_seconds_credit(void) {
+    return rtc_credit_s;
+}
+
 
 static void rtc_seed_from_pcf(void)
 {
@@ -1913,6 +1919,7 @@ static void wake_coarse(void)
         int32_t diff = (int32_t)(wk_slept_s - wk_counted);
         chSysLock();
         rtc_seconds_count += (uint32_t)diff;   /* stays seconds since boot */
+        rtc_credit_s += (uint32_t)diff;        /* main-loop only, as its readers */
         chSysUnlock();
         if (host_sync_gen == wk_gen && !pcfs.stale) {   /* no host sync since the wake: the PCF's seconds */
             RTCDateTime dt;

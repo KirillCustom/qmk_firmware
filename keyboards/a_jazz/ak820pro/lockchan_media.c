@@ -121,3 +121,59 @@ bool lockchan_clock_advance(const lockchan_clock_t *c, uint32_t elapsed_ms, lock
     };
     return true;
 }
+
+/* One attempt at `now`: true when finished (applied, refused or rejected),
+ * false on a RETRY. */
+static bool clock_try(lockchan_clock_state_t *s, uint32_t now, const lockchan_clock_hooks_t *h) {
+    if (h->owned_elsewhere()) {
+        s->refused++;
+        return true;
+    }
+    lockchan_clock_t at;
+    if (!lockchan_clock_advance(&s->t, now - s->anchor_ms, &at)) {   /* unsigned: wraps */
+        s->rejected++;
+        return true;
+    }
+    int16_t off = 0;
+    uint8_t st  = h->set(&at, &off);
+    if (st == LOCKCHAN_SET_RETRY) return false;
+    if (st == LOCKCHAN_SET_REJECT) {
+        s->rejected++;
+        return true;
+    }
+    s->applied++;
+    s->status = st;
+    s->off    = off;
+    return true;
+}
+
+void lockchan_clock_commit(lockchan_clock_state_t *s, const lockchan_frame_t *f, uint32_t now,
+                           const lockchan_clock_hooks_t *h) {
+    lockchan_clock_t c;
+    if (!lockchan_clock_parse(f, &c)) {
+        s->rejected++;
+        return;
+    }
+    if (s->pending) s->dropped++;   /* the newer frame's time replaces it */
+    s->t         = c;
+    s->anchor_ms = f->anchor_ms;
+    s->commit_ms = f->commit_ms;
+    s->pending   = !clock_try(s, now, h);
+    if (s->pending) s->retried++;
+}
+
+void lockchan_clock_poll(lockchan_clock_state_t *s, uint32_t now, const lockchan_clock_hooks_t *h) {
+    if (!s->pending) return;
+    if (now - s->commit_ms > LOCKCHAN_CLOCK_RETRY_MS) {
+        s->pending = false;
+        s->dropped++;
+        return;
+    }
+    if (clock_try(s, now, h)) s->pending = false;
+}
+
+void lockchan_clock_drop(lockchan_clock_state_t *s) {
+    if (!s->pending) return;
+    s->pending = false;
+    s->dropped++;
+}
