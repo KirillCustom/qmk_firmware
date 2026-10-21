@@ -423,7 +423,8 @@ bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scro
  * has carried a media command within the lease, so a late Bluetooth frame
  * cannot overwrite what USB or the 2.4G dongle just showed. Only then the
  * display, through the same setters as raw HID's text channel: type 1 both
- * lines and the icon, playback off; type 2 a clear, playback off; type 3 the
+ * lines and the icon, the readout kept, guessed or off by what the slot
+ * showed (lockchan_media_readout); type 2 a clear, playback off; type 3 the
  * shown slot's icon and the playback readout, its position advanced by the
  * frame's own anchor-to-commit time. Type 3 belongs to the title shown, so
  * with none shown, or its lease spent, it is counted rejected and changes
@@ -434,9 +435,19 @@ bool ch582_lockchan_holds_scroll(void) { return !usb_mode && lockchan_holds_scro
  * the title does (the fixes' verify, P2 1). The readout lives
  * LOCKCHAN_PLAYBACK_MS at most, two of the host's 60 s refreshes and a
  * margin, since frames are lost (not a guaranteed bound: codex, the
- * play-times review). RAM state only; the band paints on its own schedule. */
+ * play-times review). A new track's guess lives LOCKCHAN_GUESS_MS: its type 3
+ * follows in ~3 s, and a guess with that frame lost would be the same
+ * confidently-wrong readout, so the band goes back to the clock. RAM state
+ * only; the band paints on its own schedule. */
 #define LOCKCHAN_LEASE_MS    10000u
 #define LOCKCHAN_PLAYBACK_MS 135000u
+#define LOCKCHAN_GUESS_MS    10000u
+/* lockchan_media_readout compares the slot's lines with a frame's byte for
+ * byte. The setters keep a frame's lines whole: the parser's bounds fit the
+ * slot's and its bytes are printable, as the setters need. */
+_Static_assert(LOCKCHAN_MEDIA_MAX_L0 <= DISPLAY_TEXT_MAX_L0 && LOCKCHAN_MEDIA_MAX_L1 <= DISPLAY_TEXT_MAX_L1,
+               "a frame's line must fit the text slot whole");
+_Static_assert(LOCKCHAN_ICON_PLAY == DISPLAY_ICON_PLAY, "the frame's play icon is the display's");
 static uint32_t lcm_applied, lcm_rejected, lcm_leased;
 
 static void lockchan_media_commit(const lockchan_frame_t *f) {
@@ -463,14 +474,25 @@ static void lockchan_media_commit(const lockchan_frame_t *f) {
         }
         display_set_playback_for(m.state, lockchan_media_position(&m, f->anchor_ms, f->commit_ms), m.dur,
                                  left < LOCKCHAN_PLAYBACK_MS ? left : LOCKCHAN_PLAYBACK_MS);
-    } else {
-        if (m.type == LOCKCHAN_TYPE_CLEAR) {
-            display_clear_text();
-        } else {
-            display_set_text_line(0, m.icon, (const char *)m.l0, m.n0);
-            display_set_text_line(1, m.icon, (const char *)m.l1, m.n1);
-        }
+    } else if (m.type == LOCKCHAN_TYPE_CLEAR) {
+        display_clear_text();
         display_set_playback(0, 0, 0);
+    } else {
+        /* What the slot showed, before the setters replace it. */
+        char    l0[DISPLAY_TEXT_MAX + 1], l1[DISPLAY_TEXT_MAX + 1];
+        uint8_t icon;
+        uint8_t n0      = display_get_text_line(0, l0, sizeof l0, &icon, NULL);
+        uint8_t n1      = display_get_text_line(1, l1, sizeof l1, NULL, NULL);
+        uint8_t readout = lockchan_media_readout(&m, display_text_lease_left() != 0, l0, n0, l1, n1, icon);
+        display_set_text_line(0, m.icon, (const char *)m.l0, m.n0);
+        display_set_text_line(1, m.icon, (const char *)m.l1, m.n1);
+        if (readout == LOCKCHAN_READOUT_GUESS) {
+            /* From 0 at the frame's anchor, the duration unknown. */
+            display_set_playback_for(1, lockchan_media_position(&(lockchan_media_t){0}, f->anchor_ms, f->commit_ms), 0,
+                                     LOCKCHAN_GUESS_MS);
+        } else if (readout == LOCKCHAN_READOUT_OFF) {
+            display_set_playback(0, 0, 0);
+        }
     }
     lcm_applied++;
 }

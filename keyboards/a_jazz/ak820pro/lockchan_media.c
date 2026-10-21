@@ -1,5 +1,6 @@
 // Copyright 2026 JD Lien
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <string.h>
 #include "lockchan_media.h"
 
 static bool printable(const uint8_t *s, uint8_t n) {
@@ -50,4 +51,16 @@ uint16_t lockchan_media_position(const lockchan_media_t *m, uint32_t anchor_ms, 
     uint32_t pos = m->pos + (uint32_t)(commit_ms - anchor_ms + 500u) / 1000u;   /* wraps with the timer */
     if (m->dur && pos > m->dur) pos = m->dur;
     return pos > 0xFFFFu ? 0xFFFFu : (uint16_t)pos;
+}
+
+static bool same_line(const uint8_t *a, uint8_t na, const char *b, uint8_t nb) {
+    return na == nb && (na == 0 || memcmp(a, b, na) == 0);
+}
+
+uint8_t lockchan_media_readout(const lockchan_media_t *m, bool shown, const char *l0, uint8_t n0,
+                               const char *l1, uint8_t n1, uint8_t icon) {
+    if (m->type != LOCKCHAN_TYPE_NOW_PLAYING || !shown || m->icon != LOCKCHAN_ICON_PLAY) return LOCKCHAN_READOUT_OFF;
+    if (same_line(m->l0, m->n0, l0, n0) && same_line(m->l1, m->n1, l1, n1))
+        return icon == LOCKCHAN_ICON_PLAY ? LOCKCHAN_READOUT_KEEP : LOCKCHAN_READOUT_OFF;
+    return LOCKCHAN_READOUT_GUESS;
 }

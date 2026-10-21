@@ -49,3 +49,25 @@ bool lockchan_media_parse(const lockchan_frame_t *f, lockchan_media_t *m);
  * anchor to its commit, rounded to the second; never past a known duration,
  * never past 0xFFFF. */
 uint16_t lockchan_media_position(const lockchan_media_t *m, uint32_t anchor_ms, uint32_t commit_ms);
+
+/* The play icon, as the frame and display.h's DISPLAY_ICON_PLAY number it. */
+#define LOCKCHAN_ICON_PLAY 1
+
+/* What a type 1 does to the playback readout, from the slot it replaces
+ * (plans/BACKLOG.md, "The clock flashes"). Turning the readout off at every
+ * type 1 showed the clock for the ~3 s until its type 3:
+ *   KEEP   the slot shows these lines with the play icon, and so does the
+ *          frame: the host's 60 s refresh, or its resend at a wake. The
+ *          readout stands, its own expiry unrenewed, so it still ends no
+ *          later than the title it was set with would have.
+ *   GUESS  other lines replace a shown title, with the play icon: a new
+ *          track, counted from the frame's anchor until its type 3, which
+ *          the host sends after every type 1. A track resumed part way
+ *          reads low until then.
+ *   OFF    anything else: no title shown (expired, or a wake), a pause or a
+ *          stop, or the same title resumed (the position is the type 3's).
+ * `shown` is whether the slot's title is live (its lease not spent); l0/n0,
+ * l1/n1 and `icon` are what it holds. Pure, for the host test. */
+enum { LOCKCHAN_READOUT_OFF = 0, LOCKCHAN_READOUT_KEEP, LOCKCHAN_READOUT_GUESS };
+uint8_t lockchan_media_readout(const lockchan_media_t *m, bool shown, const char *l0, uint8_t n0,
+                               const char *l1, uint8_t n1, uint8_t icon);
