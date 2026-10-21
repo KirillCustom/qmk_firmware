@@ -9,6 +9,7 @@
 #include "flash_stats.h"   /* C1: which path proposes each save */
 #include "rtc_persist.h"   /* C2: proposals here, every save there */
 #include "rtc_pcf_sync.h"  /* the PCF write's generations and staleness */
+#include "rtc_payload.h"   /* the frame trim's arithmetic */
 #include "hal.h"
 #include "../graphics/lcd_bus.h"
 #include "../graphics/display.h"   /* display_splash_done() */
@@ -125,6 +126,20 @@ static bool     host_synced    = false;
 static uint16_t host_sync_gen  = 0;   /* bumped by every host set (a deep sleep's recovery yields to a newer one) */
 static uint16_t clock_gen      = 0;   /* bumped by every change to the calendar the display shows */
 static int16_t  last_host_offset_ms = 0;
+
+/* The lock-LED clock's rate trim (rtc_payload.h: rtc_frame_trim and its
+ * window, rtc_ft_*). A window opens at every accepted phase-correct host set
+ * (rtc_set_time_ms, raw HID's or a frame's) and a frame's set closes it, if
+ * nothing between moved the clock or its period: no other phase change
+ * (clock_gen), no deep sleep (the ILRC runs ~13% slow asleep) or wake
+ * credit, the period unchanged, SOF not the reference, no slew still
+ * running. The legacy whole-second set and leaving SOF drop it (codex, the
+ * trim's review, must-fix 2 and 3). Never persisted: it follows the
+ * temperature, SOF's stored value stays the base, and back on USB the SOF
+ * loop starts from the trimmed period. */
+static rtc_ft_t          ft;
+static volatile uint16_t ft_sleeps;     /* bumped by every deep sleep (rtc_wake_beginI) */
+static void ft_snap(rtc_ft_snap_t *s);
 
 /* ---- Phase 1: reload ownership (PLAN.md 3.0, R1-R3) -----------------------
  * P_nom is the NOMINAL period (register value) owned here; RTCD1.period is
@@ -687,6 +702,10 @@ static void rtc_ref_task(void)
         if (!ua || badrun >= 3) {
             ref_state = REF_PCF_LEGACY;       /* its own counter moves it on to NONE if the PCF is dead */
             chSysLock(); win_valid = false; chSysUnlock();
+            /* SOF held the rate, not the phase: the frame trim's window
+             * cannot know the board's error from here (codex, the trim's
+             * review, must-fix 2). The next accepted set opens one. */
+            rtc_ft_drop(&ft);
 #ifdef RTC_AUTO_CALIBRATION
             rtc_cal_valid = false;
 #endif
@@ -959,6 +978,38 @@ static uint32_t rtc_credit_s;   /* wake_coarse's credits, summed (rtc.h) */
 
 uint32_t rtc_seconds_credit(void) {
     return rtc_credit_s;
+}
+
+/* The board, for the frame trim's window. */
+static void ft_snap(rtc_ft_snap_t *s) {
+    *s = (rtc_ft_snap_t){
+        .secs = rtc_seconds_count, .credit = rtc_credit_s, .p = P_nom, .gen = clock_gen, .sleeps = ft_sleeps,
+    };
+}
+
+/* An accepted set: its trim (proposed from `p` with `sign`; `np` the period
+ * it ran with) is published, and for a host's phase-correct set the window
+ * opens anew, after the set's own clock_gen. The ISR loads a new period at
+ * the next match, or at a running slew's end, which restores P_nom. */
+static void ft_accepted(uint32_t p, uint32_t np, int8_t sign, bool open) {
+    if (np != p) {
+#ifdef CONSOLE_ENABLE
+        printf("[rtc] frame trim %lu -> %lu\n", (unsigned long)p, (unsigned long)np);
+#endif
+        P_nom          = np;
+        reload_pending = true;
+    }
+    rtc_ft_publish(&ft, p, np, sign);
+    if (open) {
+        rtc_ft_snap_t s;
+        ft_snap(&s);
+        rtc_ft_open(&ft, &s);
+    }
+}
+
+void rtc_frame_trim_stats(uint16_t *trims, uint16_t *period) {
+    *trims  = ft.trims;
+    *period = ft.period;
 }
 
 
@@ -1241,6 +1292,9 @@ bool rtc_set_time(const rtc_time_t *t)
     rtc_valid = true;
     host_synced    = true;
     last_sync_secs = rtc_seconds_count;
+    /* Whole seconds, the fraction kept: no measure of the board's error to
+     * open the frame trim's window from (codex, the trim's review, 3). */
+    rtc_ft_drop(&ft);
 
     return ok;
 }
@@ -1271,6 +1325,10 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
 
     /* Offset before correction: (t + ms) - board_now, ms, clamped to s16. */
     int32_t off = 0;
+    /* The frame trim: the period this set should use, published only once
+     * the set is accepted (codex, the trim's review, should-fix 6). */
+    uint32_t P_set = P_nom;
+    int8_t   ft_sg = ft.sign;
     if (have_now) {
         RTCDateTime dt_n; struct tm tm_n;
         rtc_to_chibiostime(&now.t, &dt_n);
@@ -1282,6 +1340,12 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
         int64_t frac_ms = 1000 - (int64_t)(now.period_active + 1 - now.cnt) * 1000 / (int64_t)(P_nom + 1);
         int64_t o = ((int64_t)e_t - (int64_t)e_n) * 1000 + (int64_t)ms - frac_ms;
         off = (o > 32767) ? 32767 : (o < -32768) ? -32768 : (int32_t)o;
+        if (flags & RTC_SETF_FRAME) {
+            /* The full-width offset: the reply's s16 saturates (must-fix 1). */
+            rtc_ft_snap_t sn;
+            ft_snap(&sn);
+            P_set = rtc_ft_propose(&ft, &sn, ref_state == REF_SOF, slew_state != SLEW_IDLE, o, &ft_sg);
+        }
     }
 
     /* Step or slew (PLAN.md 3.2/3.3): a small correction on an already
@@ -1289,13 +1353,16 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
      * jumps; the first sync after boot, a large offset, or force_step steps. */
     if (have_now && host_synced && !(flags & RTC_SETF_FORCE_STEP) &&
         off >= -SLEW_MAX_MS && off <= SLEW_MAX_MS) {
-        int64_t D    = (int64_t)off * (int64_t)(P_nom + 1) / 1000;      /* cycles, signed */
+        int64_t D    = (int64_t)off * (int64_t)(P_set + 1) / 1000;      /* cycles, signed */
         int64_t absD = D < 0 ? -D : D;
-        int32_t step = (int32_t)((uint64_t)(P_nom + 1) * 20u / 1000u);   /* 2 % of a period */
+        int32_t step = (int32_t)((uint64_t)(P_set + 1) * 20u / 1000u);   /* 2 % of a period */
         uint16_t N   = (uint16_t)((absD + step - 1) / step);
         if (N < 1) N = 1;
         int32_t d = (int32_t)(D / N);                                   /* toward zero */
         int32_t r = (int32_t)(D - (int64_t)d * N);
+        /* The new period before the slew starts: the ISR's slew values are
+         * taken from P_nom. */
+        ft_accepted(P_nom, P_set, ft_sg, !(flags & RTC_SETF_INTERNAL));
         chSysLock();
         slew_d = d; slew_r = r; slew_left = N; slew_state = SLEW_START;
         chSysUnlock();
@@ -1316,10 +1383,10 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     /* First period: R ms to the next boundary. Too close -> label the one after. */
     uint32_t R     = 1000u - ms;
     time_t   sec   = e_t;
-    uint64_t first = ((uint64_t)(P_nom + 1) * R) / 1000u;
+    uint64_t first = ((uint64_t)(P_set + 1) * R) / 1000u;
     if (R < RTC_MIN_FIRST_MS) {
         sec   += 1;
-        first += P_nom + 1;
+        first += P_set + 1;
     }
     if (first < 2) return RTC_SET_REJECT;
     uint32_t reg = (uint32_t)(first - 1);
@@ -1331,6 +1398,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     rtcConvertStructTmToDateTime(&tm_s, 0, &dt_s);
 
     if (!(flags & RTC_SETF_INTERNAL)) host_correction_accepted(!(flags & RTC_SETF_SKIP_PCF));
+    ft_accepted(P_nom, P_set, ft_sg, false);   /* the window opens after the clock_gen below */
     chSysLock();
     slew_state = SLEW_IDLE;             /* a step supersedes any running slew */
     rtcSetTime(&RTCD1, &dt_s);          /* software seconds */
@@ -1346,6 +1414,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     last_sync_secs = rtc_seconds_count;
     last_host_offset_ms = (int16_t)off;
     if (offset_before) *offset_before = (int16_t)off;
+    if (!(flags & RTC_SETF_INTERNAL)) ft_accepted(P_nom, P_nom, ft.sign, true);   /* after its clock_gen */
 
     if (!(flags & RTC_SETF_SKIP_PCF)) {
         pcf_sync_request(&pcfs);       /* R5: the fast task performs the I2C, from the board's clock */
@@ -1817,6 +1886,7 @@ void rtc_wake_beginI(uint32_t counted_s)
     wk_slept_s     = counted_s;
     wk_gen         = host_sync_gen;
     wk_ticks0      = rtc_seconds_count;
+    ft_sleeps++;         /* every actual sleep, whatever it counted (codex, the trim's review, 4) */
 }
 
 void rtc_wake_allow(void)

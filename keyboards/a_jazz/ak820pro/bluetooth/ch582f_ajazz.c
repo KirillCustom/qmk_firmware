@@ -488,7 +488,8 @@ static uint8_t lcc_set(const lockchan_clock_t *at, int16_t *off) {
         .year = (uint16_t)(2000 + at->yy), .month = at->mo, .day = at->dd, .weekday = at->wd,
         .hours = at->hh, .minutes = at->mi, .seconds = at->ss,
     };
-    return rtc_set_time_ms(&t, at->ms, 0, 0x7FFF, off);
+    /* A frame closes the rate trim's window, unless the host stepped. */
+    return rtc_set_time_ms(&t, at->ms, at->stepped ? 0 : RTC_SETF_FRAME, 0x7FFF, off);
 }
 
 static const lockchan_clock_hooks_t lcc_hooks = {lcc_owned_elsewhere, lcc_set};
@@ -503,6 +504,9 @@ void ch582_lockchan_clock_fill(uint8_t *out) {
     memcpy(&out[10], &lcc.off, 2);
     out[12] = lcc.status;
     out[13] = lcc.pending;
+    uint16_t ft[2];
+    rtc_frame_trim_stats(&ft[0], &ft[1]);
+    memcpy(&out[14], ft, sizeof ft);
 }
 
 static void lockchan_media_commit(const lockchan_frame_t *f) {
