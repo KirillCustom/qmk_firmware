@@ -110,7 +110,8 @@ void ch582_lockchan_clock_drop(void);
  * (a RETRY kept), [8..9] dropped (a retry's time out, a link change, a wake,
  * a raw-HID set), all u16 LE; [10..11] the last applied's offset (s16 LE ms,
  * target minus board, rtc_set_time_ms's), [12] its status (RTC_SET_*), [13]
- * a retry pending. */
+ * a retry pending, [14..15] the rate trims from frames since boot, [16..17]
+ * the period the last one set (0: none; rtc_frame_trim_stats). */
 void ch582_lockchan_clock_fill(uint8_t *out);
 void ch582_rxtap_arm(bool armed);
 void ch582_rxtap_fill(uint8_t *out);

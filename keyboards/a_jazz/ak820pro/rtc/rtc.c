@@ -9,6 +9,7 @@
 #include "flash_stats.h"   /* C1: which path proposes each save */
 #include "rtc_persist.h"   /* C2: proposals here, every save there */
 #include "rtc_pcf_sync.h"  /* the PCF write's generations and staleness */
+#include "rtc_payload.h"   /* the frame trim's arithmetic */
 #include "hal.h"
 #include "../graphics/lcd_bus.h"
 #include "../graphics/display.h"   /* display_splash_done() */
@@ -125,6 +126,26 @@ static bool     host_synced    = false;
 static uint16_t host_sync_gen  = 0;   /* bumped by every host set (a deep sleep's recovery yields to a newer one) */
 static uint16_t clock_gen      = 0;   /* bumped by every change to the calendar the display shows */
 static int16_t  last_host_offset_ms = 0;
+
+/* The lock-LED clock's rate trim (rtc_payload.h's rtc_frame_trim). A window
+ * opens at every accepted host set (raw HID or a frame) and a frame's set
+ * closes it, if nothing between moved the clock or its period: no other
+ * phase change (clock_gen), no deep sleep (the ILRC runs ~13% slow asleep)
+ * or wake credit, the period unchanged, SOF not the reference, no slew still
+ * running. Leaving SOF re-anchors an open window there: the SOF loop held
+ * the rate and the host the phase, so the board's error at that moment is the
+ * last sync's few ms, and no time on the cable dilutes the rate (the Mac
+ * session's note on the first window). Never persisted: it follows the
+ * temperature, SOF's stored value stays the base, and back on USB the SOF
+ * loop starts from the trimmed period. */
+static bool              ft_valid;
+static uint32_t          ft_secs0, ft_credit0, ft_p0;
+static uint16_t          ft_gen0, ft_sleeps0;
+static volatile uint16_t ft_sleeps;     /* bumped by every deep sleep's accounting */
+static int8_t            ft_sign;
+static uint16_t          ft_trims, ft_period;
+static bool ft_intact(void);
+static void ft_open(void);
 
 /* ---- Phase 1: reload ownership (PLAN.md 3.0, R1-R3) -----------------------
  * P_nom is the NOMINAL period (register value) owned here; RTCD1.period is
@@ -532,6 +553,7 @@ static bool     rtc_cal_valid;      /* the two above are meaningful */
  * that a skipped handler would break (a slew or a reload): rtc_sleep_ok(). */
 void rtc_account_sleepI(uint32_t seconds) {
     if (seconds == 0) return;
+    ft_sleeps++;
     rtc_seconds_count += seconds;
     rtc_lld_add_secondsI(&RTCD1, seconds);
 #ifdef RTC_AUTO_CALIBRATION
@@ -687,6 +709,8 @@ static void rtc_ref_task(void)
         if (!ua || badrun >= 3) {
             ref_state = REF_PCF_LEGACY;       /* its own counter moves it on to NONE if the PCF is dead */
             chSysLock(); win_valid = false; chSysUnlock();
+            /* The frame trim's window, from here (its period set under SOF). */
+            if (ft_valid && ft_intact()) ft_open();
 #ifdef RTC_AUTO_CALIBRATION
             rtc_cal_valid = false;
 #endif
@@ -959,6 +983,44 @@ static uint32_t rtc_credit_s;   /* wake_coarse's credits, summed (rtc.h) */
 
 uint32_t rtc_seconds_credit(void) {
     return rtc_credit_s;
+}
+
+/* The frame trim's window (above, by ft_valid): nothing but the period has
+ * moved since it opened. */
+static bool ft_intact(void) {
+    return clock_gen == ft_gen0 && ft_sleeps == ft_sleeps0 && rtc_credit_s == ft_credit0;
+}
+
+static void ft_open(void) {
+    ft_valid   = true;
+    ft_secs0   = rtc_seconds_count;
+    ft_credit0 = rtc_credit_s;
+    ft_p0      = P_nom;
+    ft_gen0    = clock_gen;
+    ft_sleeps0 = ft_sleeps;
+}
+
+/* A frame's set, before it is applied: trim the period from its offset if
+ * the window holds. The set after uses the new period, and the ISR loads it
+ * at the next match (or a running slew's end, which restores P_nom). */
+static void ft_close(int32_t off) {
+    if (!ft_valid || ref_state == REF_SOF || slew_state != SLEW_IDLE) return;
+    if (!ft_intact() || P_nom != ft_p0) return;
+    uint32_t np = rtc_frame_trim(P_nom, off, rtc_seconds_count - ft_secs0, &ft_sign);
+    if (np == P_nom) return;
+#ifdef CONSOLE_ENABLE
+    printf("[rtc] frame trim %lu -> %lu (%ld ms / %lu s)\n", (unsigned long)P_nom, (unsigned long)np,
+           (long)off, (unsigned long)(rtc_seconds_count - ft_secs0));
+#endif
+    P_nom          = np;
+    reload_pending = true;
+    ft_trims++;
+    ft_period = (uint16_t)np;
+}
+
+void rtc_frame_trim_stats(uint16_t *trims, uint16_t *period) {
+    *trims  = ft_trims;
+    *period = ft_period;
 }
 
 
@@ -1241,6 +1303,7 @@ bool rtc_set_time(const rtc_time_t *t)
     rtc_valid = true;
     host_synced    = true;
     last_sync_secs = rtc_seconds_count;
+    ft_open();
 
     return ok;
 }
@@ -1282,6 +1345,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
         int64_t frac_ms = 1000 - (int64_t)(now.period_active + 1 - now.cnt) * 1000 / (int64_t)(P_nom + 1);
         int64_t o = ((int64_t)e_t - (int64_t)e_n) * 1000 + (int64_t)ms - frac_ms;
         off = (o > 32767) ? 32767 : (o < -32768) ? -32768 : (int32_t)o;
+        if (flags & RTC_SETF_FRAME) ft_close(off);
     }
 
     /* Step or slew (PLAN.md 3.2/3.3): a small correction on an already
@@ -1299,7 +1363,10 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
         chSysLock();
         slew_d = d; slew_r = r; slew_left = N; slew_state = SLEW_START;
         chSysUnlock();
-        if (!(flags & RTC_SETF_INTERNAL)) host_correction_accepted(!(flags & RTC_SETF_SKIP_PCF));
+        if (!(flags & RTC_SETF_INTERNAL)) {
+            host_correction_accepted(!(flags & RTC_SETF_SKIP_PCF));
+            ft_open();
+        }
         slew_count++;
         last_host_offset_ms = (int16_t)off;
         last_sync_secs = rtc_seconds_count;
@@ -1346,6 +1413,7 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     last_sync_secs = rtc_seconds_count;
     last_host_offset_ms = (int16_t)off;
     if (offset_before) *offset_before = (int16_t)off;
+    if (!(flags & RTC_SETF_INTERNAL)) ft_open();   /* after its clock_gen */
 
     if (!(flags & RTC_SETF_SKIP_PCF)) {
         pcf_sync_request(&pcfs);       /* R5: the fast task performs the I2C, from the board's clock */

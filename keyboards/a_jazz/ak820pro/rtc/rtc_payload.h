@@ -33,6 +33,43 @@ static inline uint32_t rtc_stamp_age_s(uint32_t at_s, uint32_t credit_at, uint32
     return age < 0 ? 0u : (uint32_t)age;
 }
 
+/* The lock-LED clock's rate trim (type 4). Off USB nothing else trims the
+ * divider in practice: the legacy PCF check looks once an hour, and every
+ * accepted host set restarts its window, so 10-minute frames starve it
+ * (the Mac's cut test, 10-21: ~2.5 ms/s, a 1.6 s sawtooth). A frame's offset
+ * over the time since the last accepted host set, with nothing between that
+ * moved the clock or its period, is the rate, to a few ms in 600 s.
+ *
+ * `p` is the period register (a second is p + 1 cycles), `off_ms` the frame's
+ * target minus board (negative: the board ahead, its seconds too short),
+ * `interval_s` the board's seconds since the set. Returns the new period, or
+ * `p` when there is nothing to do: an interval outside RTC_FT_MIN_S ..
+ * RTC_FT_MAX_S, a rate under RTC_FT_MIN_PPM (the host's latency jitter) or
+ * over RTC_FT_MAX_PPM (a host's step, not drift). Half the step, unless the
+ * last trim's sign agrees: noise alternates and is halved, drift persists and
+ * is followed (the SOF loop's rule). `*last_sign` carries that; a rate under
+ * the floor clears it. Clamped to the sane window, 28000..40000. Pure, for
+ * the host tests. */
+#define RTC_FT_MIN_S    300u
+#define RTC_FT_MAX_S    3600u
+#define RTC_FT_MIN_PPM  50
+#define RTC_FT_MAX_PPM  10000
+static inline uint32_t rtc_frame_trim(uint32_t p, int32_t off_ms, uint32_t interval_s, int8_t *last_sign) {
+    if (interval_s < RTC_FT_MIN_S || interval_s > RTC_FT_MAX_S) return p;
+    int64_t ppm = -(int64_t)off_ms * 1000 / (int64_t)interval_s;   /* off / (interval * 1000) * 1e6 */
+    if (ppm > RTC_FT_MAX_PPM || ppm < -RTC_FT_MAX_PPM) return p;
+    if (ppm < RTC_FT_MIN_PPM && ppm > -RTC_FT_MIN_PPM) { *last_sign = 0; return p; }
+    int64_t delta = ((int64_t)p + 1) * ppm / 1000000;
+    if (delta == 0) return p;
+    int8_t sign = delta > 0 ? 1 : -1;
+    if (sign != *last_sign && (delta / 2) != 0) delta /= 2;
+    *last_sign = sign;
+    int64_t np = (int64_t)p + delta;
+    if (np < 28000) np = 28000;
+    if (np > 40000) np = 40000;
+    return (uint32_t)np;
+}
+
 static inline bool rtc_ms_payload_valid(const uint8_t *p) {
     uint8_t yy = p[0], mo = p[1], dd = p[2];
     if (yy < 26 || yy > 98) return false;
