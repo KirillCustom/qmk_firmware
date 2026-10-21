@@ -1299,6 +1299,14 @@ static void health_command(uint8_t *data, uint8_t length) {
                     data[5]    = (uint8_t)(v >> 8);
                     break;
                 }
+                case 28: {
+                    /* The row ISR's direct-register column path: data[4] = 1 sets
+                     * it from data[5], 0 only reads. Replies with it in data[4]. */
+                    extern volatile bool sn32f2xx_fast_cols;
+                    if (data[4] == 1) sn32f2xx_fast_cols = data[5] != 0;
+                    data[4] = sn32f2xx_fast_cols;
+                    break;
+                }
                 default: data[0] = RTC_UNHANDLED; break;
             }
             break;

@@ -502,6 +502,54 @@ static inline void rows_deselect(void) {
     }
 }
 
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+/* Direct-register column path (sn32f2xx_fast_cols; experiment 2026-10-21).
+ * The ISR's 30 pwmDisableChannel/pwmEnableChannel calls -- each a PRIMASK
+ * window, a run-time if-chain over the three timers and read-modify-writes --
+ * become one IO-enable write per timer to release the columns, one store per
+ * match register, and one IO-enable write per timer to drive them again. The
+ * same registers in the same order (MR before IO-enable) as pwm_lld_*, so the
+ * driver state it skips (pwmp->enabled, the channel IRQ flags) is never read
+ * on this path: channel notifications are off. */
+static volatile uint32_t *col_mr[SN32F2XX_RGB_MATRIX_COLS];
+static uint32_t           col_mr_key[SN32F2XX_RGB_MATRIX_COLS]; /* CT16B0/B2 MR writes need the 0x5A key */
+static volatile uint32_t *ioen_b1_reg, *ctrl_b0_reg, *ctrl_b2_reg;
+static uint32_t           ioen_b1, ioen_b0, ioen_b2;
+volatile bool             sn32f2xx_fast_cols = false;
+
+static void fast_cols_init(void) {
+    ioen_b1_reg = SN32_CT_PWM_GET_ADDR(&PWMD1, pwm.PWMIOENB);
+    ctrl_b0_reg = SN32_CT_PWM_GET_ADDR(&PWMD0, pwm.PWMCTRL);
+    ctrl_b2_reg = SN32_CT_PWM_GET_ADDR(&PWMD2, pwm.PWMCTRL);
+    for (uint8_t y = 0; y < SN32F2XX_RGB_MATRIX_COLS; y++) {
+        PWMDriver *drv = COL_PWM_DRV(y);
+        uint8_t    ch  = COL_PWM_CH(y);
+        col_mr[y]      = SN32_CT_PWM_GET_ADDR(drv, MR[ch]);
+        if (drv == &PWMD1) {
+            col_mr_key[y] = 0;
+            ioen_b1 |= mskCT16_PWMnIOEN_EN(ch);
+        } else {
+            col_mr_key[y] = CT16_PWM_KEY;
+            /* PWMCTRL-only timers: PWMnIOEN at bit 20 + n (hal_pwm_lld.c) */
+            if (drv == &PWMD0) ioen_b0 |= 1u << (20 + ch);
+            else ioen_b2 |= 1u << (20 + ch);
+        }
+    }
+}
+
+static inline void fast_cols_release(void) {
+    *ioen_b1_reg &= ~ioen_b1;
+    *ctrl_b0_reg = (*ctrl_b0_reg & ~ioen_b0 & 0x00FFFFFFu) | CT16_PWM_KEY;
+    *ctrl_b2_reg = (*ctrl_b2_reg & ~ioen_b2 & 0x00FFFFFFu) | CT16_PWM_KEY;
+}
+
+static inline void fast_cols_drive(void) {
+    *ioen_b1_reg |= ioen_b1;
+    *ctrl_b0_reg = (*ctrl_b0_reg & 0x00FFFFFFu) | ioen_b0 | CT16_PWM_KEY;
+    *ctrl_b2_reg = (*ctrl_b2_reg & 0x00FFFFFFu) | ioen_b2 | CT16_PWM_KEY;
+}
+#    endif
+
 static void shared_matrix_rgb_disable_output(void) {
     // Disable PWM outputs on column pins
     for (uint8_t y = 0; y < SN32F2XX_RGB_MATRIX_COLS; y++) {
@@ -536,9 +584,18 @@ static void update_pwm_channels(PWMDriver *pwmp) {
 #    endif // SN32F2XX_PWM_CONTROL
     /* Check if counter has wrapped around, reset before the next pass */
     if (current_key_row == SN32F2XX_RGB_MATRIX_ROWS) current_key_row = 0;
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    const bool fast = sn32f2xx_fast_cols;
+#    endif
     // Disable LED output before scanning the key matrix
     if (current_key_row < ROWS_PER_HAND) {
-        shared_matrix_rgb_disable_output();
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+        if (fast) {
+            fast_cols_release();
+            rows_deselect();
+        } else
+#    endif
+            shared_matrix_rgb_disable_output();
 #    if defined(SHARED_MATRIX)
         shared_matrix_scan_keys(shared_matrix, current_key_row, last_key_row);
 #    endif // SHARED_MATRIX
@@ -554,6 +611,13 @@ static void update_pwm_channels(PWMDriver *pwmp) {
         if (led_state[led_index].g > 0) enable_pwm_output |= true;
         if (led_state[led_index].r > 0) enable_pwm_output |= true;
         // Update matching RGB channel PWM configuration
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+        if (fast) {
+            uint8_t v = slot == 0 ? led_state[led_index].b : slot == 1 ? led_state[led_index].g : led_state[led_index].r;
+            *col_mr[current_key_col] = col_mr_key[current_key_col] | v;
+            continue;
+        }
+#    endif
 #    if (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
         switch (slot) {
             case 0:
@@ -582,6 +646,9 @@ static void update_pwm_channels(PWMDriver *pwmp) {
         }
 #    endif
     }
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    if (fast) fast_cols_drive();
+#    endif
 #    if (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
     /* The match values written above take effect a period late, so the row pin
      * selected now shows the values the PREVIOUS ISR wrote: gate it on those.
@@ -897,6 +964,9 @@ void sn32f2xx_init(void) {
     }
 #if (SN32F2XX_PWM_DIRECTION == COL2ROW)
     row_ports_init();
+#    if defined(SN32F2XX_PWM_MULTI_TIMER) && (SN32F2XX_PWM_CONTROL == HARDWARE_PWM)
+    fast_cols_init();
+#    endif
 #endif
 
     // Determine which PWM channels we need to control
