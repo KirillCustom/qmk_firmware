@@ -810,6 +810,24 @@ static eventflags_t uart_err_poll(void) {
     return f;
 }
 
+/* The drain's bulk read (ch582_task): one chnReadTimeout refills a local
+ * buffer, never with more than the drain's cap still allows. Returns 1 with
+ * a byte, 0 when the queue is empty. */
+typedef struct {
+    uint8_t b[64];
+    size_t  n, i;
+} rx_buf_t;
+
+static inline size_t rx_take(rx_buf_t *r, uint8_t *c, size_t cap) {
+    if (r->i >= r->n) {
+        r->i = 0;
+        r->n = chnReadTimeout(&CH582_SERIAL_DRIVER, r->b, cap > sizeof(r->b) ? sizeof(r->b) : cap, TIME_IMMEDIATE);
+        if (r->n == 0) return 0;
+    }
+    *c = r->b[r->i++];
+    return 1;
+}
+
 #ifdef AK820_DEV_HOOKS
 /* Raw HID over the 2.4G dongle, stage 2 (plans/RAWHID-24G-PLAN.md, revisions
  * 2-4). The rules are raw81.c's, host-tested by scripts/raw81_test.py; this is
@@ -900,24 +918,6 @@ static void r81_long_start(void) {
     chVTObjectInit(&r81_long_vt);
     chVTSet(&r81_long_vt, RAW81_LONG_UPDATE, r81_long_tick, NULL);
 #endif
-}
-
-/* The drain's bulk read (ch582_task): one chnReadTimeout refills a local
- * buffer, never with more than the drain's cap still allows. Returns 1 with
- * a byte, 0 when the queue is empty. */
-typedef struct {
-    uint8_t b[64];
-    size_t  n, i;
-} rx_buf_t;
-
-static inline size_t rx_take(rx_buf_t *r, uint8_t *c, size_t cap) {
-    if (r->i >= r->n) {
-        r->i = 0;
-        r->n = chnReadTimeout(&CH582_SERIAL_DRIVER, r->b, cap > sizeof(r->b) ? sizeof(r->b) : cap, TIME_IMMEDIATE);
-        if (r->n == 0) return 0;
-    }
-    *c = r->b[r->i++];
-    return 1;
 }
 
 typedef struct {
