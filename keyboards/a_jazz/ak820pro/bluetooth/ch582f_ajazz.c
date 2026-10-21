@@ -1889,16 +1889,13 @@ void ch582_task(void) {
 #ifdef AK820_DEV_HOOKS
     bool drained = false;   /* the drain reached an empty queue (not the 64-byte cap) */
 #endif
-#ifdef AK820_DEV_HOOKS
     /* One bulk read refills a local buffer, instead of a lock round trip
      * per byte: draining a 34-byte request byte by byte cost ~3.4 ms of the
      * pass (stage 2's follow-up). Never more than the cap still allows, so
-     * every byte taken is processed in this drain. */
+     * every byte taken is processed in this drain. Dev-only until 2026-10-21;
+     * every build since. */
     rx_buf_t rxb = {.n = 0, .i = 0};
-#    define RX_TAKE(cp) rx_take(&rxb, (cp), (size_t)(64u - bytes_processed))
-#else
-#    define RX_TAKE(cp) chnReadTimeout(&CH582_SERIAL_DRIVER, (cp), 1, TIME_IMMEDIATE)
-#endif
+#define RX_TAKE(cp) rx_take(&rxb, (cp), (size_t)(64u - bytes_processed))
 
     /* Drain the queue fully (capped to bound worst-case latency) so a connect
      * burst doesn't overflow the serial input buffer and shed bytes. */
