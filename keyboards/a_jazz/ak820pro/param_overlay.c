@@ -4,6 +4,9 @@
 #include "param_overlay.h"
 #include "ak820pro.h"
 #include "graphics/display.h"
+#ifdef RGB_MATRIX_ENABLE
+#    include "stock_fx.h"   /* stock_mode_name() */
+#endif
 
 /* ---- Hold-to-repeat for the adjust keys ----------------------------------
  *
@@ -160,7 +163,7 @@ static const char *rgb_mode_short(uint8_t mode) {
 #ifdef ENABLE_RGB_MATRIX_TYPING_HEATMAP
         case RGB_MATRIX_TYPING_HEATMAP:          return "Heatmap";
 #endif
-        default:                                 return NULL;
+        default:                                 return stock_mode_name(mode);   /* NULL if not stock */
     }
 }
 

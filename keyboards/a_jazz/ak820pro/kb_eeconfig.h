@@ -57,6 +57,10 @@ bool kb_eeconfig_get_power_mode(uint8_t *mode);
 void kb_eeconfig_set_power_mode(uint8_t mode);
 
 /* A change is waiting for its deferred flash write (a sleep's precondition). */
+/* Stock lighting flags (stock_fx.c): bit 0 = rainbow. */
+uint8_t kb_eeconfig_get_stockfx_flags(void);
+void    kb_eeconfig_set_stockfx_flags(uint8_t flags);
+
 bool kb_eeconfig_write_pending(void);
 #ifdef WDT_TEST_HOOKS
 /* Force a real, immediate flash program (for the reset-during-write test). */

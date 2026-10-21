@@ -27,8 +27,8 @@ static uint32_t rtc_proposals[2], rtc_stores[2];
 #define VIA_START ((uint32_t)(EECONFIG_SIZE))              /* VIA's magic, config, keymap, macros */
 
 /* kb_eeconfig.c's kb_config_t, byte by byte: bt, rtc lo, rtc hi, lcd, clock,
- * battery, power mode. A layout change there must change this table. */
-static const uint8_t kb_byte_field[] = {KBF_BT, KBF_RTC, KBF_RTC, KBF_LCD, KBF_CLOCK, KBF_BATT, KBF_PWR};
+ * battery, power mode, stock lighting flags. A layout change there must change this table. */
+static const uint8_t kb_byte_field[] = {KBF_BT, KBF_RTC, KBF_RTC, KBF_LCD, KBF_CLOCK, KBF_BATT, KBF_PWR, KBF_FX};
 _Static_assert(sizeof(kb_byte_field) == EECONFIG_KB_DATA_SIZE, "one field per kb datablock byte");
 
 /* Called by drivers/eeprom/eeprom_wear_leveling.c's eeprom_write_block() just

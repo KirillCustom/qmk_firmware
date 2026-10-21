@@ -44,6 +44,9 @@ enum flash_writer { FW_OTHER = 0, FW_KB, FW_RGB, FW_VIA, FW_COUNT };
 #define KBF_BATT  0x10u
 #define KBF_PWR   0x20u
 #define KBF_COUNT 6
+/* Stock lighting flags (byte 7). Past KBF_COUNT on purpose: health page 1 is
+ * full, so its sessions show only in FW_KB's total, not in a field counter. */
+#define KBF_FX    0x40u
 
 /* backing_store_pre_write_hook: a write session starts. */
 void flash_stats_session(void);

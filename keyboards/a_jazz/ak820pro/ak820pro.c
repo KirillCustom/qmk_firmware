@@ -24,6 +24,9 @@
 #include "consumer_mod.h"
 #include "param_overlay.h"
 #include "indicators.h"
+#ifdef RGB_MATRIX_ENABLE
+#    include "stock_fx.h"     /* the stock lighting modes: key events, Fn+\ */
+#endif
 #include "battery.h"
 #include "power.h"
 #include "sleep.h"         /* the deep sleep, and the dev builds' light-sleep bits */
@@ -344,6 +347,12 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
     if (record->event.pressed) key_press_count++;
 #endif
     param_repeat_process_record(keycode, record);   // arm/disarm hold-to-repeat
+#ifdef RGB_MATRIX_ENABLE
+    /* Every physical key, whatever it is bound to: the stock reactive modes
+     * (Single On/Off, Explode, Launch, Ripples) light the key itself. */
+    if (IS_KEYEVENT(record->event))
+        stock_fx_key(record->event.key.row, record->event.key.col, record->event.pressed);
+#endif
 
     if (!process_modified_consumer(keycode, record)) return false;
 
@@ -486,8 +495,12 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
 #ifdef RGB_MATRIX_ENABLE
         // VIA-assignable RGB-matrix controls (see ak820pro.h). One step per press.
         case RGBM_TOG:  if (record->event.pressed) rgb_matrix_toggle();         return false;
-        case RGBM_MOD:  if (record->event.pressed) rgb_matrix_step();           return false;
-        case RGBM_RMOD: if (record->event.pressed) rgb_matrix_step_reverse();   return false;
+        /* Next/previous walks the stock mode list, as Fn+\ does on the stock
+         * firmware -- not every compiled effect. Shift reverses, like QMK's own. */
+        case RM_NEXT:
+        case RGBM_MOD:  if (record->event.pressed) stock_mode_step(get_mods() & MOD_MASK_SHIFT); return false;
+        case RM_PREV:
+        case RGBM_RMOD: if (record->event.pressed) stock_mode_step(!(get_mods() & MOD_MASK_SHIFT)); return false;
         case RGBM_HUI:  if (record->event.pressed) rgb_matrix_increase_hue();   return false;
         case RGBM_HUD:  if (record->event.pressed) rgb_matrix_decrease_hue();   return false;
         case RGBM_SAI:  if (record->event.pressed) rgb_matrix_increase_sat();   return false;

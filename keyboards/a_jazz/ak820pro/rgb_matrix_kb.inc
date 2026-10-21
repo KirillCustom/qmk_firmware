@@ -1,3 +1,58 @@
+/* The stock firmware's lighting modes, in stock order (stock_fx.c holds the
+ * engine and the stock-number table). They come FIRST and stay contiguous and
+ * in sfx_id_t order: stock_fx.c maps the enum by offset and asserts it. */
+RGB_MATRIX_EFFECT(STOCK_STATIC)
+RGB_MATRIX_EFFECT(STOCK_SINGLE_ON)
+RGB_MATRIX_EFFECT(STOCK_SINGLE_OFF)
+RGB_MATRIX_EFFECT(STOCK_GLITTERING)
+RGB_MATRIX_EFFECT(STOCK_FALLING)
+RGB_MATRIX_EFFECT(STOCK_COLOURFUL)
+RGB_MATRIX_EFFECT(STOCK_BREATH)
+RGB_MATRIX_EFFECT(STOCK_SPECTRUM)
+RGB_MATRIX_EFFECT(STOCK_OUTWARD)
+RGB_MATRIX_EFFECT(STOCK_SCROLL_DOWN)
+RGB_MATRIX_EFFECT(STOCK_SCROLL_UP)
+RGB_MATRIX_EFFECT(STOCK_ROLL_RIGHT)
+RGB_MATRIX_EFFECT(STOCK_ROLL_LEFT)
+RGB_MATRIX_EFFECT(STOCK_ROTATING)
+RGB_MATRIX_EFFECT(STOCK_EXPLODE)
+RGB_MATRIX_EFFECT(STOCK_LAUNCH)
+RGB_MATRIX_EFFECT(STOCK_RIPPLES)
+RGB_MATRIX_EFFECT(STOCK_FLOW_RIGHT)
+RGB_MATRIX_EFFECT(STOCK_FLOW_LEFT)
+RGB_MATRIX_EFFECT(STOCK_PULSATING)
+RGB_MATRIX_EFFECT(STOCK_TILT_RIGHT)
+RGB_MATRIX_EFFECT(STOCK_TILT_LEFT)
+RGB_MATRIX_EFFECT(STOCK_SHUTTLE)
+
+#ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
+#    include "stock_fx.h"
+static bool STOCK_STATIC(effect_params_t* params) { return stock_fx_run(SFX_STATIC, params); }
+static bool STOCK_SINGLE_ON(effect_params_t* params) { return stock_fx_run(SFX_SINGLE_ON, params); }
+static bool STOCK_SINGLE_OFF(effect_params_t* params) { return stock_fx_run(SFX_SINGLE_OFF, params); }
+static bool STOCK_GLITTERING(effect_params_t* params) { return stock_fx_run(SFX_GLITTER, params); }
+static bool STOCK_FALLING(effect_params_t* params) { return stock_fx_run(SFX_FALLING, params); }
+static bool STOCK_COLOURFUL(effect_params_t* params) { return stock_fx_run(SFX_COLOURFUL, params); }
+static bool STOCK_BREATH(effect_params_t* params) { return stock_fx_run(SFX_BREATH, params); }
+static bool STOCK_SPECTRUM(effect_params_t* params) { return stock_fx_run(SFX_SPECTRUM, params); }
+static bool STOCK_OUTWARD(effect_params_t* params) { return stock_fx_run(SFX_OUTWARD, params); }
+static bool STOCK_SCROLL_DOWN(effect_params_t* params) { return stock_fx_run(SFX_SCROLL_DOWN, params); }
+static bool STOCK_SCROLL_UP(effect_params_t* params) { return stock_fx_run(SFX_SCROLL_UP, params); }
+static bool STOCK_ROLL_RIGHT(effect_params_t* params) { return stock_fx_run(SFX_ROLL_RIGHT, params); }
+static bool STOCK_ROLL_LEFT(effect_params_t* params) { return stock_fx_run(SFX_ROLL_LEFT, params); }
+static bool STOCK_ROTATING(effect_params_t* params) { return stock_fx_run(SFX_ROTATING, params); }
+static bool STOCK_EXPLODE(effect_params_t* params) { return stock_fx_run(SFX_EXPLODE, params); }
+static bool STOCK_LAUNCH(effect_params_t* params) { return stock_fx_run(SFX_LAUNCH, params); }
+static bool STOCK_RIPPLES(effect_params_t* params) { return stock_fx_run(SFX_RIPPLES, params); }
+static bool STOCK_FLOW_RIGHT(effect_params_t* params) { return stock_fx_run(SFX_FLOW_FWD, params); }
+static bool STOCK_FLOW_LEFT(effect_params_t* params) { return stock_fx_run(SFX_FLOW_BACK, params); }
+static bool STOCK_PULSATING(effect_params_t* params) { return stock_fx_run(SFX_PULSATING, params); }
+static bool STOCK_TILT_RIGHT(effect_params_t* params) { return stock_fx_run(SFX_TILT_RIGHT, params); }
+static bool STOCK_TILT_LEFT(effect_params_t* params) { return stock_fx_run(SFX_TILT_LEFT, params); }
+static bool STOCK_SHUTTLE(effect_params_t* params) { return stock_fx_run(SFX_SHUTTLE, params); }
+#endif // RGB_MATRIX_CUSTOM_EFFECT_IMPLS
+
+
 /* RAINFALL -- a decaying twinkle.
  *
  * QMK's stock PIXEL_RAIN does NOT fade: it sets one LED per interval (half the

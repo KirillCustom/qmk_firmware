@@ -19,12 +19,12 @@
 #include "graphics/display.h"   /* DISPLAY_CLOCK_MODE_COUNT */
 #include "power.h"              /* POWER_MODE_COUNT */
 
-/* Layout (7 bytes; EECONFIG_KB_DATA_SIZE in config.h must match).
+/* Layout (8 bytes; EECONFIG_KB_DATA_SIZE in config.h must match).
  * A fresh block holds ZEROS, so 0 must mean "unset" for every field added
  * after first ship -- hence the +1 encodings. Bytes 0..3 are the phase-4
  * block; byte 4 (clock format) was appended 2026-09-01, byte 5 (battery
- * level) 2026-09-28 and byte 6 (power mode) 2026-10-18, each with a version
- * bump. */
+ * level) 2026-09-28, byte 6 (power mode) 2026-10-18 and byte 7 (stock lighting
+ * flags) 2026-10-21, each with a version bump. */
 typedef struct __attribute__((packed)) {
     uint8_t bt_profile;        // last BT slot selected (CH582_PROFILE_BT_1..3)
     uint8_t rtc_period_lo;     // converged RTC divider period, LE; 0 = unset
@@ -33,8 +33,9 @@ typedef struct __attribute__((packed)) {
     uint8_t clock_mode_p1;     // clock band format (display_clock_mode) + 1; 0 = unset
     uint8_t batt_level_p1;     // battery level in 0.5 % steps + 1 (1..201); 0 = unset
     uint8_t power_mode_p1;     // power mode (power_mode_t) + 1; 0 = unset
+    uint8_t stockfx_flags;     // stock lighting: bit 0 = rainbow (stock colour 8); 0 = all off
 } kb_config_t;
-_Static_assert(sizeof(kb_config_t) == 7, "block layout is assign-only; do not grow casually");
+_Static_assert(sizeof(kb_config_t) == 8, "block layout is assign-only; do not grow casually");
 _Static_assert(sizeof(kb_config_t) == EECONFIG_KB_DATA_SIZE, "config.h EECONFIG_KB_DATA_SIZE must match the struct");
 
 static kb_config_t kb_config;
@@ -154,6 +155,16 @@ void kb_eeconfig_set_power_mode(uint8_t mode) {
     uint8_t p1 = (uint8_t)(mode + 1);
     if (kb_config.power_mode_p1 == p1) return;
     kb_config.power_mode_p1 = p1;
+    kb_mark_dirty();
+}
+
+uint8_t kb_eeconfig_get_stockfx_flags(void) {
+    return kb_config.stockfx_flags;
+}
+
+void kb_eeconfig_set_stockfx_flags(uint8_t flags) {
+    if (kb_config.stockfx_flags == flags) return;
+    kb_config.stockfx_flags = flags;
     kb_mark_dirty();
 }
 
