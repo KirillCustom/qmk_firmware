@@ -422,6 +422,11 @@ static uint16_t   pb_pos = 0;
  * cleared by anyone or expired (codex, the lease verify, P2 1 and P3 2).
  * Raw HID's readout keeps its own 20 s lease, apart from the text. */
 static bool       pb_titled = false;
+/* A host's word while the readout keeps the band (a new track's guess, its
+ * type 3, a seek): painted on the next housekeeping tick through the diff
+ * path, not at the band's next second, which left the old track's time
+ * under a new title for up to ~1 s (codex, the clock-flash review, P3 1). */
+static bool       pb_repaint = false;
 
 /* Raw HID pushes a position every poll, so 20 s of silence means the host is
  * gone. The lock-LED channel refreshes every 60 s and loses frames to the
@@ -430,6 +435,7 @@ static bool       pb_titled = false;
 static void set_playback(uint8_t state, uint16_t pos, uint16_t dur, uint32_t timeout_ms, bool titled) {
     uint32_t now = timer_read32();
     if (playback_set(&pb, state, pos, dur, timeout_ms, now)) clock_force_repaint = true;   // band changes owner: repaint it whole
+    else if (pb.active) pb_repaint = true;
     pb_pos    = playback_shown(&pb, now);
     pb_titled = titled && pb.active;
 }
@@ -1238,6 +1244,7 @@ void display_bootloader_splash(void) {
 
 void draw_clock(void) {
     clock_gen_painted = rtc_clock_generation();   /* a deep sleep's repaint hold reads it */
+    pb_repaint        = false;                    /* whichever path paints, this paint serves it */
     /* The readout's expiry and position as of now, before the band's owner is
      * chosen: a paint after a stretch without housekeeping (Fn+D's exit, an
      * animation's) would otherwise show the old second, or an expired
@@ -3387,10 +3394,11 @@ void display_housekeeping_task(void) {
         // Caps press shows up immediately.
         LOOP_SITE(LOOP_SITE_LOCKS, DPROBE(DP_LOCKS, draw_locks(false)));
 
-        /* A forced clock-band repaint (owner or format change) paints on this
-         * tick rather than up to a second later at the edge; the per-second
-         * pass below then diffs to nothing. */
-        if (clock_force_repaint || clock_relayout) LOOP_SITE(LOOP_SITE_CLOCKF, draw_clock());
+        /* A forced clock-band repaint (owner or format change, or a host's
+         * word on the readout) paints on this tick rather than up to a
+         * second later at the edge; the per-second pass below then diffs to
+         * nothing. */
+        if (clock_force_repaint || clock_relayout || pb_repaint) LOOP_SITE(LOOP_SITE_CLOCKF, draw_clock());
 
         // Clock + battery only need refreshing once per RTC second.
         static uint32_t last_shown_sec = UINT32_MAX;
