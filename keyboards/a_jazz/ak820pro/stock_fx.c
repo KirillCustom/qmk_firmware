@@ -494,7 +494,15 @@ void stock_fx_set_rainbow(bool on) {
 static bool run_frame(sfx_id_t id, effect_params_t *params) {
     if (params->iter == 0) {             /* the simulation moves once a frame, not once a chunk */
         bool rb = stock_fx_get_rainbow();
-        if (params->init || cur != id || cur_rainbow != rb) {
+        /* NOT params->init alone: power.c re-inits the running effect at every
+         * power stage change (rgb_matrix_reinit_effect, so the new value cap
+         * reaches every LED), and Power saver's typing cap moves at the first
+         * key after a pause -- restarting here wiped Single On's key under the
+         * finger. Every frame repaints every LED anyway. A real restart is a
+         * new mode, a new rainbow setting, or an effect that has not run for a
+         * second (another effect, the lights off, sleep). */
+        bool idle = timer_elapsed32(last_ms) > 1000;
+        if (cur != id || cur_rainbow != rb || idle) {
             cur         = id;
             cur_rainbow = rb;
             mode_init(id);
