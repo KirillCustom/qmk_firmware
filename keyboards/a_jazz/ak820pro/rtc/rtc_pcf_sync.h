@@ -43,6 +43,13 @@ static inline void pcf_sync_host_accepted(pcf_sync_t *s) {
     s->stale = true;
 }
 
+/* A newer request came since the running write was planned: it must re-plan
+ * (and, once its time is in, write again) before it may verify (codex, the
+ * rtc fixes' review, must-fix 1). */
+static inline bool pcf_sync_superseded(const pcf_sync_t *s) {
+    return s->run_gen != s->req_gen;
+}
+
 /* The writer leaves idle: what it writes answers this generation. */
 static inline void pcf_sync_run_start(pcf_sync_t *s) {
     s->run_gen = s->req_gen;
