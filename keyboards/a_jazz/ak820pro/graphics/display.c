@@ -224,6 +224,12 @@ static volatile bool bkl_wake_hold = false;
 /* rtc.c's deep-sleep recovery used the PCF this pass: no more display work in it
  * (the budget, plan section 4). Cleared at the pass's end. */
 static bool pass_deferred = false;
+/* The 1 Hz clock latch ran this pass (display_housekeeping_task). On the
+ * second edge's call that is before display_blit_pump(), and the clock's
+ * diff, the pump's first glyph and QMK's core together landed at 10-13 ms,
+ * once every second (history/ge10-per-second-20261022/). So the pump waits
+ * for the next pass, ~5 ms later. Cleared at the pass's end. */
+static bool clock_ticked_this_pass = false;
 
 /* ISR context, called from pwm_tick_cb() in ak820pro.c -- the CT16B3/GPTD4 20 kHz
  * tick, which ak820pro.c owns because the indicator LEDs share it. Full and zero
@@ -2947,6 +2953,7 @@ void display_blit_pump(void) {
     static uint32_t last_heal     = 0;
 
     if (pass_deferred) return;   /* a deep sleep's recovery used the PCF this pass */
+    if (clock_ticked_this_pass) return;   /* the second's clock diff ran this pass */
 
     /* A blit given up for good left pixels unpainted that the shadows claim
      * are there (codex review, 2026-09-23, finding 13). Repaint the whole
@@ -3334,6 +3341,7 @@ void display_wake_release(void) {
 void display_pass_end(void) {
     batt_painted_this_pass = false;
     pass_deferred          = false;
+    clock_ticked_this_pass = false;
 }
 
 void display_second_edge_task(void) {
@@ -3404,7 +3412,8 @@ void display_housekeeping_task(void) {
         static uint32_t last_shown_sec = UINT32_MAX;
         uint32_t sec = rtc_get_seconds();
         if (sec != last_shown_sec) {
-            last_shown_sec = sec;
+            last_shown_sec         = sec;
+            clock_ticked_this_pass = true;   /* the pump skips this pass (its declaration) */
             /* draw_clock() services the playback timer first, so it runs at
              * the same cadence the band already repaints at -- no extra DMA. */
             LOOP_SITE(LOOP_SITE_CLOCK, DPROBE(DP_CLOCK, draw_clock()));
