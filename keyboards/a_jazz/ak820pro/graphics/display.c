@@ -3413,7 +3413,7 @@ void display_housekeeping_task(void) {
         uint32_t sec = rtc_get_seconds();
         if (sec != last_shown_sec) {
             last_shown_sec         = sec;
-            clock_ticked_this_pass = true;   /* the pump skips this pass (its declaration) */
+            clock_ticked_this_pass = true;   /* a pump call later in this pass skips (its declaration) */
             /* draw_clock() services the playback timer first, so it runs at
              * the same cadence the band already repaints at -- no extra DMA. */
             LOOP_SITE(LOOP_SITE_CLOCK, DPROBE(DP_CLOCK, draw_clock()));

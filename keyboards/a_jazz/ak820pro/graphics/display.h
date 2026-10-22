@@ -24,7 +24,8 @@ bool display_splash_done(void);
 /* Paints one queued glyph per call. Must be driven from housekeeping_task_kb()
  * at MAIN-LOOP rate, not from the 10 Hz block -- see the glyph queue in
  * display.c for why that distinction is the whole fix. Does nothing on a pass
- * that used the PCF or ran the clock's second (display.c). */
+ * that has already used the PCF or run the clock's 1 Hz latch (display.c);
+ * a latch reached later in the pass, from the 10 Hz call, does not stop it. */
 void display_blit_pump(void);
 
 void display_set_power(bool on);
