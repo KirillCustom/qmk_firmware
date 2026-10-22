@@ -45,6 +45,9 @@ uint32_t rtc_get_seconds(void);
  * taken from the count can take a later credit back out
  * (rtc/rtc_payload.h's rtc_stamp_age_s). */
 uint32_t rtc_seconds_credit(void);
+/* The lock-LED clock's rate trim (rtc_set_time_ms with RTC_SETF_FRAME): the
+ * trims made since boot and the period the last one set (0: none yet). */
+void rtc_frame_trim_stats(uint16_t *trims, uint16_t *period);
 /* Live SN32 divider period (trimmed register value). */
 uint32_t rtc_get_period(void);
 
@@ -131,6 +134,7 @@ void rtc_status_fill(uint8_t page, uint8_t *out);
 #define RTC_MIN_FIRST_MS   20      /* closer than this to a boundary: label the next one */
 #define RTC_SETF_FORCE_STEP 0x01   /* (Phase 2: bypass the slew decision) */
 #define RTC_SETF_SKIP_PCF   0x02   /* do not queue the PCF write */
+#define RTC_SETF_FRAME      0x40   /* a lock-LED clock frame (type 4): closes the rate trim's window; never from a host's flags (rtc_ms_payload_valid) */
 #define RTC_SETF_INTERNAL   0x80   /* the board's own (the acquisition): not a host sync */
 enum { RTC_SET_STEPPED = 0, RTC_SET_SLEWING = 1, RTC_SET_RETRY = 0xFE, RTC_SET_REJECT = 0xFF };
 

@@ -24,9 +24,14 @@
  *   type 4, clock (10-20, "The wireless clock"): exactly raw HID's
  *     RTC_SET_TIME_MS body, yy mm dd wd hh mi ss ms_lo ms_hi flags bias_lo
  *     bias_hi, local wall time, meaning "at the frame's anchor, true time was
- *     this". rtc/rtc_payload.h's rules, plus flags 0 and bias 0x7FFF (no
- *     wireless sample feeds a learner). Not a display frame: the board's
- *     clock (ch582f_ajazz.c), never the text slot.
+ *     this". rtc/rtc_payload.h's rules, plus flags 0 or
+ *     LOCKCHAN_CLOCK_F_STEPPED and bias 0x7FFF (no wireless sample feeds a
+ *     learner). STEPPED (10-21): the host's wall clock stepped since its last
+ *     frame, so this one's offset is no measure of the board's rate and
+ *     closes no trim window (rtc.c's frame trim; the Mac session's note). A
+ *     board before it rejects such a frame, and the next plain one, 10 min
+ *     on, carries the step. Not a display frame: the board's clock
+ *     (ch582f_ajazz.c), never the text slot.
  *
  * Anything else is rejected whole. Pure logic, as lockchan.c is: the board
  * applies a parsed frame (ch582f_ajazz.c), the host tests parse it. */
@@ -62,7 +67,9 @@ uint16_t lockchan_media_position(const lockchan_media_t *m, uint32_t anchor_ms, 
 typedef struct {
     uint8_t  yy, mo, dd, wd, hh, mi, ss;
     uint16_t ms;
+    bool     stepped;   /* LOCKCHAN_CLOCK_F_STEPPED */
 } lockchan_clock_t;
+#define LOCKCHAN_CLOCK_F_STEPPED 0x01
 
 /* True, with *c filled, when the frame is a valid type 4. */
 bool lockchan_clock_parse(const lockchan_frame_t *f, lockchan_clock_t *c);

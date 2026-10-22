@@ -70,10 +70,10 @@ bool lockchan_clock_parse(const lockchan_frame_t *f, lockchan_clock_t *c) {
     const uint8_t *p = f->payload;
     if (f->type != LOCKCHAN_TYPE_CLOCK || f->len != LOCKCHAN_CLOCK_LEN) return false;
     if (!rtc_ms_payload_valid(p)) return false;
-    if (p[9] != 0 || p[10] != 0xFF || p[11] != 0x7F) return false;   /* flags 0, bias 0x7FFF */
+    if ((p[9] & ~LOCKCHAN_CLOCK_F_STEPPED) || p[10] != 0xFF || p[11] != 0x7F) return false;   /* flags 0 or STEPPED, bias 0x7FFF */
     *c = (lockchan_clock_t){
         .yy = p[0], .mo = p[1], .dd = p[2], .wd = p[3], .hh = p[4], .mi = p[5], .ss = p[6],
-        .ms = (uint16_t)(p[7] | (p[8] << 8)),
+        .ms = (uint16_t)(p[7] | (p[8] << 8)), .stepped = (p[9] & LOCKCHAN_CLOCK_F_STEPPED) != 0,
     };
     return true;
 }
@@ -117,7 +117,7 @@ bool lockchan_clock_advance(const lockchan_clock_t *c, uint32_t elapsed_ms, lock
         .yy = (uint8_t)(y - 2000), .mo = m, .dd = d,
         .wd = (uint8_t)((c->wd + carry) % 7),
         .hh = (uint8_t)(tod / 3600000), .mi = (uint8_t)(tod / 60000 % 60), .ss = (uint8_t)(tod / 1000 % 60),
-        .ms = (uint16_t)(tod % 1000),
+        .ms = (uint16_t)(tod % 1000), .stepped = c->stepped,
     };
     return true;
 }
