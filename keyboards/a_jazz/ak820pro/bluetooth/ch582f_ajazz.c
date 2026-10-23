@@ -752,8 +752,14 @@ void bluetooth_send_raw_hid(uint8_t *data, uint8_t length) {
  * idempotent (they carry STATE, not events), so a retransmit is always safe. */
 #define CH582_TXQ_LEN       24
 #define CH582_TX_FRAME_MAX  (TX_MAX_PAYLOAD + 2)
+/* 5 ms since 2026-10-23, as stock (re/out/decomp.c FUN_000006dc): the ACK
+ * comes 1.75-2.25 ms after the frame for nearly all of them, and the only
+ * frames that time out are the first after >= 2 s of line silence (the
+ * module seemingly asleep: 10 of 165 such at 10 ms, 0 of 517 others; 5 of 37
+ * at 5 ms, 0 of 844), which then reach the host ~8 ms late instead of ~21.
+ * No orphan ACK in either arm. */
 #ifndef CH582_TX_ACK_TIMEOUT_MS
-#    define CH582_TX_ACK_TIMEOUT_MS 10
+#    define CH582_TX_ACK_TIMEOUT_MS 5
 #endif
 #ifndef CH582_TX_MAX_RETRIES
 #    define CH582_TX_MAX_RETRIES 8
