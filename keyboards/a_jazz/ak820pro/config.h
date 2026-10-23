@@ -18,9 +18,7 @@
  * and the SN_PFPA pin-mux constants are datasheet-verified (docs/HARDWARE_PWM.md). */
 #define SN32F2XX_PWM_MULTI_TIMER
 #define SN32F2XX_DEEP_SLEEP        // the deep-sleep hooks, in every build (sleep.c, the ladder's last stage)
-#ifdef AK820_DEV_HOOKS
-#    define SN32F2XX_SLEEP_HOOKS   // scan-only, for light sleep's sizing bits (dev builds)
-#endif
+#define SN32F2XX_SLEEP_HOOKS       // scan-only, for light sleep (sleep.c; every build since 2026-10-23)
 #define SN32F2XX_PWM_COL_MAP { \
     {&PWMD1, 4}, {&PWMD1, 5}, {&PWMD1, 8}, {&PWMD2, 1}, {&PWMD2, 2}, {&PWMD2, 3}, \
     {&PWMD1, 6}, {&PWMD1, 7}, {&PWMD1, 9}, {&PWMD0, 1}, {&PWMD0, 0}, {&PWMD1, 10}, \

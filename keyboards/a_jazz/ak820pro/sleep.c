@@ -73,18 +73,27 @@ static bool usb_phy_onI(void) {
     return true;
 }
 
-/* ---- Light sleep (dev builds) -------------------------------------------------- */
-#ifdef AK820_DEV_HOOKS
-static uint8_t  ls_mask      = 0;
-static uint8_t  ls_yield_ms  = 2;
-static uint32_t ls_pmu_until = 0;   /* timer ms; bit 4 runs until then */
-static uint32_t ls_until     = 0;   /* timer ms; the whole mask ends then (codex: a probe that
-                                     * breaks USB must end by itself, or nothing can end it) */
-static uint8_t  ls_applied   = 0;
+/* ---- Light sleep ------------------------------------------------------------- */
+/* Every build since 2026-10-23: while the ladder holds the RGB dark, the row
+ * ISR scans only, the main loop sleeps 2 ms at each pass's end and the idle
+ * thread WFIs (mask 7, SLEEP_LS_DAILY). Sized on the bench 10-18 at -3.7 mA
+ * of ~27.7 dark, every press counted, no overrun at mask 7
+ * (history/sleep-sizing-20261018-wfi/). Dev builds can still set any mask
+ * for a while (op 14 sub 3); it falls back to mask 7 when that ends. */
+#define SLEEP_LS_DAILY (SLEEP_LS_SCAN | SLEEP_LS_YIELD | SLEEP_LS_WFI)
+static uint8_t ls_applied = 0;
 /* Read by the idle thread's hooks (chconf.h). */
 volatile bool     ak820_wfi       = false;
 volatile bool     ak820_pmu_sleep = false;
 volatile uint32_t ak820_wfi_count = 0;   /* WFIs the idle thread executed */
+
+#ifdef AK820_DEV_HOOKS
+static uint8_t  ls_mask      = SLEEP_LS_DAILY;
+static uint8_t  ls_yield_ms  = 2;
+static bool     ls_probe     = false;   /* a mask set by op 14, until ls_until */
+static uint32_t ls_pmu_until = 0;   /* timer ms; bit 4 runs until then */
+static uint32_t ls_until     = 0;   /* timer ms; the probe's mask ends then (codex: a probe that
+                                     * breaks USB must end by itself, or nothing can end it) */
 
 void sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s) {
     uint32_t now = timer_read32();
@@ -92,6 +101,7 @@ void sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_
     ls_yield_ms  = (yield_ms >= 1 && yield_ms <= 4) ? yield_ms : 2;   /* the RX queue wants a pass every ~5.5 ms */
     ls_pmu_until = now + (uint32_t)(pmu_s ? pmu_s : 60) * 1000u;
     ls_until     = now + (uint32_t)(ttl_s ? ttl_s : 240) * 1000u;
+    ls_probe     = true;
 }
 
 uint8_t sleep_light_yield(void) {
@@ -102,24 +112,39 @@ uint8_t sleep_light_mask(void) {
     return ls_mask;
 }
 
-uint8_t sleep_light_applied(void) {
-    return ls_applied;
-}
-
-static void light_task(void) {
-    if (ls_mask && (int32_t)(timer_read32() - ls_until) >= 0) ls_mask = 0;
+static uint8_t light_mask(void) {
+    if (ls_probe && (int32_t)(timer_read32() - ls_until) >= 0) {
+        ls_probe    = false;
+        ls_mask     = SLEEP_LS_DAILY;
+        ls_yield_ms = 2;
+    }
     uint8_t m = power_rgb_dark() ? ls_mask : 0;
     /* Bit 4 only inside its window, and never with a host's frames: the
      * transceiver turns itself off in PMU Sleep (manual p. 245). */
     if ((m & SLEEP_LS_PMU) && ((int32_t)(timer_read32() - ls_pmu_until) >= 0 || usb_bus_live()))
         m &= (uint8_t)~SLEEP_LS_PMU;
+    return m;
+}
+#else
+#    define ls_yield_ms 2
+uint8_t sleep_light_yield(void) { return ls_yield_ms; }
+uint8_t sleep_light_mask(void) { return SLEEP_LS_DAILY; }
+static uint8_t light_mask(void) { return power_rgb_dark() ? SLEEP_LS_DAILY : 0; }
+#endif
+
+uint8_t sleep_light_applied(void) {
+    return ls_applied;
+}
+
+static void light_task(void) {
+    uint8_t m = light_mask();
     /* Bit 3 only with the screen dark and no indicator lit. */
     if ((m & SLEEP_LS_TICK) && (display_backlight_effective() > 0 || indicators_any_lit()))
         m &= (uint8_t)~SLEEP_LS_TICK;
     if ((m ^ ls_applied) & SLEEP_LS_TICK) pwm_tick_run(!(m & SLEEP_LS_TICK));
-    /* Leaving PMU Sleep, or the plain-WFI probe (manual p. 79 documents
-     * mode 0 only as "disable": whether a WFI there touches USB is what bit 2
-     * finds out; codex): the transceiver bit back, a no-op if it is on. */
+    /* Leaving PMU Sleep, or the plain WFI (manual p. 79 documents mode 0
+     * only as "disable"; the bench saw USB stay up through it, 10-18): the
+     * transceiver bit back, a no-op if it is on. */
     if ((ls_applied & (SLEEP_LS_PMU | SLEEP_LS_WFI)) & ~m) {
         chSysLock();
         usb_phy_onI();
@@ -131,12 +156,6 @@ static void light_task(void) {
     ls_applied      = m;
     if (m & SLEEP_LS_YIELD) chThdSleepMilliseconds(ls_yield_ms);
 }
-#else
-void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s) { (void)mask; (void)yield_ms; (void)pmu_s; (void)ttl_s; }
-uint8_t sleep_light_yield(void) { return 0; }
-uint8_t sleep_light_mask(void) { return 0; }
-uint8_t sleep_light_applied(void) { return 0; }
-#endif
 
 /* ---- The deep sleep -----------------------------------------------------------
  * Plan section 2. The locked sequence is the experiment's, as codex cleared it
@@ -605,9 +624,7 @@ static bool deep_sleep(uint32_t cap_s, bool no_feed, uint32_t preset_s) {
     chSysUnlock();
 
     ch582_rx_resync();
-#ifdef AK820_DEV_HOOKS
     ls_applied &= (uint8_t)~SLEEP_LS_TICK;   /* the tick runs again; light_task stops it if wanted */
-#endif
     ds_secs   = counted;
     ds_strays = (uint16_t)(strays > 0xFFFFu ? 0xFFFFu : strays);
     ds_flags  = (uint8_t)((slept ? SLEEP_V_SLEPT : 0u) | (pll_ceiling ? SLEEP_V_PLL_CEIL : 0u));
@@ -936,8 +953,8 @@ void sleep_task(void) {
     recovery_task();
 #ifdef AK820_DEV_HOOKS
     arm_task();
-    light_task();
 #endif
+    light_task();
     /* The ladder's sleep, at the first pass where it can (the dev arm above
      * may have slept already this pass). The PCF's "before" read goes by the
      * bus arbiter: not admitted, the sleep waits a pass. */

@@ -17,8 +17,8 @@
     watchdog_record_halt((uint32_t)__builtin_return_address(0));            \
 } while (0)
 
-#ifdef AK820_DEV_HOOKS
-/* Sleep experiments (sleep.c, plans/SLEEP-PLAN.md). The board's idle hooks
+/* Light sleep (sleep.c; every build since 2026-10-23, the sizing build's
+ * experiments before it, plans/SLEEP-PLAN.md). The board's idle hooks
  * write PMU_CTRL = 4 (Sleep) on every idle entry, harmless while no WFI runs
  * (config.h keeps CORTEX_ENABLE_WFI_IDLE off); with sleep.c's WFI that would
  * enter Sleep, which turns the USB transceiver off (manual p. 245). So the
@@ -48,4 +48,3 @@
         }                                                                   \
         __enable_irq();                                                     \
     } while (0)
-#endif

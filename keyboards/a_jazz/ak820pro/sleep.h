@@ -64,9 +64,10 @@ enum { SLEEP_WAKE_NONE = 0, SLEEP_WAKE_KEY, SLEEP_WAKE_BACKSTOP, SLEEP_WAKE_STRA
 #define SLEEP_RC_USB      0x20u
 #define SLEEP_RC_DISPLAY  0x40u
 
-/* --- Dev builds: light sleep's sizing build (plans/SLEEP-PLAN.md) ----------
+/* --- Light sleep (plans/SLEEP-PLAN.md) --------------------------------------
  * A bitmask, each bit honoured only while the RGB is dark (power_rgb_dark())
- * and dropped the moment it lights: */
+ * and dropped the moment it lights. Every build runs SCAN | YIELD | WFI
+ * (mask 7) there; dev builds can set another mask for a while: */
 #define SLEEP_LS_SCAN  0x01u   /* the row ISR scan-only, one key row per ~0.86 ms */
 #define SLEEP_LS_YIELD 0x02u   /* sleep the main loop `yield_ms` (1-4) at each pass's end */
 #define SLEEP_LS_WFI   0x04u   /* WFI in the idle thread, PMU_CTRL 0 (USB stays up) */
@@ -75,8 +76,9 @@ enum { SLEEP_WAKE_NONE = 0, SLEEP_WAKE_KEY, SLEEP_WAKE_BACKSTOP, SLEEP_WAKE_STRA
                                 * the USB transceiver turns off, so it ends by itself */
 #define SLEEP_LS_ALL   0x1Fu
 
-/* The mask ends by itself after `ttl_s` (0: 240 s), PMU Sleep after `pmu_s`
- * (0: 60 s): a probe that cuts USB must end with nothing sent to end it. */
+/* Dev builds: the mask ends by itself after `ttl_s` (0: 240 s), back to mask
+ * 7, PMU Sleep after `pmu_s` (0: 60 s): a probe that cuts USB must end with
+ * nothing sent to end it. */
 void    sleep_light_set(uint8_t mask, uint8_t yield_ms, uint8_t pmu_s, uint8_t ttl_s);
 uint8_t sleep_light_yield(void);
 uint8_t sleep_light_mask(void);
