@@ -770,6 +770,45 @@ static bool             tx_in_flight = false;
 static uint16_t         tx_sent_time = 0;
 static uint8_t          tx_retries   = 0;
 
+/* The line's quiet gap, as stock keeps it (V1.13, re/out/decomp.c: the frame
+ * scheduler FUN_0000be74 sends only while a flag is up, every send -- its
+ * `61 0D 0A` ACK included -- drops it, and only the tick raises it again 2
+ * ticks of 0.5 ms after the UART's TEMT: 0.5-1 ms of silence after each
+ * frame). Stock also splits its own received frames on a ~1 ms pause, so the
+ * module most likely does the same: our ACK with the next frame straight
+ * behind it reads as one frame with a bad sum. So nothing goes out until the
+ * last write's bytes (87 us each at 115200) plus CH582_TX_GAP_US have passed;
+ * an ACK owed meanwhile waits in ack_pending and goes first, as stock's does.
+ * The ms guard covers the 16-bit system time's ~349 ms wrap. Dev builds can
+ * switch it off (op 32) for the A/B. */
+#ifndef CH582_TX_GAP_US
+#    define CH582_TX_GAP_US 1000u
+#endif
+#define CH582_BYTE_US 87u
+volatile bool    ch582_tx_gap_on = true;
+static systime_t tx_line_at;
+static uint16_t  tx_line_ms, tx_line_need_us;
+static bool      tx_line_armed;
+static bool      ack_pending;
+uint32_t         ch582_gap_holds, ch582_ack_deferred;   /* passes a write waited; ACKs that waited */
+
+static void tx_line_mark(uint8_t len) {
+    tx_line_at      = chVTGetSystemTimeX();
+    tx_line_ms      = timer_read();
+    tx_line_need_us = (uint16_t)(len * CH582_BYTE_US + CH582_TX_GAP_US);
+    tx_line_armed   = true;
+}
+
+static bool tx_line_quiet(void) {
+    if (!ch582_tx_gap_on || !tx_line_armed) return true;
+    if (timer_elapsed(tx_line_ms) > 5u || chVTTimeElapsedSinceX(tx_line_at) >= TIME_US2I(tx_line_need_us)) {
+        tx_line_armed = false;
+        return true;
+    }
+    ch582_gap_holds++;
+    return false;
+}
+
 /* TX health counters. NOTE (corrected 2026-09-01, audit BW-5): an earlier
  * comment here claimed the RX FIFO was disabled and a byte had to be serviced
  * within ~87 us. WRONG -- the SN32 serial LLD ALWAYS enables the 16550-style
@@ -1298,7 +1337,18 @@ static inline void tx_link_change_check(const ch582_tx_frame_t *f) {
 /* Advance the queue: send the head frame, time out and retransmit, or give up.
  * Called every ch582_task() (main-loop cadence, sub-ms), so the 10 ms timeout is
  * honoured with fine granularity. */
+#if CH582_ACK_FRAMES
+static void ch582_write_ack(void);
+#endif
 static void ch582_tx_pump(void) {
+#if CH582_ACK_FRAMES
+    /* An ACK owed to the module goes before any frame of ours, as stock's. */
+    if (ack_pending) {
+        if (!tx_line_quiet()) return;
+        ch582_write_ack();
+        return;
+    }
+#endif
 #ifdef AK820_DEV_HOOKS
     /* After a response, hold the A-frames until its ACK, if any, has had time
      * to come (r81 above): one arriving now must not pop an A1. Nothing is in
@@ -1326,6 +1376,7 @@ static void ch582_tx_pump(void) {
             ack_defer_overrun++;
         }
 #endif
+        if (!tx_line_quiet()) return;   /* judged again next pass, counted once when it goes */
         tx_stat_timeout++;
         if (++tx_retries > CH582_TX_MAX_RETRIES) {                          /* give up, move on */
             tx_stat_giveup++;
@@ -1334,6 +1385,7 @@ static void ch582_tx_pump(void) {
         }
         tx_link_change_check(&tx_q[tx_head]);
         sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len); /* retransmit */
+        tx_line_mark(tx_q[tx_head].len);
         tx_sent_time = timer_read();
         return;
     }
@@ -1362,8 +1414,10 @@ static void ch582_tx_pump(void) {
         start_held = false;
     }
 #endif
+    if (!tx_line_quiet()) return;
     tx_link_change_check(&tx_q[tx_head]);
     sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len);
+    tx_line_mark(tx_q[tx_head].len);
     tx_sent_time = timer_read();
 #ifdef CONSOLE_ENABLE
     tx_first_sent_st = chVTGetSystemTimeX();
@@ -1548,9 +1602,22 @@ void ch582_send_command(uint8_t cmd, const uint8_t *params, uint8_t param_len) {
 #if CH582_ACK_FRAMES
 /* Raw 61 0D 0A ACK token (not a checksummed command, so it bypasses
  * ch582_send_command). Stock replies with this to 5B/5C frames. */
-static void ch582_send_ack(void) {
+static void ch582_write_ack(void) {
     static const uint8_t ack[3] = {0x61, 0x0D, 0x0A};
     sdWrite(&CH582_SERIAL_DRIVER, ack, sizeof(ack));
+    tx_line_mark(sizeof(ack));
+    ack_pending = false;
+}
+
+/* From the RX parser: at once if the line is quiet, else the pump sends it
+ * first when it is. */
+static void ch582_send_ack(void) {
+    if (tx_line_quiet()) {
+        ch582_write_ack();
+    } else {
+        if (!ack_pending) ch582_ack_deferred++;
+        ack_pending = true;
+    }
 }
 #endif
 

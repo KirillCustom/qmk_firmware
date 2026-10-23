@@ -670,6 +670,8 @@ enum {
      * op 25: the interrupt-service-gap monitor (od_fill_mon): [4] 0 reads,
      *       1 on, 2 off, 3 zeroes; then replies as 0.
      * op 26: its ring, page arg (0..7).
+     * op 32: the CH582F line's quiet gap after each write, on/off and its
+     *       counters (see the case).
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -1306,6 +1308,21 @@ static void health_command(uint8_t *data, uint8_t length) {
                     extern volatile bool sn32f2xx_fast_cols;
                     if (data[4] == 1) sn32f2xx_fast_cols = data[5] != 0;
                     data[4] = sn32f2xx_fast_cols;
+                    break;
+                }
+                case 32: {
+                    /* The CH582F line's quiet gap (ch582f_ajazz.c, stock's): data[4]
+                     * = 1 sets it from data[5], 2 zeroes its counters, 0 only
+                     * reads. Replies [4] on, u32 LE [5] the passes a write waited
+                     * for it, [9] the ACKs that waited. */
+                    extern volatile bool ch582_tx_gap_on;
+                    extern uint32_t      ch582_gap_holds, ch582_ack_deferred;
+                    if (length < 32 || data[4] > 2) { data[0] = RTC_UNHANDLED; break; }
+                    if (data[4] == 1) ch582_tx_gap_on = data[5] != 0;
+                    if (data[4] == 2) ch582_gap_holds = ch582_ack_deferred = 0;
+                    data[4] = ch582_tx_gap_on;
+                    memcpy(&data[5], &ch582_gap_holds, 4);
+                    memcpy(&data[9], &ch582_ack_deferred, 4);
                     break;
                 }
                 default: data[0] = RTC_UNHANDLED; break;
