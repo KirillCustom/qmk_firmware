@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* The lock-LED channel's receiver. The wire format is specified in
  * plans/LOCK-LED-CHANNEL-PLAN.md ("The wire format"); scripts/lockchan.py is
- * the reference encoder, and scripts/lockchan_test.py checks the two agree. */
+ * the reference encoder, and scripts/lockchan_test.py checks the two agree.
+ * The idea, lock lights toggled as data bits, is quill4gen7's, proved in the
+ * notify branch of github.com/quill4gen7/ak820-pro; this is a separate
+ * implementation. */
 #include "lockchan.h"
 #include <string.h>
 
