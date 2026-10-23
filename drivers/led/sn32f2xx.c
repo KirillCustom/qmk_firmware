@@ -146,8 +146,13 @@ static const uint32_t periodticks                               = RGB_MATRIX_MAX
 static const uint32_t freq                                      = SN32F2XX_RGB_PWM_FREQ;
 static const pin_t    led_row_pins[SN32F2XX_RGB_MATRIX_ROWS_HW] = SN32F2XX_RGB_MATRIX_ROW_PINS; // We expect a R,B,G order here
 static const pin_t    led_col_pins[SN32F2XX_RGB_MATRIX_COLS]    = SN32F2XX_RGB_MATRIX_COL_PINS;
-static RGB            led_state[SN32F2XX_LED_COUNT];     // led state buffer
-static RGB            led_state_buf[SN32F2XX_LED_COUNT]; // led state buffer
+/* Stored as words so sn32f2xx_flush() can copy them a word at a time under its
+ * lock (RGB is packed, so an RGB array cannot be cast to words itself). */
+#define LED_STATE_WORDS ((sizeof(RGB) * SN32F2XX_LED_COUNT + 3u) / 4u)
+static uint32_t       led_state_w[LED_STATE_WORDS];     // led state buffer
+static uint32_t       led_state_buf_w[LED_STATE_WORDS]; // led state buffer
+#define led_state     ((RGB *)led_state_w)
+#define led_state_buf ((RGB *)led_state_buf_w)
 bool                  led_state_buf_update_required = false;
 #ifdef UNDERGLOW_RBG // handle underglow with flipped B,G channels
 static const uint8_t underglow_leds[UNDERGLOW_LEDS] = UNDERGLOW_IDX;
@@ -962,12 +967,17 @@ void sn32f2xx_flush(void) {
          * single row briefly lit in a wrong colour. Visible while sweeping hue,
          * where consecutive frames differ enough to notice.
          *
-         * Masking for the duration is cheap and bounded: ~10-16 us for a
-         * 82-128 LED copy at 48 MHz, against a 53 us row-ISR period at
-         * 18,750/s. Worst case the current row is armed a few microseconds
-         * late, which is invisible; a torn frame is not. */
+         * The copy goes a word at a time. newlib-nano's memcpy is a byte
+         * loop, and under the lock its 243 bytes (81 LEDs) masked interrupts
+         * for up to 78 us -- close to one byte on the CH582F's UART2
+         * (86.7 us at 115200, a receiver ~1 byte deep), so a frame flush
+         * landing on an incoming byte lost it as a hardware overrun: 23 per
+         * 1073 radio frames on Single On with a ~1000 passes/s main loop, 0 on
+         * Static, whose frames never change. Words: 11.5 us, 0 per 716
+         * (measured 2026-10-23, the longest copy timed in core clocks). */
         chSysLock();
-        memcpy(led_state, led_state_buf, sizeof(RGB) * SN32F2XX_LED_COUNT);
+        /* volatile: else GCC turns the loop back into a (byte) memcpy call */
+        for (size_t i = 0; i < LED_STATE_WORDS; i++) ((volatile uint32_t *)led_state_w)[i] = led_state_buf_w[i];
         led_state_buf_update_required = false;
         chSysUnlock();
         uint32_t sr = 0, sg = 0, sb = 0;
