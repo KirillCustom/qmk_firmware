@@ -113,7 +113,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 const uint16_t PROGMEM encoder_map[][NUM_ENCODERS][NUM_DIRECTIONS] = {
     [WINBASE] = {ENCODER_CCW_CW(KC_VOLD, KC_VOLU) },
     [WINFN]   = {ENCODER_CCW_CW(KC_VOLD, KC_VOLU) },
-    [MACBASE] = {ENCODER_CCW_CW(LSA(KC_VOLD), LSA(KC_VOLU)) },
+    [MACBASE] = {ENCODER_CCW_CW(KC_VOLD, KC_VOLU) },
     [MACFN]   = {ENCODER_CCW_CW(KC_VOLD, KC_VOLU) }
 };
 #endif
