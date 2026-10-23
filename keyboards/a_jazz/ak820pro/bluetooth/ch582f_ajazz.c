@@ -792,11 +792,38 @@ static bool      tx_line_armed;
 static bool      ack_pending;
 uint32_t         ch582_gap_holds, ch582_ack_deferred;   /* passes a write waited; ACKs that waited */
 
+static inline void line_note(void);   /* below, with the silence histograms */
+
 static void tx_line_mark(uint8_t len) {
+    line_note();
     tx_line_at      = chVTGetSystemTimeX();
     tx_line_ms      = timer_read();
     tx_line_need_us = (uint16_t)(len * CH582_BYTE_US + CH582_TX_GAP_US);
     tx_line_armed   = true;
+}
+
+/* The ACK wait, run-time (dev op 33 sets it for the A/B; stock waits ~5 ms,
+ * 2 retries, re/out/decomp.c FUN_000006dc). */
+volatile uint8_t ch582_ack_timeout_ms = CH582_TX_ACK_TIMEOUT_MS;
+
+/* How long the line was silent before each new frame (no byte either way),
+ * log2 bins of ms: 0 <1, 1 1-2, 2 2-4 ... 11 1-2 s, 12 >=2 s. All frames,
+ * and those whose first send timed out: does the module lose the first frame
+ * after a quiet spell? Plus ACKs that came after a retransmit (a late ACK for
+ * the first send would pop the frame behind it: 61 0D 0A carries no number). */
+#define LINE_BINS 13u
+static uint32_t line_active_ms;   /* timer_read32 of the last byte either way */
+static uint8_t  tx_idle_bin;      /* the in-flight frame's */
+uint16_t        ch582_idle_all[LINE_BINS], ch582_idle_to[LINE_BINS];
+uint32_t        ch582_acks_after_retry, ch582_acks_orphan;
+
+static inline void line_note(void) { line_active_ms = timer_read32(); }
+
+static uint8_t line_idle_bin(void) {
+    uint32_t ms = timer_read32() - line_active_ms;
+    uint8_t  b  = 0;
+    while (ms && b < LINE_BINS - 1u) { ms >>= 1; b++; }
+    return b;
 }
 
 static bool tx_line_quiet(void) {
@@ -866,6 +893,7 @@ static inline size_t rx_take(rx_buf_t *r, uint8_t *c, size_t cap) {
         r->i = 0;
         r->n = chnReadTimeout(&CH582_SERIAL_DRIVER, r->b, cap > sizeof(r->b) ? sizeof(r->b) : cap, TIME_IMMEDIATE);
         if (r->n == 0) return 0;
+        line_note();
     }
     *c = r->b[r->i++];
     return 1;
@@ -1364,7 +1392,7 @@ static void ch582_tx_pump(void) {
     }
 #endif
     if (tx_in_flight) {
-        if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS) return;   /* still waiting for ACK */
+        if (timer_elapsed(tx_sent_time) < ch582_ack_timeout_ms) return;   /* still waiting for ACK */
 #ifdef AK820_DEV_HOOKS
         /* R4-1: no timeout judgment while this frame's ACK may still be
          * unread (bytes left queued at the drain's cap, or a fresh `61` /
@@ -1372,11 +1400,12 @@ static void ch582_tx_pump(void) {
          * that releases the NEXT frame unsent. Capped, and counted past it,
          * so keyboard TX is never starved. */
         if (rx_defer) {
-            if (timer_elapsed(tx_sent_time) < CH582_TX_ACK_TIMEOUT_MS + RAW81_DEFER_CAP_MS) return;
+            if (timer_elapsed(tx_sent_time) < ch582_ack_timeout_ms + RAW81_DEFER_CAP_MS) return;
             ack_defer_overrun++;
         }
 #endif
         if (!tx_line_quiet()) return;   /* judged again next pass, counted once when it goes */
+        if (tx_retries == 0 && ch582_idle_to[tx_idle_bin] != 0xFFFFu) ch582_idle_to[tx_idle_bin]++;
         tx_stat_timeout++;
         if (++tx_retries > CH582_TX_MAX_RETRIES) {                          /* give up, move on */
             tx_stat_giveup++;
@@ -1415,6 +1444,8 @@ static void ch582_tx_pump(void) {
     }
 #endif
     if (!tx_line_quiet()) return;
+    tx_idle_bin = line_idle_bin();   /* before this write moves the mark */
+    if (ch582_idle_all[tx_idle_bin] != 0xFFFFu) ch582_idle_all[tx_idle_bin]++;
     tx_link_change_check(&tx_q[tx_head]);
     sdWrite(&CH582_SERIAL_DRIVER, tx_q[tx_head].data, tx_q[tx_head].len);
     tx_line_mark(tx_q[tx_head].len);
@@ -1511,6 +1542,8 @@ bool ch582_send_releases(void) {
  * the first proof the module's UART is up (see module_alive). */
 static void ch582_tx_ack(void) {
     module_alive = true;
+    if (!tx_in_flight) ch582_acks_orphan++;
+    else if (tx_retries) ch582_acks_after_retry++;
 #ifdef CONSOLE_ENABLE
     if (tx_in_flight) {
         uint32_t us = TIME_I2US(chVTTimeElapsedSinceX(tx_first_sent_st));

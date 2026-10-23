@@ -672,6 +672,8 @@ enum {
      * op 26: its ring, page arg (0..7).
      * op 32: the CH582F line's quiet gap after each write, on/off and its
      *       counters (see the case).
+     * op 33: the ACK wait, and the line's silence before each frame
+     *       (see the case).
      * Anything else is unhandled. */
     HC_DEVHOOK     = 0x76,
 #endif
@@ -1323,6 +1325,38 @@ static void health_command(uint8_t *data, uint8_t length) {
                     data[4] = ch582_tx_gap_on;
                     memcpy(&data[5], &ch582_gap_holds, 4);
                     memcpy(&data[9], &ch582_ack_deferred, 4);
+                    break;
+                }
+                case 33: {
+                    /* The ACK wait and the line's silence before each frame
+                     * (ch582f_ajazz.c): data[4] = 1 sets the wait from data[5] ms
+                     * (2..20), 2 zeroes the figures, 0 only reads; data[6] the page.
+                     * Replies [4] the wait; page 0 all frames, 1 those whose first
+                     * send timed out: 13 log2-ms bins, u16 LE at [6..31]; page 2:
+                     * u32 [6] ACKs after a retransmit, [10] ACKs with nothing in
+                     * flight. */
+                    extern volatile uint8_t ch582_ack_timeout_ms;
+                    extern uint16_t         ch582_idle_all[13], ch582_idle_to[13];
+                    extern uint32_t         ch582_acks_after_retry, ch582_acks_orphan;
+                    uint8_t sub = data[4], page = data[6];
+                    if (length < 32 || sub > 2 || page > 2 || (sub == 1 && (data[5] < 2 || data[5] > 20))) {
+                        data[0] = RTC_UNHANDLED;
+                        break;
+                    }
+                    if (sub == 1) ch582_ack_timeout_ms = data[5];
+                    if (sub == 2) {
+                        memset(ch582_idle_all, 0, sizeof ch582_idle_all);
+                        memset(ch582_idle_to, 0, sizeof ch582_idle_to);
+                        ch582_acks_after_retry = ch582_acks_orphan = 0;
+                    }
+                    memset(&data[4], 0, 28);
+                    data[4] = ch582_ack_timeout_ms;
+                    data[5] = page;
+                    if (page < 2) memcpy(&data[6], page ? ch582_idle_to : ch582_idle_all, 26);
+                    else {
+                        memcpy(&data[6], &ch582_acks_after_retry, 4);
+                        memcpy(&data[10], &ch582_acks_orphan, 4);
+                    }
                     break;
                 }
                 default: data[0] = RTC_UNHANDLED; break;
