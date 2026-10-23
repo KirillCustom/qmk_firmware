@@ -1393,15 +1393,13 @@ uint8_t rtc_set_time_ms(const rtc_time_t *t, uint16_t ms, uint8_t flags, int16_t
     if (reg < 500 || reg > 0xFFFFFu) return RTC_SET_REJECT;   /* first-period range, not the steady one */
 
     struct tm tm_s;
-    if (localtime_r(&sec, &tm_s) == NULL) return RTC_SET_REJECT;
-    RTCDateTime dt_s;
-    rtcConvertStructTmToDateTime(&tm_s, 0, &dt_s);
+    if (localtime_r(&sec, &tm_s) == NULL) return RTC_SET_REJECT;   /* the range check rtcSetTime's round trip made */
 
     if (!(flags & RTC_SETF_INTERNAL)) host_correction_accepted(!(flags & RTC_SETF_SKIP_PCF));
     ft_accepted(P_nom, P_set, ft_sg, false);   /* the window opens after the clock_gen below */
     chSysLock();
     slew_state = SLEW_IDLE;             /* a step supersedes any running slew */
-    rtcSetTime(&RTCD1, &dt_s);          /* software seconds */
+    rtc_lld_set_secondsI(&RTCD1, sec);  /* software seconds: the epoch as is, no mktime() under the lock */
     clock_gen++;
     reload_pending = true;              /* ISR restores P_nom at the next match */
     rtc_lld_set_period(&RTCD1, reg);    /* resets SECCNT: next SECIF in R ms */
@@ -2022,12 +2020,11 @@ static void wake_coarse(void)
                 time_t e = mktime(&tm);
                 if (e == (time_t)-1) break;
                 e += gain;
-                if (localtime_r(&e, &tm) == NULL) break;
-                rtcConvertStructTmToDateTime(&tm, 0, &dt);
+                if (localtime_r(&e, &tm) == NULL) break;   /* the range check rtcSetTime's round trip made */
                 bool done = false;
                 chSysLock();
                 if (rtc_seconds_count == s0) {      /* no tick since the read */
-                    rtcSetTime(&RTCD1, &dt);         /* nests: the LLD saves the status */
+                    rtc_lld_set_secondsI(&RTCD1, e); /* the epoch as is, no mktime() under the lock */
                     done = true;
                 }
                 chSysUnlock();
